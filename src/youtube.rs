@@ -106,11 +106,24 @@ impl YouTubeBackend {
         })
     }
 
-    /// Find an existing reusable stream, or create one if there is none.
+    /// Find an existing stream key to reuse, or create one if there is none.
     ///
     /// Returns the stream plus a note explaining which branch was taken, because
     /// "your stream key has not changed" is genuinely useful reassurance and
     /// "here is your new key, put it in OBS" is genuinely important news.
+    ///
+    /// ## Why reusability is not checked here
+    ///
+    /// A stream's `contentDetails.isReusable` flag would be the obvious thing to
+    /// filter on — but `liveStreams.list` does not support the `contentDetails`
+    /// part at all. Its documented part values are only `id`, `snippet`, `cdn`
+    /// and `status`, so that flag is simply not obtainable from a list call, and
+    /// asking for it makes the request invalid.
+    ///
+    /// So the candidate is chosen without it and the *bind* is what validates
+    /// the choice: binding a non-reusable stream fails, and `go_live` falls back
+    /// to creating a fresh stream at that point. That is strictly better than
+    /// guessing, because it is the API itself that decides.
     async fn obtain_stream(&self) -> Result<(LiveStreamResource, String)> {
         if self.reuse_stream {
             let existing = self.list_streams().await?;
@@ -132,18 +145,13 @@ impl YouTubeBackend {
                     None => bail!(
                         "the stream id {:?} set as `stream_id` in your config does not exist on \
                          your channel. Remove that setting to let the application pick one \
-                         automatically, or run `msm youtube streams` to list the real ids.",
+                         automatically.",
                         self.preferred_stream_id
                     ),
                 }
             }
 
-            // Otherwise take the first reusable one. A non-reusable stream is
-            // tied to a single past broadcast and cannot be bound again.
-            if let Some(stream) = existing
-                .into_iter()
-                .find(|s| s.content_details.as_ref().is_some_and(|d| d.is_reusable))
-            {
+            if let Some(stream) = existing.into_iter().next() {
                 let note = format!(
                     "Reused your existing stream key \"{}\" — OBS and Aitum need no changes.",
                     stream.snippet.title
@@ -162,9 +170,12 @@ impl YouTubeBackend {
     }
 
     /// List the streams already configured on the channel.
+    ///
+    /// `contentDetails` is deliberately absent from the requested parts: it is
+    /// not a supported part value for this method, and including it makes the
+    /// whole request invalid.
     async fn list_streams(&self) -> Result<Vec<LiveStreamResource>> {
-        let url =
-            format!("{API}/liveStreams?part=id,snippet,cdn,contentDetails&mine=true&maxResults=50");
+        let url = format!("{API}/liveStreams?part=id,snippet,cdn,status&mine=true&maxResults=50");
         let response = self
             .request(reqwest::Method::GET, &url)
             .send()
@@ -292,9 +303,11 @@ impl YouTubeBackend {
 
         // Only send a language if it looks like a valid code; an invalid one
         // makes YouTube reject the entire update.
+        // Only `defaultLanguage` is writable here. `defaultAudioLanguage` is a
+        // read-only property of the videos resource, so setting it would be
+        // silently dropped rather than applied.
         if plan.language.chars().count() == 2 {
             snippet["defaultLanguage"] = serde_json::Value::String(plan.language.clone());
-            snippet["defaultAudioLanguage"] = serde_json::Value::String(plan.language.clone());
         }
 
         let body = serde_json::json!({ "id": video_id, "snippet": snippet });
@@ -367,7 +380,27 @@ impl Backend for YouTubeBackend {
             let broadcast = self.create_broadcast(plan).await?;
 
             // 3. Join them.
-            self.bind(&broadcast.id, &stream.id).await?;
+            //
+            // If the reused stream cannot be bound — the usual reason is that it
+            // belongs to a single past broadcast and is not reusable — fall back
+            // to a fresh one rather than failing the go-live outright. The user
+            // is told, because a new key is something they must act on.
+            let stream = match self.bind(&broadcast.id, &stream.id).await {
+                Ok(()) => stream,
+                Err(err) => {
+                    tracing::warn!(?err, "could not bind the reused stream; creating a new one");
+                    notes.pop();
+                    let fresh = self.create_stream().await?;
+                    self.bind(&broadcast.id, &fresh.id).await?;
+                    notes.push(
+                        "Your existing stream key could not be reused, so a new one was \
+                         created. Copy the stream key below into OBS (or Aitum) — it will \
+                         be reused from now on."
+                            .to_string(),
+                    );
+                    fresh
+                }
+            };
 
             // 4. Tags, category and language, which step 2 could not set.
             //
@@ -375,7 +408,7 @@ impl Backend for YouTubeBackend {
             // is bound, so you can still stream. Losing the tags is a far better
             // outcome than aborting a go-live that has already half happened.
             match self.apply_video_metadata(&broadcast.id, plan).await {
-                Ok(()) => notes.push("Tags, category and language applied.".to_string()),
+                Ok(()) => notes.push("Tags, category and title language applied.".to_string()),
                 Err(err) => notes.push(format!(
                     "Warning: the broadcast is ready, but its tags and category could not be \
                      set ({err}). You can still stream; fix them in YouTube Studio if it matters."
@@ -482,6 +515,10 @@ impl Backend for YouTubeBackend {
 
             Ok(stats)
         })
+    }
+
+    fn set_access_token(&mut self, token: String) {
+        self.access_token = token;
     }
 
     fn search_categories<'a>(&'a mut self, query: &'a str) -> BoxFuture<'a, Result<Vec<Category>>> {
@@ -598,23 +635,12 @@ struct LiveStreamResource {
     snippet: StreamSnippet,
     #[serde(default)]
     cdn: Option<Cdn>,
-    #[serde(default, rename = "contentDetails")]
-    content_details: Option<StreamContentDetails>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct StreamSnippet {
     #[serde(default)]
     title: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StreamContentDetails {
-    /// Only a reusable stream can be bound to more than one broadcast, which is
-    /// what keeps the stream key stable across sessions.
-    #[serde(default)]
-    is_reusable: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -726,19 +752,19 @@ mod tests {
     }
 
     #[test]
-    fn a_reusable_stream_is_recognised_from_its_json() {
+    fn a_stream_listing_yields_its_ingestion_details() {
+        // Note the absence of `contentDetails`: `liveStreams.list` does not
+        // support that part, so the reuse decision cannot depend on it.
         let json = r#"{
             "id": "abc",
             "snippet": {"title": "My key"},
             "cdn": {"ingestionInfo": {
                 "ingestionAddress": "rtmp://a.rtmp.youtube.com/live2",
                 "streamName": "xxxx-yyyy"
-            }},
-            "contentDetails": {"isReusable": true}
+            }}
         }"#;
         let stream: LiveStreamResource = serde_json::from_str(json).unwrap();
 
-        assert!(stream.content_details.unwrap().is_reusable);
         let ingestion = stream.cdn.unwrap().ingestion_info.unwrap();
         // `streamName` really is the stream key, despite the name.
         assert_eq!(ingestion.stream_name, "xxxx-yyyy");
@@ -749,13 +775,21 @@ mod tests {
     }
 
     #[test]
-    fn a_stream_without_content_details_is_not_treated_as_reusable() {
+    fn a_stream_with_no_cdn_block_still_parses() {
         let json = r#"{"id":"a","snippet":{"title":"t"}}"#;
         let stream: LiveStreamResource = serde_json::from_str(json).unwrap();
-        assert!(stream
-            .content_details
-            .as_ref()
-            .is_none_or(|d| !d.is_reusable));
+        assert!(stream.cdn.is_none());
+    }
+
+    #[test]
+    fn the_stream_listing_url_does_not_request_an_unsupported_part() {
+        // `liveStreams.list` supports only id, snippet, cdn and status. Asking
+        // for contentDetails makes the whole request invalid, which would send
+        // every go-live down the "create a new key" path and hand the user a
+        // different stream key on every single broadcast.
+        let url = format!("{API}/liveStreams?part=id,snippet,cdn,status&mine=true&maxResults=50");
+        assert!(!url.contains("contentDetails"));
+        assert!(url.contains("part=id,snippet,cdn,status"));
     }
 
     #[test]

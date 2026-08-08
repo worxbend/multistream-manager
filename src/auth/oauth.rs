@@ -28,6 +28,15 @@
 //! * **`state`** — a random string we send out and require back. If a page tries
 //!   to trick your browser into hitting our callback with someone else's code,
 //!   the state will not match and we reject it.
+//! ## Why the listener binds two addresses
+//!
+//! The redirect URI names the host `localhost`, but that name resolves to
+//! `127.0.0.1` on some machines and to `::1` on others — and on most modern
+//! Linux systems it resolves to `::1` first. Binding only IPv4 means the
+//! browser's first connection attempt is refused and the login limps along on a
+//! retry, or fails outright. So [`Loopback`] binds both families and accepts
+//! from whichever the browser actually reaches.
+//!
 //! * **PKCE** — we invent a random `code_verifier`, send only its SHA-256 hash
 //!   up front, then reveal the original when redeeming the code. Anyone who
 //!   intercepts the code cannot use it without the verifier. Google effectively
@@ -85,8 +94,6 @@ impl ProviderSpec {
                 "moderator:read:followers",
                 // Subscriber total on the stats panel.
                 "channel:read:subscriptions",
-                // Identifies which account the token belongs to.
-                "user:read:email",
             ],
             extra_auth_params: vec![],
             use_pkce: true,
@@ -115,6 +122,44 @@ impl ProviderSpec {
                 ("prompt", "consent"),
             ],
             use_pkce: true,
+        }
+    }
+}
+
+/// A callback listener bound to every loopback address available.
+///
+/// See the module documentation for why one address is not enough.
+struct Loopback {
+    v4: TcpListener,
+    /// `None` when the host has no IPv6 loopback, which is unusual but legal.
+    v6: Option<TcpListener>,
+}
+
+impl Loopback {
+    /// Bind both loopback families on `port`.
+    ///
+    /// IPv4 is required — if that fails the port is genuinely unusable. IPv6 is
+    /// best-effort, since a host without it is perfectly functional.
+    async fn bind(port: u16) -> std::io::Result<Self> {
+        let v4 = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+        let v6 = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port))
+            .await
+            .map_err(|err| {
+                tracing::debug!(?err, "no IPv6 loopback available; IPv4 only");
+                err
+            })
+            .ok();
+        Ok(Self { v4, v6 })
+    }
+
+    /// Accept the next connection on whichever family it arrives over.
+    async fn accept(&self) -> std::io::Result<tokio::net::TcpStream> {
+        match &self.v6 {
+            None => self.v4.accept().await.map(|(socket, _)| socket),
+            Some(v6) => tokio::select! {
+                result = self.v4.accept() => result.map(|(socket, _)| socket),
+                result = v6.accept() => result.map(|(socket, _)| socket),
+            },
         }
     }
 }
@@ -183,17 +228,15 @@ pub async fn interactive_login(
 
     // Bind the listener *before* opening the browser. Doing it the other way
     // round is a race: a fast browser can hit the callback before we are ready.
-    let listener = TcpListener::bind(("127.0.0.1", port))
-        .await
-        .with_context(|| {
-            format!(
-                "could not listen on 127.0.0.1:{port} for the login redirect.\n\
+    let listener = Loopback::bind(port).await.with_context(|| {
+        format!(
+            "could not listen on 127.0.0.1:{port} for the login redirect.\n\
                  Something else is probably using that port. Change `oauth_port`\n\
                  in your config (and update the redirect URI in the {} developer\n\
                  console to match) or stop the other program.",
-                spec.name
-            )
-        })?;
+            spec.name
+        )
+    })?;
 
     let auth_url = build_auth_url(spec, client_id, redirect_uri, &state, pkce.as_ref());
 
@@ -274,9 +317,9 @@ fn build_auth_url(
 ///
 /// Browsers open speculative connections and request `/favicon.ico`, so this
 /// cannot simply take the first connection and assume it is the callback.
-async fn wait_for_callback(listener: &TcpListener, expected_state: &str) -> Result<String> {
+async fn wait_for_callback(listener: &Loopback, expected_state: &str) -> Result<String> {
     loop {
-        let (mut socket, _peer) = listener
+        let mut socket = listener
             .accept()
             .await
             .context("accepting the OAuth redirect connection")?;
@@ -382,11 +425,21 @@ fn parse_query(path: &str) -> HashMap<String, String> {
         let Some((key, value)) = pair.split_once('=') else {
             continue;
         };
-        let key = urlencoding::decode(key).unwrap_or_default().into_owned();
-        let value = urlencoding::decode(value).unwrap_or_default().into_owned();
+        // A redirect query string is form-urlencoded, where `+` means a space.
+        // Twitch plus-encodes its error descriptions, so decoding percent
+        // escapes alone would surface "The+user+denied+you+access".
+        let key = decode_form_component(key);
+        let value = decode_form_component(value);
         map.insert(key, value);
     }
     map
+}
+
+/// Percent-decode one form-urlencoded component, treating `+` as a space.
+fn decode_form_component(raw: &str) -> String {
+    urlencoding::decode(&raw.replace('+', "%20"))
+        .unwrap_or_default()
+        .into_owned()
 }
 
 /// Write a small styled HTML page back to the browser so the user gets a clear
@@ -596,6 +649,19 @@ mod tests {
         let params = parse_query("/callback?code=a%20b&state=x%2By");
         assert_eq!(params.get("code").unwrap(), "a b");
         assert_eq!(params.get("state").unwrap(), "x+y");
+    }
+
+    #[test]
+    fn query_parsing_treats_plus_as_a_space() {
+        // Twitch sends `error_description=The+user+denied+you+access`; decoding
+        // percent escapes alone would leave the plus signs in the message.
+        let params = parse_query(
+            "/callback?error=access_denied&error_description=The+user+denied+you+access",
+        );
+        assert_eq!(
+            params.get("error_description").unwrap(),
+            "The user denied you access"
+        );
     }
 
     #[test]

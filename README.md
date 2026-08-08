@@ -175,6 +175,10 @@ their sites; the tool never sees your password. When you approve, the browser
 redirects to `localhost:8017`, where `msm` is listening, and it picks up the
 authorisation from there.
 
+> `localhost` resolves to `127.0.0.1` on some systems and to `::1` on others, so
+> the callback listener binds both. You do not need to care which your machine
+> uses.
+
 Google will show a scary "Google hasn't verified this app" warning. That is
 expected: the "app" is the one *you* created five minutes ago, and verification
 only matters for apps distributed to strangers. Click **Advanced → Go to … (unsafe)**.
@@ -368,7 +372,7 @@ Some consequences:
 
 ## Troubleshooting
 
-**`could not listen on 127.0.0.1:8017`**
+**`could not listen on ... :8017`**
 Something else has that port. Change `oauth_port` in the config *and* update the
 redirect URI in both developer consoles to match.
 
@@ -390,6 +394,12 @@ config. The quota resets at midnight Pacific time.
 **YouTube: `liveStreamingNotEnabled`**
 Enable live streaming at <https://youtube.com/features>. First-time activation
 takes 24 hours.
+
+**My YouTube stream key changed**
+It should not. `msm` reuses the reusable stream already on your channel. If it
+could not — because the key it found belongs to a single past broadcast and
+cannot be bound again — it creates a new one and says so explicitly in the
+YouTube panel. Pin the key you want with `stream_id` in the config to be certain.
 
 **One platform worked and the other failed**
 That is intentional. Nothing is rolled back, so the platform that succeeded is
@@ -424,7 +434,7 @@ tail -f "$(msm paths | awk '/^Log:/{print $2}')"   # in another
 ## Development
 
 ```bash
-cargo test          # 137 tests, no network access required
+cargo test          # 147 tests, no network access required
 cargo clippy --all-targets
 cargo fmt
 ```

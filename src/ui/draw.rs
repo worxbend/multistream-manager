@@ -299,12 +299,19 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &App) {
             ));
         }
 
-        // Flag an unresolved Twitch category, which is the single most common
-        // reason a submit gets rejected.
-        if *field == Field::TwitchCategory
-            && app.twitch_category.is_none()
-            && app.is_selected(Platform::Twitch)
-        {
+        // Flag an unresolved category, which is the single most common reason a
+        // submit gets rejected. Both platforms need this: each stores a resolved
+        // id that is cleared as soon as the user types over the name.
+        let unresolved = match field {
+            Field::TwitchCategory => {
+                app.twitch_category.is_none() && app.is_selected(Platform::Twitch)
+            }
+            Field::YouTubeCategory => {
+                app.youtube_category_id.is_empty() && app.is_selected(Platform::YouTube)
+            }
+            _ => false,
+        };
+        if unresolved {
             spans.push(Span::styled(
                 "   not selected — press Enter to pick",
                 Style::new().fg(theme::WARN),
@@ -436,14 +443,27 @@ fn draw_popup(frame: &mut Frame, area: Rect, app: &App) {
 
     // Centre it horizontally and put it in the lower half, where it will not
     // cover the field being edited.
+    //
+    // The height is clamped to the area as well as to the item count: on a short
+    // terminal an unclamped popup is drawn past the bottom of the frame, and
+    // ratatui panics with "index outside of buffer" rather than clipping. The
+    // final `intersection` is a belt-and-braces guarantee that the rectangle can
+    // never escape its container whatever the arithmetic above produces.
     let width = area.width.saturating_sub(8).min(70);
-    let height = (popup.items.len() as u16 + 2).clamp(3, 12);
+    let height = (popup.items.len() as u16 + 2).clamp(3, 12).min(area.height);
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + area.height.saturating_sub(height + 2),
         width,
         height,
-    };
+    }
+    .intersection(area);
+
+    if rect.height < 3 || rect.width < 4 {
+        // Too little room to draw anything legible; showing nothing beats
+        // showing a broken box.
+        return;
+    }
 
     frame.render_widget(Clear, rect);
 
@@ -885,6 +905,29 @@ mod tests {
             app.screen = screen;
             app.selected = Platform::ALL.to_vec();
             let _ = render(&app, 20, 6);
+        }
+    }
+
+    #[test]
+    fn a_popup_on_a_short_terminal_does_not_panic() {
+        // Regression: the popup height was clamped to the item count but not to
+        // the frame, so on a short terminal it was drawn past the bottom and
+        // ratatui panicked with "index outside of buffer", killing the app.
+        // 80x14 with a full language list is the reported reproduction.
+        let mut app = app();
+        app.screen = Screen::Form;
+        app.selected = Platform::ALL.to_vec();
+        app.popup = Some(super::super::app::Popup {
+            field: Field::Language,
+            items: (0..30)
+                .map(|i| (format!("c{i}"), format!("Language number {i}")))
+                .collect(),
+            cursor: 0,
+            loading: false,
+        });
+
+        for height in 3..=20 {
+            let _ = render(&app, 80, height);
         }
     }
 

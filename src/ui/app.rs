@@ -159,6 +159,16 @@ impl App {
     }
 
     /// The currently focused form field.
+    /// Change screen, clearing anything that belongs to the old one.
+    ///
+    /// Routing every transition through here is what stops a stale autocomplete
+    /// popup from reappearing over the form later and silently swallowing
+    /// Up/Down/Enter/Tab with no visible cause.
+    fn go_to(&mut self, screen: Screen) {
+        self.screen = screen;
+        self.popup = None;
+    }
+
     pub fn field(&self) -> Field {
         Field::ORDER[self.field_cursor.min(Field::ORDER.len() - 1)]
     }
@@ -171,6 +181,62 @@ impl App {
     /// Whether a platform is ticked.
     pub fn is_selected(&self, platform: Platform) -> bool {
         self.selected.contains(&platform)
+    }
+
+    /// Whether a field is shown on the form at all.
+    ///
+    /// Fields belonging to a platform you are not streaming to are hidden, since
+    /// filling them in would have no effect. Navigation has to agree with the
+    /// renderer about this: if the cursor could land on a hidden field, the focus
+    /// marker would vanish from the form and typing would go nowhere visible,
+    /// which reads as the interface having frozen.
+    pub fn is_field_visible(&self, field: Field) -> bool {
+        match field {
+            Field::Description
+            | Field::YouTubeCategory
+            | Field::Privacy
+            | Field::MadeForKids
+            | Field::AutoStart
+            | Field::AutoStop => self.is_selected(Platform::YouTube),
+            Field::TwitchCategory => self.is_selected(Platform::Twitch),
+            // Title, Tags and Language apply to every platform.
+            Field::Title | Field::Tags | Field::Language => true,
+        }
+    }
+
+    /// Move the field cursor `step` places, skipping anything hidden.
+    ///
+    /// Falls back to leaving the cursor where it is if nothing is visible, which
+    /// cannot happen while at least one platform is selected but keeps the loop
+    /// bounded regardless.
+    fn move_field(&mut self, forward: bool) {
+        let count = Field::ORDER.len();
+        for offset in 1..=count {
+            let index = if forward {
+                (self.field_cursor + offset) % count
+            } else {
+                (self.field_cursor + count - (offset % count)) % count
+            };
+            if self.is_field_visible(Field::ORDER[index]) {
+                self.field_cursor = index;
+                return;
+            }
+        }
+    }
+
+    /// Put the cursor on the first visible field. Used after the set of selected
+    /// platforms changes, so the cursor cannot be stranded on a field that has
+    /// just been hidden.
+    pub fn ensure_field_visible(&mut self) {
+        if self.is_field_visible(self.field()) {
+            return;
+        }
+        if let Some(index) = Field::ORDER
+            .iter()
+            .position(|field| self.is_field_visible(*field))
+        {
+            self.field_cursor = index;
+        }
     }
 
     /// Assemble the plan from the current form state.
@@ -242,7 +308,10 @@ impl App {
                 }
                 // Move on to the form only if at least one platform worked.
                 if self.accounts.values().any(|r| r.is_ok()) {
-                    self.screen = Screen::Form;
+                    self.go_to(Screen::Form);
+                    // The set of connected platforms decides which fields exist,
+                    // so make sure the cursor is not left on a hidden one.
+                    self.ensure_field_visible();
                 }
             }
 
@@ -274,7 +343,7 @@ impl App {
                 let any_ok = results.iter().any(|r| r.succeeded());
                 self.results = results;
                 if any_ok {
-                    self.screen = Screen::Dashboard;
+                    self.go_to(Screen::Dashboard);
                     self.toast =
                         Some("Ready — start streaming in OBS whenever you like.".to_string());
                 } else {
@@ -392,18 +461,14 @@ impl App {
 
         match key.code {
             KeyCode::Esc => {
-                self.screen = Screen::Platforms;
+                self.go_to(Screen::Platforms);
             }
             KeyCode::Tab | KeyCode::Down => {
-                self.field_cursor = (self.field_cursor + 1) % Field::ORDER.len();
+                self.move_field(true);
                 self.popup = None;
             }
             KeyCode::BackTab | KeyCode::Up => {
-                self.field_cursor = if self.field_cursor == 0 {
-                    Field::ORDER.len() - 1
-                } else {
-                    self.field_cursor - 1
-                };
+                self.move_field(false);
                 self.popup = None;
             }
             KeyCode::Enter => {
@@ -414,7 +479,7 @@ impl App {
                         self.open_popup(field)
                     }
                     _ => {
-                        self.field_cursor = (self.field_cursor + 1) % Field::ORDER.len();
+                        self.move_field(true);
                         vec![]
                     }
                 };
@@ -514,7 +579,14 @@ impl App {
                 self.twitch_category = None;
                 self.open_popup(field)
             }
-            Field::YouTubeCategory | Field::Language => self.open_popup(field),
+            Field::YouTubeCategory => {
+                // Same reasoning as Twitch above: once the text no longer matches
+                // the resolved id, the id must not survive, or the form would
+                // submit a category different from the one on screen.
+                self.youtube_category_id.clear();
+                self.open_popup(field)
+            }
+            Field::Language => self.open_popup(field),
             _ => vec![],
         }
     }
@@ -648,6 +720,8 @@ impl App {
 
     /// Validate and submit, or explain why it cannot be submitted.
     fn submit(&mut self) -> Vec<Command> {
+        self.popup = None;
+
         if self.busy {
             self.toast = Some("Already working — hold on.".to_string());
             return vec![];
@@ -721,7 +795,8 @@ impl App {
             KeyCode::Char('e') | KeyCode::Esc => {
                 // Back to the form to change something and resubmit. On YouTube
                 // this creates a *new* broadcast rather than editing the old one.
-                self.screen = Screen::Form;
+                self.go_to(Screen::Form);
+                self.ensure_field_visible();
                 self.reveal_key = false;
             }
             KeyCode::Up => self.log_scroll = self.log_scroll.saturating_sub(1),
@@ -883,6 +958,63 @@ mod tests {
         let mut app = app_on_form();
         app.handle_key(key(KeyCode::BackTab));
         assert_eq!(app.field(), *Field::ORDER.last().unwrap());
+    }
+
+    #[test]
+    fn tab_skips_fields_that_are_hidden_for_the_unselected_platform() {
+        // Regression: field_cursor walked all 10 entries of Field::ORDER while
+        // the renderer hid the YouTube-only ones, so Tab could park the cursor
+        // on an invisible field. The focus marker vanished and typing went
+        // nowhere visible, which reads as the form having frozen.
+        let mut app = app_on_form();
+        app.selected = vec![Platform::Twitch];
+        app.ensure_field_visible();
+        assert_eq!(app.field(), Field::Title);
+
+        // Description is YouTube-only, so Tab must step straight over it.
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.field(), Field::Tags);
+
+        // Every field reachable by tabbing must be one the renderer draws.
+        for _ in 0..40 {
+            app.handle_key(key(KeyCode::Tab));
+            assert!(
+                app.is_field_visible(app.field()),
+                "Tab landed on hidden field {:?}",
+                app.field()
+            );
+        }
+    }
+
+    #[test]
+    fn shift_tab_also_skips_hidden_fields() {
+        let mut app = app_on_form();
+        app.selected = vec![Platform::Twitch];
+        app.ensure_field_visible();
+
+        for _ in 0..40 {
+            app.handle_key(key(KeyCode::BackTab));
+            assert!(
+                app.is_field_visible(app.field()),
+                "Shift+Tab landed on hidden field {:?}",
+                app.field()
+            );
+        }
+    }
+
+    #[test]
+    fn the_cursor_is_rescued_when_its_field_becomes_hidden() {
+        let mut app = app_on_form();
+        app.field_cursor = Field::ORDER
+            .iter()
+            .position(|f| *f == Field::Privacy)
+            .unwrap();
+
+        // Untick YouTube: the Privacy field the cursor sits on is now hidden.
+        app.selected = vec![Platform::Twitch];
+        app.ensure_field_visible();
+
+        assert!(app.is_field_visible(app.field()));
     }
 
     #[test]
@@ -1267,6 +1399,80 @@ mod tests {
             (Platform::YouTube, Ok("My Channel".into())),
         ]));
         assert_eq!(app.screen, Screen::Form);
+    }
+
+    #[test]
+    fn a_popup_does_not_survive_a_screen_change() {
+        // Regression: a popup left open at submit time reappeared over the form
+        // after returning from the dashboard, silently swallowing Up, Down,
+        // Enter and Tab with nothing on screen to explain why.
+        let mut app = app_on_form();
+        app.selected = vec![Platform::YouTube];
+        app.inputs.get_mut(&Field::Title).unwrap().set("A title");
+        app.field_cursor = Field::ORDER
+            .iter()
+            .position(|f| *f == Field::Language)
+            .unwrap();
+        type_and_collect(&mut app, "pol");
+        assert!(app.popup.is_some());
+
+        app.submit();
+        assert!(app.popup.is_none(), "submitting must close the popup");
+
+        app.handle_event(Event::WentLive(vec![PlatformResult {
+            platform: Platform::YouTube,
+            outcome: Ok(GoLiveOutcome::default()),
+        }]));
+        assert!(app.popup.is_none());
+
+        // Back to the form to edit and resubmit.
+        app.handle_key(key(KeyCode::Char('e')));
+        assert_eq!(app.screen, Screen::Form);
+        assert!(app.popup.is_none(), "the stale popup must not come back");
+    }
+
+    #[test]
+    fn typing_over_a_chosen_youtube_category_clears_its_id() {
+        // Regression: only the Twitch field invalidated its resolved id, so the
+        // form could submit a YouTube category different from the one shown.
+        let mut app = app_on_form();
+        app.youtube_category_id = "20".into();
+        app.field_cursor = Field::ORDER
+            .iter()
+            .position(|f| *f == Field::YouTubeCategory)
+            .unwrap();
+
+        app.handle_key(key(KeyCode::Char('x')));
+
+        assert!(
+            app.youtube_category_id.is_empty(),
+            "the stale category id must not survive an edit"
+        );
+        // And an unresolved category blocks submission rather than sending the
+        // wrong one.
+        assert!(!app.plan().is_submittable(&[Platform::YouTube]));
+    }
+
+    #[test]
+    fn a_failed_category_search_clears_the_loading_spinner() {
+        // The worker answers a failed search with an empty result set, so the
+        // popup shows "no matches" instead of "searching…" forever.
+        let mut app = app_on_form();
+        app.field_cursor = Field::ORDER
+            .iter()
+            .position(|f| *f == Field::TwitchCategory)
+            .unwrap();
+        type_and_collect(&mut app, "ch");
+        assert!(app.popup.as_ref().unwrap().loading);
+
+        let generation = app.search_generation;
+        app.handle_event(Event::Categories {
+            platform: Platform::Twitch,
+            results: vec![],
+            generation,
+        });
+
+        assert!(!app.popup.as_ref().unwrap().loading);
     }
 
     #[test]

@@ -143,6 +143,14 @@ pub async fn run(
                             level: LogLevel::Warning,
                             message: format!("Category search failed: {err:#}"),
                         });
+                        // Answer the request even though it failed, so the popup
+                        // stops saying "searching…" and shows "no matches"
+                        // instead of hanging on a spinner that never resolves.
+                        let _ = events.send(Event::Categories {
+                            platform,
+                            results: Vec::new(),
+                            generation,
+                        });
                     }
                 }
             }
