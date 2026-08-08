@@ -42,7 +42,9 @@ use chrono::{Duration, Utc};
 use serde::Deserialize;
 
 use crate::backend::{Backend, BoxFuture};
-use crate::model::{Category, GoLiveOutcome, PlatformStats, Stat, StreamPlan};
+use crate::model::{
+    Category, GoLiveOutcome, IngestEndpoint, PlatformStats, StaleBroadcast, Stat, StreamPlan,
+};
 
 const API: &str = "https://www.googleapis.com/youtube/v3";
 
@@ -327,6 +329,64 @@ impl YouTubeBackend {
         Ok(())
     }
 
+    /// List every broadcast on the channel, following YouTube's pagination.
+    ///
+    /// `liveBroadcasts.list` returns 50 at a time. A channel that has been
+    /// resubmitted to over many sessions can hold more than one page of the
+    /// leftovers `msm cleanup` is looking for, and a command that offered to
+    /// tidy up but only ever saw the first fifty would be worse than useless.
+    ///
+    /// The page count is capped because each page costs API quota, and because
+    /// an unexpected reply that kept handing back a page token would otherwise
+    /// spin here forever.
+    async fn list_broadcasts(&self) -> Result<Vec<LiveBroadcastResource>> {
+        const MAX_PAGES: usize = 10;
+
+        let mut out = Vec::new();
+        let mut page_token: Option<String> = None;
+
+        for _ in 0..MAX_PAGES {
+            let mut url =
+                format!("{API}/liveBroadcasts?part=id,snippet,status&mine=true&maxResults=50");
+            if let Some(token) = &page_token {
+                url.push_str(&format!("&pageToken={}", urlencoding::encode(token)));
+            }
+
+            let response = self
+                .request(reqwest::Method::GET, &url)
+                .send()
+                .await
+                .context("listing your YouTube broadcasts")?;
+            let response = check(response, "listing your YouTube broadcasts").await?;
+
+            let body: ListResponse<LiveBroadcastResource> = response
+                .json()
+                .await
+                .context("parsing your YouTube broadcast list")?;
+
+            out.extend(body.items);
+
+            match body.next_page_token {
+                Some(token) if !token.is_empty() => page_token = Some(token),
+                _ => break,
+            }
+        }
+
+        Ok(out)
+    }
+
+    /// Delete one broadcast from the channel.
+    async fn delete_broadcast_by_id(&self, id: &str) -> Result<()> {
+        let url = format!("{API}/liveBroadcasts?id={}", urlencoding::encode(id));
+        let response = self
+            .request(reqwest::Method::DELETE, &url)
+            .send()
+            .await
+            .context("deleting a YouTube broadcast")?;
+        check(response, "deleting a YouTube broadcast").await?;
+        Ok(())
+    }
+
     /// List YouTube's video categories, used for the category autocomplete.
     ///
     /// Unlike Twitch there is no search endpoint — the list is short and fixed,
@@ -534,6 +594,86 @@ impl Backend for YouTubeBackend {
                 .collect())
         })
     }
+
+    fn list_ingest_endpoints(&mut self) -> BoxFuture<'_, Result<Vec<IngestEndpoint>>> {
+        Box::pin(async move {
+            Ok(self
+                .list_streams()
+                .await?
+                .into_iter()
+                .map(|stream| IngestEndpoint {
+                    id: stream.id,
+                    title: stream.snippet.title,
+                    key: stream
+                        .cdn
+                        .and_then(|cdn| cdn.ingestion_info)
+                        .map(|info| info.stream_name),
+                })
+                .collect())
+        })
+    }
+
+    fn list_stale_broadcasts(&mut self) -> BoxFuture<'_, Result<Vec<StaleBroadcast>>> {
+        Box::pin(async move {
+            Ok(self
+                .list_broadcasts()
+                .await?
+                .into_iter()
+                .filter(never_went_live)
+                .map(|broadcast| {
+                    let snippet = broadcast.snippet.unwrap_or_default();
+                    StaleBroadcast {
+                        id: broadcast.id,
+                        title: snippet.title,
+                        scheduled_start: snippet.scheduled_start_time,
+                        status: broadcast
+                            .status
+                            .map(|status| status.life_cycle_status)
+                            .unwrap_or_default(),
+                    }
+                })
+                .collect())
+        })
+    }
+
+    fn delete_broadcast<'a>(&'a mut self, id: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move { self.delete_broadcast_by_id(id).await })
+    }
+}
+
+/// Whether a listed broadcast was created but never received a video feed.
+///
+/// This is the safety rule behind `msm cleanup`, so it is deliberately
+/// pessimistic: deleting a broadcast that holds a recording somebody wanted
+/// cannot be undone, whereas leaving an orphan behind costs nothing but clutter.
+///
+/// A broadcast qualifies only when **both** of these hold:
+///
+/// * YouTube reports neither an `actualStartTime` nor an `actualEndTime`. Either
+///   of those means a feed reached it at some point, so it has been live.
+/// * Its `lifeCycleStatus` is still one of the two pre-live values, `created`
+///   (made but not yet bound and validated) or `ready` (bound and waiting).
+///   Everything else — `live`, `testing`, `complete`, `revoked` and the
+///   transitional `liveStarting` / `testStarting` — is left alone.
+///
+/// A broadcast whose `snippet` or `status` is missing from the reply is treated
+/// as *not* stale, because there is then no evidence either way and the safe
+/// answer is to keep it.
+fn never_went_live(broadcast: &LiveBroadcastResource) -> bool {
+    let Some(snippet) = broadcast.snippet.as_ref() else {
+        return false;
+    };
+    if snippet.actual_start_time.is_some() || snippet.actual_end_time.is_some() {
+        return false;
+    }
+
+    let status = broadcast
+        .status
+        .as_ref()
+        .map(|status| status.life_cycle_status.as_str())
+        .unwrap_or("");
+
+    matches!(status, "created" | "ready")
 }
 
 /// Turn a non-2xx response into an error carrying Google's own explanation.
@@ -602,9 +742,14 @@ async fn check(response: reqwest::Response, action: &str) -> Result<reqwest::Res
 
 /// Every list endpoint returns its payload under `items`.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ListResponse<T> {
     #[serde(default = "Vec::new")]
     items: Vec<T>,
+    /// Present when there are more results than fit in one reply. Absent on the
+    /// last page, and on endpoints short enough never to need paging at all.
+    #[serde(default)]
+    next_page_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -664,6 +809,36 @@ struct IngestionInfo {
 #[derive(Debug, Deserialize)]
 struct LiveBroadcastResource {
     id: String,
+    /// Absent when only `part=id` was requested, which is why it is optional.
+    #[serde(default)]
+    snippet: Option<BroadcastSnippet>,
+    #[serde(default)]
+    status: Option<BroadcastStatus>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BroadcastSnippet {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    scheduled_start_time: Option<chrono::DateTime<chrono::Utc>>,
+    /// Set the moment YouTube first sees a feed. Its presence is the definitive
+    /// proof that a broadcast has been live, which is what `msm cleanup` uses to
+    /// decide what it must never touch.
+    #[serde(default)]
+    actual_start_time: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    actual_end_time: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BroadcastStatus {
+    /// One of `created`, `ready`, `testStarting`, `testing`, `liveStarting`,
+    /// `live`, `complete` or `revoked`.
+    #[serde(default)]
+    life_cycle_status: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -725,6 +900,31 @@ pub const COMMON_CATEGORIES: &[(&str, &str)] = &[
     ("17", "Sports"),
     ("25", "News & Politics"),
 ];
+
+/// Filter the built-in category list by name, without touching the network.
+///
+/// The form's YouTube category field is normally backed by `videoCategories`
+/// fetched from the API, but that list is only reachable once you are logged in
+/// and the daily quota still has room in it. Before then — which includes the
+/// very first run, when nobody has authorised anything yet — typing in that
+/// field used to do nothing at all, with no hint as to why.
+///
+/// So the field falls back to this, exactly the way the language field works:
+/// a short list held in the binary, filtered locally, always available. The ten
+/// entries here cover the categories a live stream realistically uses, and the
+/// full list still replaces them as soon as the API answers.
+pub fn search_common(query: &str) -> Vec<Category> {
+    let needle = query.trim().to_lowercase();
+
+    COMMON_CATEGORIES
+        .iter()
+        .filter(|(_, name)| needle.is_empty() || name.to_lowercase().contains(&needle))
+        .map(|(id, name)| Category {
+            id: (*id).to_string(),
+            name: (*name).to_string(),
+        })
+        .collect()
+}
 
 /// Human-readable name for a category id, falling back to the raw id.
 pub fn category_name(id: &str) -> String {
@@ -843,5 +1043,202 @@ mod tests {
         assert_eq!(Privacy::Public.api_value(), "public");
         assert_eq!(Privacy::Unlisted.api_value(), "unlisted");
         assert_eq!(Privacy::Private.api_value(), "private");
+    }
+
+    /// Build a broadcast reply the way YouTube sends one, so the tests below
+    /// exercise the real deserialisation rather than a hand-built struct.
+    fn broadcast(
+        status: &str,
+        actual_start: Option<&str>,
+        actual_end: Option<&str>,
+    ) -> LiveBroadcastResource {
+        let start = actual_start
+            .map(|at| format!(r#","actualStartTime":"{at}""#))
+            .unwrap_or_default();
+        let end = actual_end
+            .map(|at| format!(r#","actualEndTime":"{at}""#))
+            .unwrap_or_default();
+
+        let json = format!(
+            r#"{{
+                "id": "bid",
+                "snippet": {{
+                    "title": "A stream",
+                    "scheduledStartTime": "2026-08-08T10:00:00Z"{start}{end}
+                }},
+                "status": {{"lifeCycleStatus": "{status}"}}
+            }}"#
+        );
+        serde_json::from_str(&json).expect("the fixture must be valid JSON")
+    }
+
+    #[test]
+    fn a_broadcast_that_was_only_created_counts_as_stale() {
+        // This is the exact leftover `msm cleanup` exists for: submitting the
+        // form again makes a fresh broadcast and abandons the previous one in
+        // the "created" state with no feed ever attached to it.
+        assert!(never_went_live(&broadcast("created", None, None)));
+    }
+
+    #[test]
+    fn a_bound_but_unused_broadcast_counts_as_stale() {
+        // "ready" means it was bound to a stream key and was waiting for OBS,
+        // but OBS never arrived. Nothing was recorded, so it is safe to remove.
+        assert!(never_went_live(&broadcast("ready", None, None)));
+    }
+
+    #[test]
+    fn a_broadcast_that_has_ever_been_live_is_never_stale() {
+        // The single most important rule in the whole command: an actual start
+        // time means a feed reached it, so there may be a recording behind it
+        // and deleting it cannot be undone.
+        assert!(!never_went_live(&broadcast(
+            "complete",
+            Some("2026-08-08T10:00:00Z"),
+            Some("2026-08-08T12:00:00Z")
+        )));
+        assert!(!never_went_live(&broadcast(
+            "live",
+            Some("2026-08-08T10:00:00Z"),
+            None
+        )));
+    }
+
+    #[test]
+    fn a_created_broadcast_that_somehow_has_a_start_time_is_still_spared() {
+        // Belt and braces: the status alone is not trusted. If the two signals
+        // ever disagree, the one that argues for keeping the broadcast wins.
+        assert!(!never_went_live(&broadcast(
+            "created",
+            Some("2026-08-08T10:00:00Z"),
+            None
+        )));
+    }
+
+    #[test]
+    fn transitional_and_finished_statuses_are_left_alone() {
+        for status in [
+            "testing",
+            "testStarting",
+            "liveStarting",
+            "complete",
+            "revoked",
+        ] {
+            assert!(
+                !never_went_live(&broadcast(status, None, None)),
+                "{status:?} must not be offered for deletion"
+            );
+        }
+    }
+
+    #[test]
+    fn a_broadcast_with_no_snippet_or_status_is_kept() {
+        // A reply missing the parts we asked for gives no evidence either way,
+        // and "no evidence" must never mean "delete it".
+        let bare: LiveBroadcastResource = serde_json::from_str(r#"{"id":"x"}"#).unwrap();
+        assert!(!never_went_live(&bare));
+
+        let no_status: LiveBroadcastResource =
+            serde_json::from_str(r#"{"id":"x","snippet":{"title":"t"}}"#).unwrap();
+        assert!(!never_went_live(&no_status));
+    }
+
+    #[test]
+    fn a_broadcast_listing_page_reports_whether_more_pages_follow() {
+        // Without reading the page token the cleanup command would only ever see
+        // the first fifty broadcasts and quietly leave the rest behind.
+        let one_page: ListResponse<LiveBroadcastResource> =
+            serde_json::from_str(r#"{"items":[]}"#).unwrap();
+        assert!(one_page.next_page_token.is_none());
+
+        let more: ListResponse<LiveBroadcastResource> =
+            serde_json::from_str(r#"{"items":[],"nextPageToken":"CDIQAA"}"#).unwrap();
+        assert_eq!(more.next_page_token.as_deref(), Some("CDIQAA"));
+    }
+
+    #[test]
+    fn the_broadcast_listing_url_asks_for_the_parts_the_cleanup_rule_needs() {
+        // `snippet` carries the actual start time and `status` the lifecycle
+        // word. Dropping either would leave `never_went_live` with no evidence,
+        // and it would then correctly but uselessly spare everything.
+        let url = format!("{API}/liveBroadcasts?part=id,snippet,status&mine=true&maxResults=50");
+        assert!(url.contains("part=id,snippet,status"));
+        assert!(url.contains("mine=true"));
+    }
+
+    #[test]
+    fn the_builtin_category_list_can_be_searched_without_the_api() {
+        // This is what makes the YouTube category field usable before the first
+        // login, when there is no token with which to fetch the real list.
+        let matches = search_common("gam");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, "20");
+        assert_eq!(matches[0].name, "Gaming");
+    }
+
+    #[test]
+    fn searching_the_builtin_category_list_ignores_case_and_surrounding_spaces() {
+        // People type what they see, capitals and stray spaces included.
+        let matches = search_common("  MUSIC ");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, "10");
+    }
+
+    #[test]
+    fn an_empty_category_query_offers_every_builtin_category() {
+        // Pressing Enter on an empty field should show the whole list to pick
+        // from, not nothing at all.
+        assert_eq!(search_common("").len(), COMMON_CATEGORIES.len());
+    }
+
+    #[test]
+    fn an_unknown_category_query_matches_nothing() {
+        assert!(search_common("underwater basket weaving").is_empty());
+    }
+
+    #[test]
+    fn every_builtin_category_id_is_numeric_and_unique() {
+        // The API rejects a non-numeric category id outright, and a duplicate
+        // would make the autocomplete offer the same choice twice.
+        let mut ids: Vec<&str> = COMMON_CATEGORIES.iter().map(|(id, _)| *id).collect();
+        let count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            count,
+            "duplicate category id in the built-in list"
+        );
+        assert!(COMMON_CATEGORIES
+            .iter()
+            .all(|(id, _)| id.chars().all(|c| c.is_ascii_digit())));
+    }
+
+    #[test]
+    fn a_stream_listing_maps_onto_the_ingest_endpoint_type() {
+        // `msm streams` shows the id (so it can be pinned), the title (so a
+        // human recognises it) and optionally the key.
+        let json = r#"{
+            "id": "sid",
+            "snippet": {"title": "Default stream key"},
+            "cdn": {"ingestionInfo": {
+                "ingestionAddress": "rtmp://a.rtmp.youtube.com/live2",
+                "streamName": "abcd-efgh"
+            }}
+        }"#;
+        let stream: LiveStreamResource = serde_json::from_str(json).unwrap();
+
+        let endpoint = IngestEndpoint {
+            id: stream.id,
+            title: stream.snippet.title,
+            key: stream
+                .cdn
+                .and_then(|cdn| cdn.ingestion_info)
+                .map(|info| info.stream_name),
+        };
+
+        assert_eq!(endpoint.id, "sid");
+        assert_eq!(endpoint.title, "Default stream key");
+        assert_eq!(endpoint.key.as_deref(), Some("abcd-efgh"));
     }
 }

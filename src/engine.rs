@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use crate::auth;
 use crate::backend::{Backend, PlatformResult};
 use crate::config::Config;
-use crate::model::{Category, Platform, PlatformStats, StreamPlan};
+use crate::model::{Category, IngestEndpoint, Platform, PlatformStats, StaleBroadcast, StreamPlan};
 use crate::twitch::TwitchBackend;
 use crate::youtube::YouTubeBackend;
 
@@ -248,11 +248,7 @@ impl Engine {
         platform: Platform,
         query: &str,
     ) -> Result<Vec<Category>> {
-        let backend = self
-            .backends
-            .get_mut(&platform)
-            .ok_or_else(|| anyhow::anyhow!("{} is not connected", platform.label()))?;
-        backend.search_categories(query).await
+        self.backend(platform)?.search_categories(query).await
     }
 
     /// Read a platform's stream key without changing anything else.
@@ -260,11 +256,43 @@ impl Engine {
     /// Backs `msm key`, which exists so a key can be fetched for pasting into
     /// OBS without the side effect of applying a whole plan.
     pub async fn stream_key(&mut self, platform: Platform) -> Result<Option<String>> {
-        let backend = self
-            .backends
+        self.backend(platform)?.stream_key().await
+    }
+
+    /// List the RTMP ingest endpoints on a platform's account. Backs
+    /// `msm streams`.
+    pub async fn list_ingest_endpoints(
+        &mut self,
+        platform: Platform,
+    ) -> Result<Vec<IngestEndpoint>> {
+        self.backend(platform)?.list_ingest_endpoints().await
+    }
+
+    /// List broadcasts that were created but never received a feed. Backs the
+    /// listing half of `msm cleanup`.
+    pub async fn list_stale_broadcasts(
+        &mut self,
+        platform: Platform,
+    ) -> Result<Vec<StaleBroadcast>> {
+        self.backend(platform)?.list_stale_broadcasts().await
+    }
+
+    /// Delete one broadcast. Backs the `--yes` half of `msm cleanup`.
+    pub async fn delete_broadcast(&mut self, platform: Platform, id: &str) -> Result<()> {
+        self.backend(platform)?.delete_broadcast(id).await
+    }
+
+    /// The backend for a platform, or an error naming the platform that is not
+    /// connected — which is far more useful than a panic on a missing key.
+    // The `+ 'static` is load-bearing rather than decorative: the map holds
+    // `Box<dyn Backend>`, which means `dyn Backend + 'static`, and a `&mut` to a
+    // trait object is invariant in that bound — so shortening it here would be
+    // rejected by the borrow checker.
+    fn backend(&mut self, platform: Platform) -> Result<&mut (dyn Backend + 'static)> {
+        self.backends
             .get_mut(&platform)
-            .ok_or_else(|| anyhow::anyhow!("{} is not connected", platform.label()))?;
-        backend.stream_key().await
+            .map(|backend| backend.as_mut())
+            .ok_or_else(|| anyhow::anyhow!("{} is not connected", platform.label()))
     }
 }
 
@@ -310,6 +338,54 @@ pub fn render_results(results: &[PlatformResult]) -> String {
     }
 
     out
+}
+
+/// Format a go-live result set as JSON, for `msm go --json`.
+///
+/// One object per platform, in the same order as the human report, so a wrapper
+/// script can loop over the array and act on each platform in turn. Every field
+/// is present on every object — `null` where the platform did not supply one —
+/// so a consumer can read `.watch_url` without first checking that it exists.
+///
+/// ## The stream key is deliberately absent
+///
+/// This output exists to be piped into another program, redirected into a file,
+/// or pasted into a bug report. A stream key that lands in any of those places
+/// lets whoever reads it broadcast to your channel, and unlike a password there
+/// is no prompt in front of it. `msm key` prints it when you actually want it,
+/// as a separate and deliberate act.
+pub fn render_results_json(results: &[PlatformResult]) -> String {
+    let items: Vec<serde_json::Value> = results
+        .iter()
+        .map(|result| {
+            let (ok, watch, manage, ingest, error, notes) = match &result.outcome {
+                Ok(outcome) => (
+                    true,
+                    outcome.watch_url.clone(),
+                    outcome.manage_url.clone(),
+                    outcome.ingest_url.clone(),
+                    None,
+                    outcome.notes.clone(),
+                ),
+                Err(err) => (false, None, None, None, Some(err.clone()), Vec::new()),
+            };
+
+            serde_json::json!({
+                "platform": result.platform.slug(),
+                "ok": ok,
+                "watch_url": watch,
+                "manage_url": manage,
+                "ingest_url": ingest,
+                "error": error,
+                "notes": notes,
+            })
+        })
+        .collect();
+
+    // Serialising an array of plain JSON values cannot fail, but returning an
+    // empty array rather than panicking keeps a scripted caller's parser happy
+    // even in the impossible case.
+    serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".to_string())
 }
 
 #[cfg(test)]
@@ -378,5 +454,80 @@ mod tests {
         let mut results = [err_result(Platform::YouTube), ok_result(Platform::Twitch)];
         results.sort_by_key(|r| r.platform);
         assert_eq!(results[0].platform, Platform::Twitch);
+    }
+
+    /// Parse the JSON report back out, so the tests assert on the structure a
+    /// script would actually see rather than on the exact text.
+    fn parsed_json(results: &[PlatformResult]) -> Vec<serde_json::Value> {
+        serde_json::from_str(&render_results_json(results))
+            .expect("the JSON report must be valid JSON")
+    }
+
+    #[test]
+    fn the_json_report_is_an_array_with_one_object_per_platform() {
+        let items = parsed_json(&[ok_result(Platform::Twitch), err_result(Platform::YouTube)]);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["platform"], "twitch");
+        assert_eq!(items[1]["platform"], "youtube");
+    }
+
+    #[test]
+    fn a_successful_platform_reports_ok_with_its_urls_and_notes() {
+        let items = parsed_json(&[ok_result(Platform::Twitch)]);
+        assert_eq!(items[0]["ok"], true);
+        assert_eq!(items[0]["watch_url"], "https://example.com/watch");
+        assert_eq!(items[0]["error"], serde_json::Value::Null);
+        assert_eq!(items[0]["notes"][0], "a note");
+    }
+
+    #[test]
+    fn a_failed_platform_reports_its_reason_rather_than_disappearing() {
+        // Partial success is the point: a script has to be able to see that one
+        // platform worked and why the other did not.
+        let items = parsed_json(&[err_result(Platform::YouTube)]);
+        assert_eq!(items[0]["ok"], false);
+        assert_eq!(items[0]["error"], "out of quota");
+        assert_eq!(items[0]["watch_url"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn the_json_report_never_contains_the_stream_key() {
+        // The whole reason this output is safe to redirect into a file is that
+        // the key is not in it. A key is enough on its own to broadcast to the
+        // channel, and JSON output is meant to be stored and passed around.
+        let text = render_results_json(&[ok_result(Platform::Twitch)]);
+        assert!(
+            !text.contains("super-secret-key"),
+            "the stream key leaked into the machine-readable output"
+        );
+        assert!(!text.contains("stream_key"));
+    }
+
+    #[test]
+    fn every_documented_field_is_present_even_when_it_has_no_value() {
+        // A consumer should be able to read a field without checking for it
+        // first, so absence is spelled `null` rather than by omitting the key.
+        let items = parsed_json(&[err_result(Platform::Twitch)]);
+        for field in [
+            "platform",
+            "ok",
+            "watch_url",
+            "manage_url",
+            "ingest_url",
+            "error",
+            "notes",
+        ] {
+            assert!(
+                items[0].get(field).is_some(),
+                "the {field:?} field is missing from the JSON report"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_result_set_still_produces_a_parseable_array() {
+        // `msm go` can in principle end with nothing to report; a script must
+        // not have to special-case an empty stdout.
+        assert!(parsed_json(&[]).is_empty());
     }
 }

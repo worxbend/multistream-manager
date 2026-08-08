@@ -541,6 +541,45 @@ pub struct GoLiveOutcome {
     pub notes: Vec<String>,
 }
 
+/// One of the RTMP ingest endpoints a platform holds for your account — what
+/// YouTube calls a "stream" and everybody else calls a stream key.
+///
+/// Listing these is how `msm streams` lets you find the id to pin as `stream_id`
+/// in the config, so that every broadcast binds to the same key and your OBS (or
+/// Aitum) settings never have to change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestEndpoint {
+    /// The platform's own identifier. This is the value that goes into
+    /// `stream_id` under `[youtube]` in the config file.
+    pub id: String,
+    /// The name the platform shows for it, e.g. "Default stream key".
+    pub title: String,
+    /// The key itself, when the platform reported one.
+    ///
+    /// It is carried here so that `msm streams --show-keys` can print it when
+    /// asked, and for no other reason: a key is enough on its own to broadcast
+    /// to the channel, so nothing prints it unless the flag was passed.
+    pub key: Option<String>,
+}
+
+/// A broadcast that a platform created but that never received a video feed.
+///
+/// Submitting a plan a second time creates a *new* YouTube broadcast rather than
+/// editing the previous one, so a session where you fixed a typo and resubmitted
+/// leaves the earlier attempt behind. Nothing removes them by itself, and they
+/// pile up in YouTube Studio's list of upcoming streams. `msm cleanup` finds
+/// them; see there for why "never received a feed" is defined so cautiously.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleBroadcast {
+    pub id: String,
+    pub title: String,
+    /// When it was scheduled to start, if the platform reported a time.
+    pub scheduled_start: Option<chrono::DateTime<chrono::Utc>>,
+    /// The platform's own status word, e.g. "created" or "ready". Shown to the
+    /// user so it is visible *why* each broadcast was picked out.
+    pub status: String,
+}
+
 /// A single live statistic, rendered as one row in the dashboard table.
 #[derive(Debug, Clone)]
 pub struct Stat {

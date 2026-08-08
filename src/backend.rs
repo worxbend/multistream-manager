@@ -9,7 +9,9 @@ use anyhow::Result;
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::model::{Category, GoLiveOutcome, Platform, PlatformStats, StreamPlan};
+use crate::model::{
+    Category, GoLiveOutcome, IngestEndpoint, Platform, PlatformStats, StaleBroadcast, StreamPlan,
+};
 
 /// A boxed future, which is how a trait object can have async methods without
 /// pulling in the `async-trait` crate.
@@ -62,6 +64,43 @@ pub trait Backend: Send {
     /// return `None`.
     fn stream_key(&mut self) -> BoxFuture<'_, Result<Option<String>>> {
         Box::pin(async { Ok(None) })
+    }
+
+    /// List every RTMP ingest endpoint configured on the account.
+    ///
+    /// Backs `msm streams`. On YouTube these are the reusable stream objects,
+    /// and the whole reason for showing them is that one of their ids can be
+    /// pinned as `stream_id` so the same key is bound every single time.
+    ///
+    /// Platforms whose key belongs to the channel rather than to a separate
+    /// object — Twitch — have nothing to list and return an empty vector, which
+    /// is a truthful answer rather than an error.
+    fn list_ingest_endpoints(&mut self) -> BoxFuture<'_, Result<Vec<IngestEndpoint>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    /// List broadcasts that were created but never received a video feed.
+    ///
+    /// Backs `msm cleanup`. Platforms that have no broadcast objects at all —
+    /// Twitch, where the channel is permanently there and going live means no
+    /// more than pointing OBS at it — return an empty vector, so there is never
+    /// anything for the command to offer to delete.
+    fn list_stale_broadcasts(&mut self) -> BoxFuture<'_, Result<Vec<StaleBroadcast>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    /// Delete one broadcast by its platform id.
+    ///
+    /// Only ever called with an id that [`Backend::list_stale_broadcasts`]
+    /// returned a moment earlier, so a platform that lists nothing can never
+    /// reach this. The default therefore refuses rather than pretending to have
+    /// done something.
+    fn delete_broadcast<'a>(&'a mut self, _id: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async {
+            anyhow::bail!(
+                "this platform has no broadcasts of its own, so there is nothing to delete"
+            )
+        })
     }
 }
 

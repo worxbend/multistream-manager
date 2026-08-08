@@ -141,7 +141,9 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 
     let hints = match app.screen {
         Screen::Platforms => "↑↓ move   Space toggle   a all   Enter connect   q quit",
-        Screen::Dashboard => "r refresh   k show/hide key   e edit & resubmit   q quit",
+        Screen::Dashboard => {
+            "r refresh   o open watch page   k show/hide key   e edit & resubmit   q quit"
+        }
         Screen::Form => unreachable!("handled above"),
     };
 
@@ -924,6 +926,7 @@ mod tests {
                 .collect(),
             cursor: 0,
             loading: false,
+            fallback: false,
         });
 
         for height in 3..=20 {
@@ -941,11 +944,34 @@ mod tests {
             items: vec![("pl".into(), "Polish (pl) — polski".into())],
             cursor: 0,
             loading: false,
+            fallback: false,
         });
 
         let screen = render(&app, 120, 40);
         assert!(screen.contains("Polish"));
         assert!(screen.contains("1 matches"));
+    }
+
+    #[test]
+    fn the_dashboard_footer_advertises_every_key_the_dashboard_handles() {
+        // A key binding nobody is told about might as well not exist, and the
+        // footer is the only place the dashboard's keys are written down.
+        let mut app = app();
+        app.screen = Screen::Dashboard;
+        app.selected = vec![Platform::Twitch];
+
+        let screen = render(&app, 120, 20);
+        for hint in [
+            "r refresh",
+            "o open watch page",
+            "k show/hide key",
+            "e edit",
+        ] {
+            assert!(
+                screen.contains(hint),
+                "missing footer hint {hint:?}:\n{screen}"
+            );
+        }
     }
 
     #[test]
