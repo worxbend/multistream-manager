@@ -1,0 +1,61 @@
+# --- AI assistant / agent tooling (never committed) ---
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+GEMINI.md
+.cursorrules
+.claude/
+.cursor/
+.aider*
+.codex/
+.gemini/
+.continue/
+.windsurf/
+.github/copilot-instructions.md
+
+# --- Secrets & local config ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Editors ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- Logs & temp ---
+*.log
+logs/
+tmp/
+.cache/
+
+# --- Node ---
+node_modules/
+dist/
+build/
+.next/
+.nuxt/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
