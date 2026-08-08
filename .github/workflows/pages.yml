@@ -1,0 +1,68 @@
+# Publish the landing page in `site/` and the Markdown docs in `docs/` to
+# GitHub Pages.
+#
+# The landing page is one self-contained HTML file with no build step. The docs
+# are copied in under /docs/ so that the links the README makes to the published
+# documentation actually resolve; GitHub Pages renders `.md` as plain text
+# rather than HTML, so each page is also reachable in its source form from the
+# repository, which is where the relative links between them work.
+#
+# Before the first run, set Settings → Pages → Source to "GitHub Actions",
+# otherwise `deploy-pages` has nowhere to publish to.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    # Only rebuild when something that ends up on the site actually changed.
+    paths:
+      - "site/**"
+      - "docs/**"
+      - ".github/workflows/pages.yml"
+  # Lets you publish by hand from the Actions tab, for example after changing
+  # the Pages settings without changing any file.
+  workflow_dispatch:
+
+permissions:
+  contents: read      # to check the repository out
+  pages: write        # to publish to GitHub Pages
+  id-token: write     # deploy-pages authenticates with a short-lived OIDC token
+
+# One deployment at a time. `cancel-in-progress: false` so a run that is part
+# way through publishing is allowed to finish rather than leaving the site in
+# a half-updated state; a newer run waits its turn behind it.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      # Assemble what gets published: the landing page at the root, and the
+      # Markdown docs under /docs/ so the README's links to them resolve.
+      - name: Assemble the published tree
+        run: |
+          set -eu
+          mkdir -p _site
+          cp -r site/. _site/
+          cp -r docs _site/docs
+          ls -R _site
+
+      - name: Upload the assembled tree
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
