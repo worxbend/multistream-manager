@@ -1,6 +1,77 @@
-# multistream-manager
+<div align="center">
 
-**Set up a Twitch and YouTube stream from one terminal window, then start OBS.**
+# 📡 multistream-manager
+
+**Set up a Twitch stream and a YouTube broadcast from one terminal form, then press Start Streaming in OBS.**
+
+[![CI](https://img.shields.io/github/actions/workflow/status/worxbend/multistream-manager/ci.yml?branch=main&style=flat-square&logo=github&label=CI)](https://github.com/worxbend/multistream-manager/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/worxbend/multistream-manager?style=flat-square&label=release&color=success)](https://github.com/worxbend/multistream-manager/releases)
+[![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue?style=flat-square)](LICENSE)
+[![MSRV 1.88](https://img.shields.io/badge/MSRV-1.88-orange?style=flat-square&logo=rust&logoColor=white)](https://rustup.rs)
+[![Documentation](https://img.shields.io/badge/docs-Pages-8A2BE2?style=flat-square&logo=readthedocs&logoColor=white)](https://worxbend.github.io/multistream-manager/)
+
+</div>
+
+```
+╭────────────────────────────────────────────────────────────────────────────────────╮
+│ multistream-manager                                               Twitch   YouTube │
+╰────────────────────────────────────────────────────────────────────────────────────╯
+ Twitch and YouTube are ready. Press Start Streaming in OBS now.
+╭─ Twitch ─────────────────────────────╮╭─ YouTube ──────────────────────────────────╮
+│ READY — start streaming in OBS       ││ READY — start streaming in OBS             │
+│                                      ││                                            │
+│ Watch     twitch.tv/worxbend         ││ Watch     youtu.be/<video-id>              │
+│ Ingest    rtmp://live.twitch.tv/app  ││ Ingest    rtmp://a.rtmp.youtube.com/live2  │
+│ Key       ••••••••••••••••           ││ Key       ••••••••••••••••                 │
+│                                      ││                                            │
+│ ── Live ──                           ││ • Reused your existing stream key          │
+│ Status    live                       ││ ── Live ──                                 │
+│ Viewers   142                        ││ Status    live                             │
+│ Followers 12.4K                      ││ Viewers   38                               │
+│ Uptime    1h 23m                     ││ Likes     17                               │
+╰──────────────────────────────────────╯╰────────────────────────────────────────────╯
+ r refresh   o open watch page   k show/hide key   e edit & resubmit   q quit
+```
+
+---
+
+## 🎯 What it does
+
+You type the title, description, tags, category and language **once**. Press
+<kbd>Ctrl</kbd>+<kbd>G</kbd> and both platforms are configured in parallel. Then
+you press "Start Streaming" in OBS exactly as you always did.
+
+Once you are live, the same window shows viewer counts, follower and subscriber
+totals, likes and uptime side by side, so neither website needs to be open.
+
+| | 🟣 Twitch | 🔴 YouTube |
+|---|---|---|
+| 📝 Title | ✅ up to 140 characters | ✅ up to 100 characters, plus your tags as `#hashtags` |
+| 📄 Description | ❌ Twitch has no description field | ✅ |
+| 🏷️ Tags | ✅ up to 10, spaces stripped | ✅ as typed |
+| 🎮 Category | ✅ searched live against Twitch's list | ✅ picked from YouTube's list |
+| 🌍 Language | ✅ | ✅ |
+| 👁️ Visibility | ❌ | ✅ public / unlisted / private |
+| 📺 Creates the broadcast | ❌ not needed — the channel always exists | ✅ a new broadcast per session |
+| 🔑 Stream key shown | ✅ | ✅ reused, never regenerated |
+| 👥 Live viewer count | ✅ | ✅ |
+| ⭐ Followers / subscribers | ✅ | ✅ |
+| 👍 Likes | ❌ | ✅ |
+
+> [!IMPORTANT]
+> **It does not control OBS.** It gets the platforms ready; you decide when you
+> actually go live. Partial success is normal and supported: if one platform
+> fails, the other is still configured, still usable, and the failure is shown
+> in its own panel rather than rolling everything back.
+
+The two platforms work differently enough that it shows through — Twitch is a
+channel you point OBS at, YouTube is an event you create beforehand. The
+consequences (character limits, tag rules, what happens when you resubmit) are
+written up in [docs/how-it-works.md](docs/how-it-works.md).
+
+---
+
+## 🤔 Why
 
 If you stream to both platforms at once — for example through OBS with the
 [Aitum multistream plugin](https://aitum.tv/vertical) — you know the routine
@@ -13,232 +84,101 @@ before every session:
 3. Copy a stream key somewhere.
 4. Finally, press "Start Streaming" in OBS.
 
-`msm` collapses steps 1 to 3 into one form. You type the title, description,
-tags, category and language **once**, press <kbd>Ctrl</kbd>+<kbd>G</kbd>, and
-both platforms are configured in parallel. Then you press "Start Streaming" in
-OBS exactly as you always did — this tool never touches OBS itself.
-
-Once you are live it shows viewer counts, follower and subscriber totals, likes
-and uptime for both platforms side by side, so you do not need either website
-open at all.
-
-```
-╭──────────────────────────────────────────────────────────────────────────╮
-│ multistream-manager │  Twitch   YouTube                                  │
-╰──────────────────────────────────────────────────────────────────────────╯
- Twitch and YouTube ready. Press Start Streaming in OBS now.
-╭─ Twitch ─────────────────────────╮╭─ YouTube ────────────────────────────╮
-│ READY — you can start streaming  ││ READY — you can start streaming      │
-│                                  ││                                      │
-│ Watch    https://twitch.tv/you   ││ Watch    https://youtube.com/watch?…  │
-│ Ingest   rtmp://live.twitch.tv…  ││ Ingest   rtmp://a.rtmp.youtube.com…  │
-│ Key      ••••••••••••••••        ││ Key      ••••••••••••••••            │
-│                                  ││                                      │
-│ ── Live ──                       ││ • Reused your existing stream key    │
-│ Status   live                    ││ ── Live ──                           │
-│ Viewers  142                     ││ Status   live                        │
-│ Uptime   1h 23m                  ││ Viewers  38                          │
-│ Followers 12.4K                  ││ Likes    17                          │
-╰──────────────────────────────────╯╰──────────────────────────────────────╯
-```
-
----
-
-## Table of contents
-
-- [What it does](#what-it-does)
-- [Installing](#installing)
-- [First-time setup](#first-time-setup)
-  - [Step 1: Twitch credentials](#step-1-twitch-credentials)
-  - [Step 2: YouTube credentials](#step-2-youtube-credentials)
-  - [Step 3: Log in](#step-3-log-in)
-- [Using it](#using-it)
-- [How it works with OBS and Aitum](#how-it-works-with-obs-and-aitum)
-- [Configuration file](#configuration-file)
-- [Command reference](#command-reference)
-- [How the platforms differ](#how-the-platforms-differ)
-- [Troubleshooting](#troubleshooting)
-- [Security notes](#security-notes)
-- [Development](#development)
-
----
-
-## What it does
-
-| | Twitch | YouTube |
-|---|---|---|
-| Title | ✅ | ✅ (also gets your tags as `#hashtags`) |
-| Description | — *(Twitch has no description field)* | ✅ |
-| Tags | ✅ up to 10 | ✅ |
-| Category | ✅ searched live against Twitch's list | ✅ picked from YouTube's list |
-| Language | ✅ | ✅ |
-| Visibility | — | ✅ public / unlisted / private |
-| Creates the broadcast | not needed | ✅ |
-| Stream key shown | ✅ | ✅ |
-| Live viewer count | ✅ | ✅ |
-| Followers / subscribers | ✅ | ✅ |
-| Likes | — | ✅ |
-
-**It does not control OBS.** It gets the platforms ready; you still press "Start
-Streaming" yourself. That is deliberate — you stay in control of when you
-actually go live.
-
----
-
-## Installing
-
-You need [Rust](https://rustup.rs) 1.88 or newer.
-
-```bash
-git clone https://github.com/w0rxbend/multistream-manager
-cd multistream-manager
-cargo install --path .
-```
-
-That puts a binary called `msm` in `~/.cargo/bin`. Check it works:
-
-```bash
-msm --help
-```
+`msm` collapses steps 1 to 3 into one form.
 
 > **Why `msm` and not `multistream-manager`?** You will type it before every
 > stream. Three letters is kinder than twenty.
 
 ---
 
-## First-time setup
+## 📦 Install
 
-This part is genuinely tedious, but you only do it once. Both Twitch and Google
-require you to register your own "application" before their APIs will talk to
-you — there is no way around it, and it is the same process every tool of this
-kind has to ask you for.
-
-Start by writing a config file:
+**One-liner** — downloads the latest release binary, verifies its checksum, and installs it to `~/.local/bin` (it prints the line to add to your shell config if that directory is not already on your `PATH`):
 
 ```bash
-msm init
+curl -fsSL https://raw.githubusercontent.com/worxbend/multistream-manager/main/install.sh | sh
 ```
 
-It will tell you where it put the file. Open that file in an editor; it is full
-of comments explaining each setting.
-
-### Step 1: Twitch credentials
-
-1. Go to <https://dev.twitch.tv/console/apps> and sign in.
-2. Click **Register Your Application**.
-3. Fill in:
-   - **Name**: anything, e.g. `my-multistream-manager`. It must be unique across
-     all of Twitch, so add a suffix if it complains.
-   - **OAuth Redirect URLs**: `http://localhost:8017/callback`
-     *(This must match exactly — same scheme, same port, same path.)*
-   - **Category**: Application Integration
-   - **Client Type**: Confidential
-4. Click **Create**, then **Manage** on your new app.
-5. Copy the **Client ID** into `client_id` under `[twitch]` in your config file.
-6. Click **New Secret**, confirm, and copy the value into `client_secret`.
-
-> The secret is shown **once**. If you lose it, generate a new one.
-
-### Step 2: YouTube credentials
-
-1. Go to <https://console.cloud.google.com/> and sign in with the Google account
-   that owns your YouTube channel.
-2. Create a project (top bar → project dropdown → **New Project**). Name it
-   anything.
-3. Go to **APIs & Services → Library**, search for **YouTube Data API v3**, open
-   it and click **Enable**.
-4. Go to **APIs & Services → OAuth consent screen**:
-   - User type: **External**, then **Create**.
-   - Fill in the app name, your email for both support fields, and **Save**.
-   - Under **Test users**, click **Add users** and add **your own Google
-     account**. *This step is easy to miss and Google will refuse the login
-     without it while your app is in Testing mode.*
-5. Go to **APIs & Services → Credentials → Create Credentials → OAuth client ID**:
-   - Application type: **Desktop app**
-   - Name: anything
-   - Click **Create**.
-6. Copy the **Client ID** and **Client secret** into `[youtube]` in your config.
-
-You will also need live streaming enabled on the channel itself, at
-<https://youtube.com/features>. If you have never streamed from this channel,
-note that YouTube imposes a **24-hour waiting period** the first time you enable
-it.
-
-### Step 3: Log in
+**From source** — needs [Rust](https://rustup.rs) 1.88 or newer:
 
 ```bash
-msm login all
+git clone https://github.com/worxbend/multistream-manager
+cd multistream-manager
+cargo install --path .
 ```
 
-This opens your browser twice — once for Twitch, once for Google. You log in on
-their sites; the tool never sees your password. When you approve, the browser
-redirects to `localhost:8017`, where `msm` is listening, and it picks up the
-authorisation from there.
-
-> `localhost` resolves to `127.0.0.1` on some systems and to `::1` on others, so
-> the callback listener binds both. You do not need to care which your machine
-> uses.
-
-Google will show a scary "Google hasn't verified this app" warning. That is
-expected: the "app" is the one *you* created five minutes ago, and verification
-only matters for apps distributed to strangers. Click **Advanced → Go to … (unsafe)**.
-
-Check it worked:
+Either way you end up with a binary called `msm`. Check it:
 
 ```bash
-msm status
+msm --help
 ```
+
+> [!NOTE]
+> Prebuilt release binaries are **Linux x86_64 and aarch64 only**. The code
+> itself is portable and the test suite runs on Linux, macOS and Windows in CI,
+> but on those platforms you build from source with `cargo install --path .`.
 
 ---
 
-## Using it
+## 🚀 Quick start
+
+Both Twitch and Google make you register your own "application" before their
+APIs will talk to you. That part is tedious and you only do it once — the
+click-by-click walkthrough, including the Google settings that are easy to miss,
+is in **[docs/getting-started.md](docs/getting-started.md)**.
 
 ```bash
-msm
+msm init          # write a commented config file, then paste your credentials in
+msm login all     # authorise Twitch and Google in your browser
+msm status        # confirm both are logged in
+msm               # open the interface
 ```
 
-**Screen 1 — pick your platforms.** <kbd>↑</kbd>/<kbd>↓</kbd> to move,
-<kbd>Space</kbd> to tick, <kbd>a</kbd> to tick everything, <kbd>Enter</kbd> to
-connect.
+In the interface: pick your platforms, fill the form, press
+<kbd>Ctrl</kbd>+<kbd>G</kbd>, then press "Start Streaming" in OBS.
 
-**Screen 2 — the form.** <kbd>Tab</kbd> moves between fields.
+Prefer to stay on the command line? The `[preset]` section of the config file
+holds the same fields the form does, so you can skip the interface entirely:
 
-| Key | Does |
+```bash
+msm go            # shows a summary and asks for confirmation
+msm go --yes      # no prompt
+msm go --json     # machine-readable result on stdout, never the stream key
+```
+
+Keep one file per kind of stream and choose between them:
+
+```bash
+msm --config ~/streams/coding.toml go
+msm --config ~/streams/gaming.toml go
+```
+
+<details>
+<summary><b>📋 The whole command set</b></summary>
+
+| Command | What it does |
 |---|---|
-| <kbd>Tab</kbd> / <kbd>↑</kbd> <kbd>↓</kbd> | Move between fields |
-| <kbd>Enter</kbd> | Open the autocomplete list on a category or language field |
-| <kbd>Space</kbd> | Flip a yes/no field |
-| <kbd>←</kbd> <kbd>→</kbd> | Change a selector (like Privacy) |
-| <kbd>Ctrl</kbd>+<kbd>W</kbd> | Delete the previous word |
-| <kbd>Ctrl</kbd>+<kbd>U</kbd> | Clear the field |
-| <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save what you typed as your new defaults |
-| <kbd>Ctrl</kbd>+<kbd>G</kbd> | **Go live** |
-| <kbd>Esc</kbd> | Back a screen (or close the autocomplete) |
+| `msm` / `msm tui` | Open the terminal interface (the default) |
+| `msm login <twitch\|youtube\|all>` | Authorise a platform in your browser |
+| `msm logout <twitch\|youtube\|all>` | Forget a saved login |
+| `msm status` | Show which platforms are logged in |
+| `msm go [--platforms <LIST>] [-y] [--json]` | Apply the preset without the interface |
+| `msm key <twitch\|youtube>` | Print one stream key — a separate command so a key is never printed by accident |
+| `msm categories <QUERY>` | Search Twitch's category list |
+| `msm streams [--show-keys]` | List the stream objects on your YouTube channel |
+| `msm cleanup [-y]` | List (and with `-y`, delete) broadcasts that never went live |
+| `msm init` | Write a commented starter config file |
+| `msm paths` | Show where config, tokens and logs live |
 
-The **Twitch category** field searches Twitch's real category list as you type.
-You must pick a match with <kbd>Enter</kbd> — Twitch's API only accepts a numeric
-category id, not a name, so a typed-but-unselected name cannot be submitted. The
-form tells you when this is the case, and the footer hint turns green only when
-everything is genuinely ready to send.
+`-c, --config <FILE>` works on every subcommand. Full flag-by-flag detail,
+including the shape of the `--json` document, is in
+[docs/commands.md](docs/commands.md).
 
-The **Language** field searches by name in English or in the language's own
-name, so typing `polski`, `polish` or `pl` all find Polish.
-
-**Screen 3 — the dashboard.** URLs, stream keys and live statistics.
-
-| Key | Does |
-|---|---|
-| <kbd>r</kbd> | Refresh statistics now |
-| <kbd>k</kbd> | Show/hide the stream key |
-| <kbd>e</kbd> | Go back to the form and submit again |
-| <kbd>q</kbd> | Quit |
-
-Stream keys are masked by default, because this window is often on screen while
-you are streaming.
+</details>
 
 ---
 
-## How it works with OBS and Aitum
+## 🎛️ How it fits OBS and Aitum
 
 Your OBS setup does not change. Configure it once, exactly as you do now:
 
@@ -246,222 +186,91 @@ Your OBS setup does not change. Configure it once, exactly as you do now:
 - **Aitum multistream** holds your YouTube RTMP URL and stream key as a second
   destination.
 
-`msm` deliberately **reuses your existing YouTube stream key** rather than
-creating a new one for each broadcast.
-
-This matters more than it sounds. YouTube's API has two separate objects: a
-*broadcast* (the event, with a title and a watch page) and a *stream* (the RTMP
-pipe with the key). Creating a new stream object mints a **brand new key** — so a
-tool that naively created one per session would hand you a different key every
-time, and you would have to paste it into Aitum before every stream. That is the
-exact chore this tool exists to remove.
-
-Instead it finds a reusable stream already on your channel and binds the new
-broadcast to that. Your key stays the same forever, and the dashboard tells you
-which branch it took:
-
-> *Reused your existing stream key "Default stream key" — OBS and Aitum need no changes.*
-
-If you have no reusable key yet, it creates one and says so clearly, so you know
-to paste it into Aitum that one time.
-
-If you have several keys and want a specific one, set `stream_id` in the config.
-The behaviour is controlled by `reuse_stream = true`, which you should leave on.
-
-**Your normal workflow becomes:**
+Your session then becomes:
 
 ```
 msm  →  fill the form  →  Ctrl+G  →  OBS "Start Streaming"
 ```
 
-With `youtube_auto_start = true` (the default), YouTube flips the broadcast live
-by itself the moment it sees the feed from OBS. You never touch YouTube Studio.
+### 🔑 Why your YouTube stream key never changes
+
+This is the part that makes the whole thing work, so it is worth spelling out.
+
+YouTube's API has two separate objects: a **broadcast** (the event, with a title
+and a watch page) and a **stream** (the RTMP pipe that carries the video, with
+the key). Creating a new stream object mints a **brand new key**. A tool that
+created one per session would hand you a different key every time, and you would
+have to paste it into Aitum before every stream — the exact chore this tool
+exists to remove.
+
+So `msm` **reuses** a stream that is already on your channel and binds the new
+broadcast to that one. Your key stays the same, and the dashboard tells you which
+branch it took:
+
+> *Reused your existing stream key "Default stream key" — OBS and Aitum need no changes.*
+
+If the bind fails, or you have no reusable stream yet, it creates one and says so
+plainly, so you know to update Aitum that one time. If your channel has several
+keys, run `msm streams` to see them and pin the one you want with `stream_id` in
+the config.
+
+More on the OBS and Aitum side, including the Aitum fields to fill in:
+[docs/obs-and-aitum.md](docs/obs-and-aitum.md).
 
 ---
 
-## Configuration file
+## 📚 Documentation
 
-Run `msm paths` to find it. Everything in the form can also be set here, which
-is the "just edit a file" workflow:
+The detail lives in `docs/`, and is also published at
+**[worxbend.github.io/multistream-manager](https://worxbend.github.io/multistream-manager/)**.
 
-```toml
-[preset]
-title = "Building a Rust TUI from scratch"
-description = """
-Working on multistream-manager today.
-
-Source: https://github.com/w0rxbend/multistream-manager
-"""
-tags = ["rust", "programming", "livecoding"]
-twitch_category = "Software and Game Development"
-youtube_category_id = "28"
-language = "en"
-privacy = "public"
-platforms = ["twitch", "youtube"]
-```
-
-Then skip the interface entirely:
-
-```bash
-msm go            # shows a summary and asks for confirmation
-msm go --yes      # no prompt, for scripts
-```
-
-Keep several presets and choose between them:
-
-```bash
-msm --config ~/streams/coding.toml go
-msm --config ~/streams/gaming.toml go
-```
-
-Pressing <kbd>Ctrl</kbd>+<kbd>S</kbd> in the form writes whatever you typed back
-into `[preset]`, so the two ways of working feed each other.
-
----
-
-## Command reference
-
-| Command | What it does |
+| Page | What is in it |
 |---|---|
-| `msm` | Open the interface (the normal way to use it) |
-| `msm login <twitch\|youtube\|all>` | Authorise a platform in your browser |
-| `msm logout <twitch\|youtube\|all>` | Forget a saved login |
-| `msm status` | Show which platforms are logged in |
-| `msm go [--platforms …] [--yes]` | Apply the config preset without the interface |
-| `msm key twitch` | Print your Twitch stream key |
-| `msm categories <search>` | Search Twitch's category list |
-| `msm init` | Write a starter config file |
-| `msm paths` | Show where config, tokens and logs live |
+| 📖 [Overview](docs/README.md) | Where to start, and what each page covers |
+| 🧭 [Getting started](docs/getting-started.md) | Twitch and Google credentials, first login, first stream |
+| ⚙️ [Configuration](docs/configuration.md) | Every setting in `config.toml`, and using it as a preset |
+| ⌨️ [Commands](docs/commands.md) | Every subcommand and flag, with output examples |
+| 🎥 [OBS and Aitum](docs/obs-and-aitum.md) | Wiring the two destinations up once and leaving them alone |
+| 🧩 [How it works](docs/how-it-works.md) | The API calls, the platform differences, the design decisions |
+| 🩺 [Troubleshooting](docs/troubleshooting.md) | Error messages, what they mean, what to do about them |
 
 ---
 
-## How the platforms differ
-
-Worth knowing, because it explains some of the tool's behaviour:
-
-**Twitch is stateless.** Your channel always exists. "Going live" is just
-pointing OBS at it. So the Twitch side is a single API call that updates the
-channel's title, category, language and tags. There is nothing to create and
-nothing to clean up. Twitch has no description field at all, so the description
-you type is YouTube-only.
-
-**YouTube is event-based.** Each stream is a distinct broadcast object with its
-own watch URL, and it must be created ahead of time. Going live there takes four
-calls: find a stream key, create the broadcast, bind them together, then update
-the resulting video's tags and category — because, awkwardly, the broadcast
-creation endpoint has no fields for tags or category.
-
-Some consequences:
-
-- **Titles**: Twitch allows 140 characters, YouTube only 100. The counter in the
-  form shows the tighter of the two limits for whatever you have selected. If a
-  title fits Twitch but not YouTube, it is shortened for YouTube only rather than
-  failing the whole submission.
-- **Tags**: Twitch allows at most 10, each 25 characters, with no spaces or
-  punctuation. `live coding` is sent to Twitch as `livecoding` and the form warns
-  you when it is about to do that. YouTube accepts them as typed.
-- **Hashtags**: your tags are also appended to the **YouTube title** as
-  `#hashtags`, as many as fit inside the 100-character limit. YouTube only links
-  the first three, so there is no point forcing more.
-- **Resubmitting**: pressing <kbd>e</kbd> on the dashboard and going live again
-  updates the Twitch channel in place, but creates a **new** YouTube broadcast.
-  That is how YouTube works; the old one is left as an unstarted broadcast you
-  can delete in Studio.
-
----
-
-## Troubleshooting
-
-**`could not listen on ... :8017`**
-Something else has that port. Change `oauth_port` in the config *and* update the
-redirect URI in both developer consoles to match.
-
-**Google says "Access blocked: … has not completed the Google verification process"**
-You have not added your own account under **OAuth consent screen → Test users**.
-See [step 2](#step-2-youtube-credentials).
-
-**`invalid_grant` when starting up**
-The saved refresh token was revoked or expired. Run `msm login <platform>` again.
-
-**Twitch: "your saved token does not include the channel:manage:broadcast permission"**
-Your login predates a permission the tool now needs. Run `msm login twitch`.
-
-**YouTube: `quotaExceeded`**
-The YouTube Data API has a daily quota (10,000 units by default) and every
-statistics refresh spends a little of it. Raise `poll_interval_secs` in the
-config. The quota resets at midnight Pacific time.
-
-**YouTube: `liveStreamingNotEnabled`**
-Enable live streaming at <https://youtube.com/features>. First-time activation
-takes 24 hours.
-
-**My YouTube stream key changed**
-It should not. `msm` reuses the reusable stream already on your channel. If it
-could not — because the key it found belongs to a single past broadcast and
-cannot be bound again — it creates a new one and says so explicitly in the
-YouTube panel. Pin the key you want with `stream_id` in the config to be certain.
-
-**One platform worked and the other failed**
-That is intentional. Nothing is rolled back, so the platform that succeeded is
-genuinely ready and you can stream to it right now. The failure and its reason
-are shown in its own panel.
-
-**Everything looks broken and I want to see why**
-There is a log file — `msm paths` will tell you where. Watch it live:
+## 🛠️ Development
 
 ```bash
-MSM_LOG=debug msm      # in one terminal
-tail -f "$(msm paths | awk '/^Log:/{print $2}')"   # in another
-```
-
----
-
-## Security notes
-
-- Your **client secrets** and **OAuth tokens** are stored in your user config
-  directory with `0600` permissions — readable only by you.
-- The tool never sees your Twitch or Google password. Login happens on their
-  sites; it only receives a token afterwards.
-- The OAuth flow uses **PKCE** and a random `state` value, so an authorisation
-  code intercepted in transit cannot be redeemed by anyone else.
-- **Stream keys are masked** in the interface until you press <kbd>k</kbd>, and
-  are never written to the log file, never saved to disk, and never printed by
-  `msm go`. `msm key` exists as a separate, deliberate command for when you
-  actually need one.
-
----
-
-## Development
-
-```bash
-cargo test          # 147 tests, no network access required
+cargo test               # 192 tests, no network access required
 cargo clippy --all-targets
 cargo fmt
 ```
 
-The tests are all offline. API responses are tested by parsing recorded JSON
-shapes, and the whole terminal interface is tested by driving real key events
-through `App` and rendering frames into an in-memory terminal — so there is no
-mocking framework and nothing to configure before running them.
+Every test is offline. API responses are checked by parsing recorded JSON
+shapes, and the terminal interface is checked by driving real key events through
+`App` and rendering frames into an in-memory terminal — so there is no mocking
+framework and nothing to set up before running them.
 
 **The layout, roughly:**
 
 | File | Responsibility |
 |---|---|
-| `model.rs` | The domain types. One `StreamPlan` describes the broadcast; platform limits and validation live here. |
-| `backend.rs` | The `Backend` trait every platform implements. |
-| `twitch.rs` / `youtube.rs` | The two API clients. Nothing else knows any HTTP. |
-| `engine.rs` | Fans one plan out to every platform concurrently, collecting per-platform results. |
-| `auth/` | The OAuth flow, token storage and silent renewal. |
-| `ui/app.rs` | All UI state and keyboard handling — pure functions, no I/O, heavily tested. |
-| `ui/worker.rs` | The background task that does the slow API work, so the interface never freezes. |
-| `ui/draw.rs` | Rendering. Reads state, never mutates it. |
+| `model.rs` | The domain types. One `StreamPlan` describes the broadcast; platform limits and validation live here |
+| `backend.rs` | The `Backend` trait every platform implements |
+| `twitch.rs` / `youtube.rs` | The two API clients. All *platform* API calls live here — the UI never talks to Twitch or YouTube directly |
+| `engine.rs` | Fans one plan out to every platform at once, collecting a result per platform |
+| `auth/` | The OAuth flow (loopback redirect with PKCE), token storage and silent renewal |
+| `ui/app.rs` | All interface state and keyboard handling — pure functions, no I/O, heavily tested |
+| `ui/worker.rs` | The background task that does the slow API work, so the interface never freezes |
+| `ui/draw.rs` | Rendering. Reads state, never changes it |
 
-Adding a third platform means writing one file implementing `Backend` and adding
-a variant to `Platform`; the interface does not need to change.
+Adding a third platform means writing one file that implements `Backend` and
+adding a variant to `Platform`; the interface does not need to change.
+
+Contributions are welcome. Please run `cargo fmt`, `cargo clippy --all-targets`
+and `cargo test` before opening a pull request — CI runs all three, plus a build
+against Rust 1.88 to hold the minimum supported version.
 
 ---
 
-## Licence
+## 📄 Licence
 
 MIT. See [LICENSE](LICENSE).

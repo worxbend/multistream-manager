@@ -35,6 +35,12 @@ pub enum Command {
     GoLive(Box<StreamPlan>),
     /// Refresh the statistics.
     PollStats,
+    /// Hand a URL to the system browser.
+    ///
+    /// This goes through the worker rather than happening in the key handler
+    /// because launching a browser touches the outside world, and the rule in
+    /// the UI half is that it only ever mutates state and returns commands.
+    OpenUrl(String),
 }
 
 /// A message from the worker back to the UI.
@@ -126,7 +132,16 @@ pub async fn run(
             } => {
                 let Some(engine) = engine.as_mut() else {
                     // Not connected yet, so there is nothing to search against.
-                    // Silently ignoring this is right: the user is just typing.
+                    // Answer anyway, with nothing: an empty reply is how the UI
+                    // learns that the API list is unavailable and that it should
+                    // fall back to its built-in list. Staying silent here is
+                    // what used to leave the YouTube category field apparently
+                    // dead until the first successful login.
+                    let _ = events.send(Event::Categories {
+                        platform,
+                        results: Vec::new(),
+                        generation,
+                    });
                     continue;
                 };
 
@@ -209,6 +224,32 @@ pub async fn run(
                 let stats = engine.poll_stats().await;
                 let _ = events.send(Event::Stats(stats));
             }
+
+            Command::OpenUrl(url) => {
+                // `that_detached` starts the browser and returns immediately.
+                // The plain `that` would wait for the browser process to exit,
+                // which on a fresh browser launch means the worker would stop
+                // answering the dashboard for the rest of the session.
+                match open::that_detached(&url) {
+                    Ok(()) => {
+                        let _ = events.send(Event::Log {
+                            level: LogLevel::Info,
+                            message: format!("Opened {url} in your browser."),
+                        });
+                    }
+                    Err(err) => {
+                        // Headless machines and bare window managers often have
+                        // no browser to hand. Print the URL so it can be copied
+                        // out of the log by hand.
+                        let _ = events.send(Event::Log {
+                            level: LogLevel::Warning,
+                            message: format!(
+                                "Could not open a browser ({err}). The page is at {url}"
+                            ),
+                        });
+                    }
+                }
+            }
         }
     }
 }
@@ -257,6 +298,45 @@ mod tests {
                 assert!(message.contains("Not connected"));
             }
             other => panic!("expected a log line, got {other:?}"),
+        }
+
+        drop(command_tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn searching_before_connecting_answers_with_nothing_rather_than_staying_silent() {
+        // The UI treats an empty reply as "the API list is unavailable" and
+        // falls back to its built-in YouTube category list. That only works if
+        // an unanswerable search still produces a reply — staying silent is what
+        // used to leave the category field looking dead before the first login.
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        let handle = tokio::spawn(run(Config::default(), command_rx, event_tx));
+
+        command_tx
+            .send(Command::SearchCategories {
+                platform: Platform::YouTube,
+                query: "gam".into(),
+                generation: 7,
+            })
+            .await
+            .unwrap();
+
+        match event_rx.recv().await.expect("a reply should arrive") {
+            Event::Categories {
+                platform,
+                results,
+                generation,
+            } => {
+                assert_eq!(platform, Platform::YouTube);
+                assert!(results.is_empty());
+                // The generation is echoed back, or the UI would discard the
+                // reply as stale and go on waiting forever.
+                assert_eq!(generation, 7);
+            }
+            other => panic!("expected a category reply, got {other:?}"),
         }
 
         drop(command_tx);

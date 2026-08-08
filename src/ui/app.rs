@@ -49,6 +49,15 @@ pub struct Popup {
     /// `true` while a search request is in flight, so the UI can say "searching…"
     /// instead of "no matches" before the answer has arrived.
     pub loading: bool,
+    /// `true` when `items` are stand-ins from a built-in list rather than the
+    /// platform's own answer.
+    ///
+    /// While a search is in flight the previous results are normally left on
+    /// screen, so that the list does not blink empty between keystrokes. That is
+    /// the right thing to do with real results, but a *fallback* list left
+    /// unfiltered would keep showing categories that no longer match what has
+    /// been typed. This flag is how the two cases are told apart.
+    pub fallback: bool,
 }
 
 impl Popup {
@@ -329,11 +338,29 @@ impl App {
                     Platform::Twitch => Field::TwitchCategory,
                     Platform::YouTube => Field::YouTubeCategory,
                 };
+
+                let mut items: Vec<(String, String)> =
+                    results.into_iter().map(|c| (c.id, c.name)).collect();
+
+                // An empty reply means the API list could not be fetched: either
+                // nothing is connected yet, or the search failed and the worker
+                // answered with nothing so the spinner would stop. YouTube has a
+                // short built-in list for exactly this case, so use it rather
+                // than leaving the field looking broken. Twitch has no such
+                // list — its category catalogue is far too large to embed — so
+                // an empty reply there stays empty.
+                let mut fallback = false;
+                if items.is_empty() && field == Field::YouTubeCategory {
+                    items = self.builtin_youtube_categories();
+                    fallback = true;
+                }
+
                 if let Some(popup) = self.popup.as_mut() {
                     if popup.field == field {
-                        popup.items = results.into_iter().map(|c| (c.id, c.name)).collect();
+                        popup.items = items;
                         popup.cursor = 0;
                         popup.loading = false;
+                        popup.fallback = fallback;
                     }
                 }
             }
@@ -609,6 +636,9 @@ impl App {
                     items,
                     cursor: 0,
                     loading: false,
+                    // The language table is complete in itself, not a stand-in
+                    // for something fetched from a platform.
+                    fallback: false,
                 });
                 vec![]
             }
@@ -628,18 +658,29 @@ impl App {
 
                 // Keep whatever is already listed on screen while the new
                 // results are fetched, so the list does not blink empty.
-                let existing = self
-                    .popup
-                    .as_ref()
-                    .filter(|p| p.field == field)
-                    .map(|p| p.items.clone())
-                    .unwrap_or_default();
+                let carried = self.popup.as_ref().filter(|p| p.field == field);
+                let carried_is_fallback = carried.map(|p| p.fallback).unwrap_or(false);
+                let mut items = carried.map(|p| p.items.clone()).unwrap_or_default();
+
+                // Seed the YouTube list from the built-in categories, so the
+                // field responds to the very first keystroke instead of sitting
+                // empty until a reply arrives — which, before the first login,
+                // never happens at all. Re-filtering on every keystroke while
+                // the fallback is what is on screen keeps the list honest;
+                // real results are left alone, because those are worth keeping
+                // visible until better ones replace them.
+                let mut fallback = carried_is_fallback;
+                if field == Field::YouTubeCategory && (items.is_empty() || carried_is_fallback) {
+                    items = self.builtin_youtube_categories();
+                    fallback = true;
+                }
 
                 self.popup = Some(Popup {
                     field,
-                    items: existing,
+                    items,
                     cursor: 0,
                     loading: true,
+                    fallback,
                 });
 
                 vec![Command::SearchCategories {
@@ -650,6 +691,26 @@ impl App {
             }
             _ => vec![],
         }
+    }
+
+    /// The built-in YouTube category list, filtered by whatever is typed in the
+    /// YouTube category field, in the `(id, label)` shape the popup wants.
+    ///
+    /// This is the same arrangement the language field has always used: a short
+    /// list compiled into the binary, filtered locally, needing neither a login
+    /// nor any API quota. It is what the field falls back to whenever the full
+    /// list fetched from YouTube is unavailable.
+    fn builtin_youtube_categories(&self) -> Vec<(String, String)> {
+        let query = self
+            .inputs
+            .get(&Field::YouTubeCategory)
+            .map(|input| input.value().to_string())
+            .unwrap_or_default();
+
+        youtube::search_common(&query)
+            .into_iter()
+            .map(|category| (category.id, category.name))
+            .collect()
     }
 
     /// Apply the highlighted autocomplete entry to its field.
@@ -792,6 +853,22 @@ impl App {
                     );
                 }
             }
+            KeyCode::Char('o') => {
+                // Open the watch page, which is the one link you actually want
+                // in front of you once the stream is up — to check the delay, to
+                // paste into chat, or to see what viewers see.
+                match self.first_watch_url() {
+                    Some(url) => {
+                        self.toast = Some(format!("Opening {url}"));
+                        return vec![Command::OpenUrl(url)];
+                    }
+                    None => {
+                        self.toast = Some(
+                            "No platform has a watch page yet — nothing has gone live.".to_string(),
+                        );
+                    }
+                }
+            }
             KeyCode::Char('e') | KeyCode::Esc => {
                 // Back to the form to change something and resubmit. On YouTube
                 // this creates a *new* broadcast rather than editing the old one.
@@ -814,6 +891,19 @@ impl App {
             .iter()
             .find(|r| r.platform == platform)
             .and_then(|r| r.outcome.as_ref().ok())
+    }
+
+    /// The watch URL of the first platform that is ready, in the canonical
+    /// platform order rather than in whichever order the replies happened to
+    /// arrive — so the same key press opens the same page every time.
+    ///
+    /// A platform that failed, or that succeeded without reporting a watch page,
+    /// is skipped rather than stopping the search.
+    pub fn first_watch_url(&self) -> Option<String> {
+        Platform::ALL
+            .iter()
+            .filter_map(|platform| self.outcome_for(*platform))
+            .find_map(|outcome| outcome.watch_url.clone())
     }
 
     /// The statistics snapshot for a platform.
@@ -1565,6 +1655,203 @@ mod tests {
         assert_eq!(app.input(Field::Tags).unwrap().value(), "rust");
         assert_eq!(app.plan().language, "pl");
         assert_eq!(app.selected, vec![Platform::Twitch]);
+    }
+
+    #[test]
+    fn typing_in_the_youtube_category_field_offers_the_builtin_list_immediately() {
+        // Regression: this field only ever showed anything once a search reply
+        // arrived, so before the first login — when nothing is connected and no
+        // reply ever comes — typing in it did nothing at all, with no
+        // explanation on screen.
+        let mut app = app_on_form();
+        app.field_cursor = Field::ORDER
+            .iter()
+            .position(|f| *f == Field::YouTubeCategory)
+            .unwrap();
+        app.inputs.get_mut(&Field::YouTubeCategory).unwrap().clear();
+
+        let commands = type_and_collect(&mut app, "gam");
+
+        let popup = app.popup.as_ref().expect("a popup should have opened");
+        assert_eq!(
+            popup.items,
+            vec![("20".to_string(), "Gaming".to_string())],
+            "the built-in list should be filtered locally, like the language field"
+        );
+        // The API search is still issued: the full list replaces these as soon
+        // as YouTube can be reached.
+        assert!(commands.iter().any(|c| matches!(
+            c,
+            Command::SearchCategories {
+                platform: Platform::YouTube,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn an_empty_youtube_search_reply_falls_back_to_the_builtin_list() {
+        // The worker answers with nothing both when it cannot search at all and
+        // when the search failed. Either way the field must stay usable rather
+        // than showing "no matches" for a category that plainly exists.
+        let mut app = app_on_form();
+        app.field_cursor = Field::ORDER
+            .iter()
+            .position(|f| *f == Field::YouTubeCategory)
+            .unwrap();
+        app.inputs.get_mut(&Field::YouTubeCategory).unwrap().clear();
+        type_and_collect(&mut app, "music");
+
+        let generation = app.search_generation;
+        app.handle_event(Event::Categories {
+            platform: Platform::YouTube,
+            results: vec![],
+            generation,
+        });
+
+        let popup = app.popup.as_ref().unwrap();
+        assert_eq!(popup.items, vec![("10".to_string(), "Music".to_string())]);
+        assert!(!popup.loading, "the spinner must stop either way");
+    }
+
+    #[test]
+    fn a_real_youtube_category_reply_replaces_the_builtin_fallback() {
+        // Once YouTube can be reached its full list is the better answer, and
+        // it must not be crowded out by the ten entries compiled in here.
+        let mut app = app_on_form();
+        app.field_cursor = Field::ORDER
+            .iter()
+            .position(|f| *f == Field::YouTubeCategory)
+            .unwrap();
+        app.inputs.get_mut(&Field::YouTubeCategory).unwrap().clear();
+        type_and_collect(&mut app, "auto");
+
+        let generation = app.search_generation;
+        app.handle_event(Event::Categories {
+            platform: Platform::YouTube,
+            results: vec![Category {
+                id: "2".into(),
+                name: "Autos & Vehicles".into(),
+            }],
+            generation,
+        });
+
+        let popup = app.popup.as_ref().unwrap();
+        assert_eq!(
+            popup.items,
+            vec![("2".to_string(), "Autos & Vehicles".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_category_picked_from_the_builtin_list_is_submittable() {
+        // The fallback is only worth having if what it offers can actually be
+        // accepted and sent, so this drives the whole path end to end.
+        let mut app = app_on_form();
+        app.selected = vec![Platform::YouTube];
+        app.inputs.get_mut(&Field::Title).unwrap().set("A title");
+        app.field_cursor = Field::ORDER
+            .iter()
+            .position(|f| *f == Field::YouTubeCategory)
+            .unwrap();
+        app.inputs.get_mut(&Field::YouTubeCategory).unwrap().clear();
+
+        type_and_collect(&mut app, "education");
+        app.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(app.youtube_category_id, "27");
+        assert_eq!(
+            app.input(Field::YouTubeCategory).unwrap().value(),
+            "Education"
+        );
+        assert!(app.plan().is_submittable(&[Platform::YouTube]));
+    }
+
+    #[test]
+    fn an_empty_twitch_search_reply_is_not_given_a_builtin_fallback() {
+        // Twitch's category catalogue is far too large to compile in, so there
+        // is nothing honest to fall back to and "no matches" is the truth.
+        let mut app = app_on_form();
+        app.field_cursor = Field::ORDER
+            .iter()
+            .position(|f| *f == Field::TwitchCategory)
+            .unwrap();
+        type_and_collect(&mut app, "chess");
+
+        let generation = app.search_generation;
+        app.handle_event(Event::Categories {
+            platform: Platform::Twitch,
+            results: vec![],
+            generation,
+        });
+
+        assert!(app.popup.as_ref().unwrap().items.is_empty());
+    }
+
+    #[test]
+    fn o_on_the_dashboard_opens_the_watch_page_of_the_first_ready_platform() {
+        let mut app = app();
+        app.screen = Screen::Dashboard;
+        app.selected = Platform::ALL.to_vec();
+        app.results = vec![
+            PlatformResult {
+                platform: Platform::Twitch,
+                outcome: Ok(GoLiveOutcome {
+                    watch_url: Some("https://twitch.tv/example".into()),
+                    ..Default::default()
+                }),
+            },
+            PlatformResult {
+                platform: Platform::YouTube,
+                outcome: Ok(GoLiveOutcome {
+                    watch_url: Some("https://youtube.com/watch?v=abc".into()),
+                    ..Default::default()
+                }),
+            },
+        ];
+
+        let commands = app.handle_key(key(KeyCode::Char('o')));
+        assert!(
+            matches!(commands.as_slice(), [Command::OpenUrl(url)] if url == "https://twitch.tv/example"),
+            "got {commands:?}"
+        );
+    }
+
+    #[test]
+    fn o_skips_a_platform_that_failed_and_opens_the_one_that_worked() {
+        // Partial success is normal here, and the key should still do something
+        // useful rather than giving up because the first platform is not there.
+        let mut app = app();
+        app.screen = Screen::Dashboard;
+        app.selected = Platform::ALL.to_vec();
+        app.results = vec![
+            PlatformResult {
+                platform: Platform::Twitch,
+                outcome: Err("out of quota".into()),
+            },
+            PlatformResult {
+                platform: Platform::YouTube,
+                outcome: Ok(GoLiveOutcome {
+                    watch_url: Some("https://youtube.com/watch?v=abc".into()),
+                    ..Default::default()
+                }),
+            },
+        ];
+
+        let commands = app.handle_key(key(KeyCode::Char('o')));
+        assert!(
+            matches!(commands.as_slice(), [Command::OpenUrl(url)] if url == "https://youtube.com/watch?v=abc")
+        );
+    }
+
+    #[test]
+    fn o_with_nothing_live_explains_itself_instead_of_opening_a_blank_page() {
+        let mut app = app();
+        app.screen = Screen::Dashboard;
+
+        let commands = app.handle_key(key(KeyCode::Char('o')));
+        assert!(commands.is_empty());
+        assert!(app.toast.as_deref().unwrap().contains("watch page"));
     }
 
     #[test]
