@@ -1,0 +1,71 @@
+[package]
+name = "multistream-manager"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Terminal UI for configuring and going live on Twitch and YouTube simultaneously"
+license = "MIT"
+repository = "https://github.com/w0rxbend/multistream-manager"
+readme = "README.md"
+keywords = ["twitch", "youtube", "streaming", "tui", "obs"]
+categories = ["command-line-utilities", "multimedia"]
+
+[[bin]]
+name = "msm"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime. "rt-multi-thread" lets the stats poller run on a worker thread
+# while the terminal UI keeps redrawing on the main one.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal"] }
+
+# HTTP client. rustls-tls avoids depending on the system OpenSSL, which keeps
+# the binary portable across distros.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+
+# Terminal UI.
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tokio-stream = "0.1"
+
+# Serialisation: JSON for the APIs, TOML for the on-disk config.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Command line argument parsing.
+clap = { version = "4", features = ["derive"] }
+
+# Error handling. anyhow for propagating, thiserror for typed API errors.
+anyhow = "1"
+thiserror = "2"
+
+# Timestamps for scheduledStartTime and uptime counters.
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# Locating the per-user config directory in an OS-correct way.
+directories = "5"
+
+# Opening the system browser for the OAuth consent screen.
+open = "5"
+
+# PKCE code challenge generation (Google requires it, Twitch tolerates it).
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+
+# Percent-encoding for building OAuth URLs and API query strings safely.
+urlencoding = "2"
+
+# Structured logging to a file (the TUI owns stdout, so logs cannot go there).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "test-util"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
