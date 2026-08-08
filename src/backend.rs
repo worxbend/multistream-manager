@@ -45,6 +45,15 @@ pub trait Backend: Send {
         Box::pin(async { Ok(Vec::new()) })
     }
 
+    /// Replace the access token this backend sends on every request.
+    ///
+    /// Access tokens are short-lived — Google's last about an hour, Twitch's a
+    /// few hours — but a streaming session routinely runs longer than that. The
+    /// engine therefore renews the token before each batch of work and pushes
+    /// the fresh one in here, rather than each backend holding whatever token
+    /// happened to be valid when it was built.
+    fn set_access_token(&mut self, token: String);
+
     /// Read the RTMP stream key without changing anything about the channel.
     ///
     /// This backs `msm key`, which exists so that a key can be fetched for

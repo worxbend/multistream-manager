@@ -19,6 +19,14 @@ use crate::paths;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Where this config was read from, so `save()` writes back to the same
+    /// file. Not part of the file format itself.
+    ///
+    /// Without this, `--config ~/streams/coding.toml` would load from that file
+    /// but save to the default one — quietly writing the preset, and a copy of
+    /// the client secrets, into the wrong place.
+    #[serde(skip)]
+    pub source_path: Option<std::path::PathBuf>,
     pub twitch: TwitchConfig,
     pub youtube: YouTubeConfig,
     pub general: GeneralConfig,
@@ -218,12 +226,13 @@ impl Config {
         }
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let config: Config = toml::from_str(&text).with_context(|| {
+        let mut config: Config = toml::from_str(&text).with_context(|| {
             format!(
                 "parsing {}. If you have been editing it by hand, check for a missing quote or bracket.",
                 path.display()
             )
         })?;
+        config.source_path = Some(path);
         Ok(config)
     }
 
@@ -232,7 +241,10 @@ impl Config {
     pub fn load_from(path: &std::path::Path) -> Result<Self> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        let mut config: Config =
+            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        config.source_path = Some(path.to_path_buf());
+        Ok(config)
     }
 
     /// Write the config back out.
@@ -241,7 +253,11 @@ impl Config {
     /// secrets. The comment header is re-added on every save so a file written
     /// by the application still explains itself to whoever opens it next.
     pub fn save(&self) -> Result<()> {
-        let path = paths::config_file()?;
+        // Write back to wherever this config came from, not to the default path.
+        let path = match &self.source_path {
+            Some(path) => path.clone(),
+            None => paths::config_file()?,
+        };
         let body = toml::to_string_pretty(self).context("serialising config to TOML")?;
         let with_header = format!("{}\n{body}", CONFIG_HEADER);
         paths::write_secret_file(&path, &with_header)?;
@@ -300,8 +316,17 @@ impl Config {
         std::time::Duration::from_secs(self.general.poll_interval_secs.clamp(5, 3600))
     }
 
-    /// The redirect URI registered with both providers. Both halves of the OAuth
-    /// exchange must use the byte-identical string, so it is built in one place.
+    /// The redirect URI registered with both providers.
+    ///
+    /// Both halves of the OAuth exchange must send the byte-identical string,
+    /// so it is built in one place.
+    ///
+    /// This deliberately uses the name `localhost` rather than a literal IP:
+    /// Twitch documents `localhost` as the host permitted with a plain `http`
+    /// redirect, and a bare address risks being refused at registration. The
+    /// consequence is that `localhost` may resolve to either `127.0.0.1` or
+    /// `::1` depending on the machine, so the callback listener binds *both*
+    /// loopback families — see `oauth::Loopback`.
     pub fn redirect_uri(&self) -> String {
         format!("http://localhost:{}/callback", self.general.oauth_port)
     }

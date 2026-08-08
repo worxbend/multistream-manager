@@ -169,11 +169,17 @@ impl TwitchBackend {
             anyhow!("no Twitch category was selected, and Twitch requires one to update a channel")
         })?;
 
+        let tags = plan.twitch_tags();
+
         let body = UpdateChannelRequest {
             title: plan.twitch_title(),
             game_id: category.id.clone(),
             broadcaster_language: plan.language.clone(),
-            tags: plan.twitch_tags(),
+            // Twitch documents an empty array as "remove all tags". Sending one
+            // when the user simply did not set any tags would silently wipe the
+            // tags already on their channel, so the field is omitted instead —
+            // every field on this endpoint is optional.
+            tags: if tags.is_empty() { None } else { Some(tags) },
         };
 
         let url = format!("{HELIX}/channels?broadcaster_id={id}");
@@ -268,10 +274,14 @@ impl Backend for TwitchBackend {
                 stats.live = stream.stream_type == "live";
                 stats.viewers = Some(stream.viewer_count);
                 stats.started_at = stream.started_at;
-                stats.extra.push(Stat {
-                    label: "Category".into(),
-                    value: stream.game_name,
-                });
+                // `game_name` comes back as an empty string when the channel
+                // has no category set, which would render a labelled blank row.
+                if !stream.game_name.is_empty() {
+                    stats.extra.push(Stat {
+                        label: "Category".into(),
+                        value: stream.game_name,
+                    });
+                }
             }
 
             if let Some(followers) = self.follower_count().await {
@@ -293,6 +303,10 @@ impl Backend for TwitchBackend {
 
     fn search_categories<'a>(&'a mut self, query: &'a str) -> BoxFuture<'a, Result<Vec<Category>>> {
         Box::pin(async move { self.search_categories_impl(query).await })
+    }
+
+    fn set_access_token(&mut self, token: String) {
+        self.access_token = token;
     }
 
     fn stream_key(&mut self) -> BoxFuture<'_, Result<Option<String>>> {
@@ -399,7 +413,10 @@ struct UpdateChannelRequest {
     title: String,
     game_id: String,
     broadcaster_language: String,
-    tags: Vec<String>,
+    /// Omitted entirely when there are no tags. See `update_channel` for why
+    /// sending `[]` here would be destructive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tags: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -444,12 +461,30 @@ mod tests {
             title: "Hello".into(),
             game_id: "1469308723".into(),
             broadcaster_language: "en".into(),
-            tags: vec!["rust".into()],
+            tags: Some(vec!["rust".into()]),
         };
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["game_id"], "1469308723");
         assert_eq!(json["broadcaster_language"], "en");
         assert_eq!(json["tags"][0], "rust");
+    }
+
+    #[test]
+    fn no_tags_omits_the_field_rather_than_sending_an_empty_array() {
+        // Twitch documents `"tags": []` as "remove every tag from the channel",
+        // so sending it for a preset that simply has no tags would destroy tags
+        // the user set elsewhere.
+        let request = UpdateChannelRequest {
+            title: "Hello".into(),
+            game_id: "1".into(),
+            broadcaster_language: "en".into(),
+            tags: None,
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert!(
+            json.get("tags").is_none(),
+            "an empty tag list must be omitted, not sent as []: {json}"
+        );
     }
 
     #[test]

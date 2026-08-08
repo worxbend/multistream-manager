@@ -21,6 +21,9 @@ use crate::youtube::YouTubeBackend;
 
 /// Holds one live backend per selected platform.
 pub struct Engine {
+    /// Kept so tokens can be renewed later. A streaming session outlives an
+    /// access token, so the engine cannot rely on the ones it started with.
+    config: Config,
     backends: HashMap<Platform, Box<dyn Backend>>,
 }
 
@@ -60,7 +63,42 @@ impl Engine {
             backends.insert(platform, backend);
         }
 
-        Ok(Self { backends })
+        Ok(Self {
+            config: config.clone(),
+            backends,
+        })
+    }
+
+    /// Renew every backend's access token if it is close to expiring.
+    ///
+    /// Called before each batch of API work. `auth::access_token` is a no-op
+    /// when the current token still has life left in it, so this costs nothing
+    /// in the common case; when a token has aged out it silently exchanges the
+    /// refresh token for a new one.
+    ///
+    /// Without this, a session longer than an hour would see every statistics
+    /// poll fail with a 401 and the dashboard would freeze on stale numbers —
+    /// which is precisely the long-running case this application exists for.
+    async fn refresh_tokens(&mut self) {
+        for platform in self.platforms() {
+            match auth::access_token(&self.config, platform).await {
+                Ok(token) => {
+                    if let Some(backend) = self.backends.get_mut(&platform) {
+                        backend.set_access_token(token);
+                    }
+                }
+                Err(err) => {
+                    // Not fatal here: the existing token may still work, and the
+                    // request that follows will report a far more specific error
+                    // than this would.
+                    tracing::warn!(
+                        platform = platform.slug(),
+                        error = %format!("{err:#}"),
+                        "could not renew the access token"
+                    );
+                }
+            }
+        }
     }
 
     /// Which platforms this engine is managing, in a stable display order.
@@ -126,6 +164,8 @@ impl Engine {
     /// the two. Each backend is moved into its own task and moved back
     /// afterwards, which is what keeps stats polling working later.
     pub async fn go_live(&mut self, plan: &StreamPlan) -> Vec<PlatformResult> {
+        self.refresh_tokens().await;
+
         let mut tasks = tokio::task::JoinSet::new();
 
         // Take every backend out of the map so each can be moved into a task.
@@ -171,6 +211,8 @@ impl Engine {
 
     /// Collect one statistics snapshot from every platform, concurrently.
     pub async fn poll_stats(&mut self) -> Vec<(Platform, PlatformStats)> {
+        self.refresh_tokens().await;
+
         let mut tasks = tokio::task::JoinSet::new();
 
         for (platform, mut backend) in self.backends.drain() {
