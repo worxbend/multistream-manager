@@ -203,6 +203,28 @@ fetch_stdout() {
 	esac
 }
 
+# Ask for a URL and report only the HTTP status code, so a "no releases yet"
+# 404 can be told apart from a genuine network failure. Prints 000 when the
+# request never got a response at all.
+fetch_status() {
+	case "$downloader" in
+		curl) curl --silent --show-error --location --output /dev/null \
+			--proto '=https' --proto-redir '=https' --tlsv1.2 \
+			--connect-timeout 15 --max-time 60 --write-out '%{http_code}' "$1" 2>/dev/null ||
+			echo "000" ;;
+		wget)
+			# wget prints the status line to stderr; pull the code out of it.
+			# BusyBox wget words this differently, so fall back to 000 rather
+			# than guessing.
+			out="$(wget --server-response --spider "$1" 2>&1 || true)"
+			printf '%s\n' "$out" |
+				sed -n 's|^[[:space:]]*HTTP/[0-9.]*[[:space:]]\([0-9][0-9][0-9]\).*|\1|p' |
+				tail -n 1 |
+				grep . || echo "000"
+			;;
+	esac
+}
+
 # Fetch a URL into a file.
 # shellcheck disable=SC2086  # WGET_OPTS is a deliberate word list, not a path.
 fetch_file() {
@@ -226,9 +248,40 @@ if [ -n "$requested_version" ]; then
 else
 	api_url="https://api.github.com/repos/$REPO/releases/latest"
 	say "Asking GitHub which release is newest: $api_url"
+
+	# Tell "there are no releases" apart from "the network is broken".
+	#
+	# The API answers 404 for a repository that has no published release, which
+	# is exactly what the very first user to run this sees. Reporting that as a
+	# network problem sends them to debug their connection over something that
+	# is working perfectly.
+	http_status="$(fetch_status "$api_url")"
+	case "$http_status" in
+		200) ;;
+		404)
+			die "$REPO has no published release yet, so there is nothing to install.
+       Build it from source in the meantime:
+         cargo install --git https://github.com/$REPO
+       Or, once a release exists, name a version: sh install.sh v0.1.0"
+			;;
+		403|429)
+			die "GitHub rate-limited this request (HTTP $http_status).
+       Wait a few minutes, or pass a version explicitly to skip the lookup:
+         sh install.sh v0.1.0"
+			;;
+		000|"")
+			die "could not reach the GitHub API to find the newest release.
+       Check your network, or pass a version explicitly: sh install.sh v0.1.0"
+			;;
+		*)
+			die "the GitHub API answered unexpectedly (HTTP $http_status).
+       Pass a version explicitly to skip the lookup: sh install.sh v0.1.0"
+			;;
+	esac
+
 	if ! release_json="$(fetch_stdout "$api_url")"; then
-		die "could not reach the GitHub API to find the newest release.
-       Check your network, or pass a version explicitly, for example: sh install.sh v0.1.0"
+		die "could not read the release information from GitHub.
+       Pass a version explicitly instead: sh install.sh v0.1.0"
 	fi
 	# The API answers with JSON. Rather than depend on a JSON parser being
 	# installed, pull out the one field we need with sed: the first
