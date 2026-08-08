@@ -1,0 +1,187 @@
+# Builds the `msm` binary for the two Linux architectures we ship, packages
+# each one as a tarball, and publishes them on a GitHub release.
+#
+# Why only Linux, and only these two targets: msm is a terminal program that
+# talks to Twitch and YouTube over HTTPS, and the people who asked for it run it
+# on Linux desktops and on small ARM boxes. Adding more targets means promising
+# to keep them working, so the list stays short and honest.
+name: Release
+
+on:
+  push:
+    # Any tag that starts with a "v", for example v0.1.0 or v0.2.0-rc.1.
+    tags:
+      - "v*"
+
+# The only permission needed is the one that lets the job create a release and
+# upload files to it. Everything else stays read-only, and the token is the
+# GITHUB_TOKEN that Actions mints for this run — there are no third-party
+# secrets anywhere in this file.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Do not cancel the other architecture when one fails: seeing both
+      # failures at once makes the cause much easier to spot.
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # One cache per architecture, otherwise the two builds would keep
+          # evicting each other's compiled dependencies.
+          key: ${{ matrix.target }}
+
+      # A tag that disagrees with Cargo.toml would produce a release whose
+      # tarball names do not match the version the binary reports, which is
+      # confusing to debug later. Catch it before spending time compiling.
+      - name: Check the tag matches the version in Cargo.toml
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          manifest="$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version')"
+          echo "Tag ${tag} -> version ${version}; Cargo.toml says ${manifest}."
+          if [ "${version}" != "${manifest}" ]; then
+            echo "::error::The tag says ${version} but Cargo.toml says ${manifest}. Bump one of them and tag again." >&2
+            exit 1
+          fi
+
+      # `cross` runs the compiler inside a container image that already has the
+      # right linker and C library for the target architecture, so aarch64
+      # needs no hand-configured cross-linker here. The images are also built on
+      # an older Ubuntu than the GitHub runner, which means the binaries link
+      # against an older glibc and therefore run on more distributions than a
+      # binary compiled directly on the runner would.
+      #
+      # The binaries are still dynamically linked against the system glibc. They
+      # are not static executables, and nothing in this file tries to make them
+      # static: statically linking glibc breaks name resolution, and msm has to
+      # resolve api.twitch.tv and www.googleapis.com to do anything at all.
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build
+        run: cross build --release --locked --target ${{ matrix.target }}
+
+      # A quick sanity check that the thing we are about to ship actually runs.
+      # Only possible for x86_64, because the runner cannot execute an aarch64
+      # binary; the aarch64 build is covered by the compiler and by CI instead.
+      - name: Smoke test the binary
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: ./target/${{ matrix.target }}/release/msm --version
+
+      # The archive is flat: `msm`, `README.md` and `LICENSE` sit at the top
+      # level with no wrapping directory, so install.sh can unpack it and pick
+      # up the binary without guessing a directory name.
+      - name: Pack the tarball
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          name="msm-${version}-${{ matrix.target }}"
+          echo "Packing ${name}.tar.gz"
+          mkdir -p staging dist
+          cp "target/${{ matrix.target }}/release/msm" staging/
+          cp README.md LICENSE staging/
+          chmod 0755 staging/msm
+          tar -czf "dist/${name}.tar.gz" -C staging msm README.md LICENSE
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # Checked out so the `gh` CLI knows which repository it is talking about.
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tarball-*
+          # Collapse the per-architecture folders so every tarball lands
+          # side by side in one directory.
+          merge-multiple: true
+          path: dist
+
+      # One SHA256SUMS file listing every tarball, in the format `sha256sum -c`
+      # understands. install.sh downloads this alongside the tarball and refuses
+      # to install anything whose hash does not match.
+      - name: Generate SHA256SUMS
+        run: |
+          set -eu
+          cd dist
+          # Run from inside the directory so the file records bare names such
+          # as `msm-0.1.0-x86_64-unknown-linux-gnu.tar.gz` with no path in
+          # front, which is what install.sh looks for.
+          sha256sum msm-*.tar.gz > SHA256SUMS
+          echo "Checksums:"
+          cat SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      - name: Create the GitHub release
+        env:
+          # The token Actions created for this run. Nothing else is needed.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME}"
+          # A tag such as v0.2.0-rc.1 contains a hyphen after the version
+          # numbers, which is how semantic versioning spells a pre-release.
+          # Mark those so nobody installs one by accident.
+          prerelease=""
+          case "${tag}" in
+            *-*) prerelease="--prerelease" ;;
+          esac
+          echo "Publishing release ${tag} with:"
+          ls -l dist
+
+          # Create the release only if it does not exist yet, then upload the
+          # files separately with --clobber.
+          #
+          # Doing it in one `gh release create ... dist/*` call is not
+          # re-runnable: if the upload of one file fails partway through (a
+          # transient GitHub API error is the usual cause) the release object
+          # already exists, and re-running the job dies on "release already
+          # exists" with the assets half-uploaded. Splitting the two steps means
+          # a re-run repairs the release instead of failing on it.
+          #
+          # $prerelease is deliberately unquoted: it is either empty, in which
+          # case it must disappear entirely, or a single flag with no spaces.
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "Release ${tag} already exists; uploading assets into it."
+          else
+            gh release create "${tag}" \
+              --title "msm ${tag}" \
+              --generate-notes \
+              ${prerelease} \
+              --verify-tag
+          fi
+
+          gh release upload "${tag}" dist/* --clobber
