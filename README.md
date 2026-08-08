@@ -87,7 +87,7 @@ actually go live.
 
 ## Installing
 
-You need [Rust](https://rustup.rs) 1.82 or newer.
+You need [Rust](https://rustup.rs) 1.88 or newer.
 
 ```bash
 git clone https://github.com/w0rxbend/multistream-manager
