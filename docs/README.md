@@ -46,3 +46,14 @@ agree on any of them. These pages use the following, consistently:
 | **Stream object** | YouTube's name for the RTMP pipe that holds a stream key. Separate from the broadcast, and joined to it by *binding*. |
 | **Category** | What you are streaming. Twitch calls it a "game" internally and needs a numeric id; YouTube calls it a video category and also uses a numeric id. |
 | **Scope** | One permission inside an OAuth login, such as "may change this channel's title". |
+
+---
+
+## Licence
+
+`msm` is released under the MIT licence, and so is this documentation. The full
+text is in [LICENSE](../LICENSE) at the root of the repository.
+
+In practice that means you may use, modify and redistribute it, including in a
+commercial product, provided the copyright notice and the licence text travel
+with it. There is no warranty.
