@@ -102,6 +102,17 @@ impl DuplicateSuppressor {
         self.last.insert(key, now);
         Ok(())
     }
+
+    /// Forget a record made by [`Self::acquire`].
+    ///
+    /// Callers have to reserve the text *before* handing it to the transport,
+    /// because that is the only way to stop two sends of the same text from
+    /// racing. When the transport then fails, nothing reached the platform,
+    /// so the reservation must be undone — otherwise the user is told the
+    /// message was not delivered and is then refused when they retype it.
+    pub fn release(&mut self, target: &str, text: &str) {
+        self.last.remove(&format!("{target}\0{text}"));
+    }
 }
 
 /// yc's send limiter: a token bucket with burst 3, refilling one token every
@@ -212,6 +223,39 @@ mod tests {
         dupes
             .acquire("#chan", "hello", start + DUPLICATE_WINDOW)
             .unwrap();
+    }
+
+    /// A send that fails in the transport never reached the platform, so the
+    /// user retyping the identical text must not be refused as a duplicate.
+    #[test]
+    fn releasing_a_failed_send_lets_the_same_text_be_retried() {
+        let mut dupes = DuplicateSuppressor::new();
+        let start = Instant::now();
+        dupes.acquire("#chan", "hello", start).unwrap();
+        dupes.release("#chan", "hello");
+        dupes
+            .acquire("#chan", "hello", start + Duration::from_secs(1))
+            .expect("a rolled-back send must not block the retry");
+        // The retry itself is still recorded, so a second copy is refused.
+        assert_eq!(
+            dupes.acquire("#chan", "hello", start + Duration::from_secs(2)),
+            Err(SendDenied::Duplicate)
+        );
+    }
+
+    /// Releasing text that was never recorded (or belongs to another target)
+    /// must not disturb an unrelated live reservation.
+    #[test]
+    fn releasing_an_unknown_entry_leaves_other_reservations_alone() {
+        let mut dupes = DuplicateSuppressor::new();
+        let start = Instant::now();
+        dupes.acquire("#chan", "hello", start).unwrap();
+        dupes.release("#other", "hello");
+        dupes.release("#chan", "goodbye");
+        assert_eq!(
+            dupes.acquire("#chan", "hello", start + Duration::from_secs(1)),
+            Err(SendDenied::Duplicate)
+        );
     }
 
     #[test]

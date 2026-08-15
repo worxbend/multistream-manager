@@ -519,6 +519,10 @@ impl TaskState {
             (None, false) => client.say(self.channel.clone(), wire.clone()).await,
         };
         if let Err(err) = result {
+            // Nothing reached Twitch, so the reservation taken above would
+            // otherwise refuse the user's retry of the very same text for the
+            // rest of the duplicate window.
+            self.dupes.release(&dupe_target, &wire);
             self.emit_notice(format!("send failed: {err}; the message was not delivered"));
             return;
         }
@@ -1313,5 +1317,21 @@ mod tests {
         assert_eq!(echo.author.display_name, "someuser");
         assert!(echo.author.badges.is_empty());
         assert_eq!(echo.author.color_hint, None);
+    }
+
+    /// `handle_send` reserves the text in the duplicate suppressor before the
+    /// transport call, then rolls the reservation back when the send fails.
+    /// Without the rollback the user was told "not delivered" and then
+    /// refused for 30 seconds when they retyped the identical message.
+    #[test]
+    fn a_failed_send_does_not_block_retrying_the_same_text() {
+        let mut dupes = DuplicateSuppressor::new();
+        let now = Instant::now();
+        dupes.acquire("#chan", "hello", now).expect("first attempt");
+        // The transport returned an error, so nothing reached Twitch.
+        dupes.release("#chan", "hello");
+        dupes
+            .acquire("#chan", "hello", now + Duration::from_secs(1))
+            .expect("the retry must be allowed");
     }
 }

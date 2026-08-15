@@ -191,6 +191,13 @@ impl ChatState {
                 // A ban or timeout tombstones everything the author said.
                 // Matched on login *or* id because Twitch's CLEARCHAT carries
                 // the login while YouTube's ban events carry the channel id.
+                // An empty identifier purges nothing: a malformed YouTube
+                // userBanned event can arrive with no channel id, and locally
+                // generated notice rows carry an empty login *and* an empty
+                // id, so an empty match would tombstone every one of them.
+                if author_login.is_empty() {
+                    return;
+                }
                 for existing in self.messages.iter_mut() {
                     if existing.author.login.eq_ignore_ascii_case(&author_login)
                         || existing.author.id == author_login
@@ -377,6 +384,26 @@ mod tests {
             timeout_secs: None,
         });
         assert!(state.messages.get(0).unwrap().deleted);
+    }
+
+    /// A malformed YouTube `userBanned` event can arrive with no channel id.
+    /// Locally generated notice rows have an empty login and an empty id, so
+    /// an empty identifier used to match — and every notice on screen was
+    /// tombstoned by one bad event.
+    #[test]
+    fn a_purge_with_an_empty_author_marks_nothing() {
+        let mut state = ChatState::new(&config(100));
+        let mut notice = msg("", "", "connected to chat");
+        notice.author.id = String::new();
+        notice.kind = MessageKind::Notice;
+        deliver(&mut state, notice);
+        deliver(&mut state, msg("1", "alice", "hi"));
+        state.apply(ChatEvent::UserPurged {
+            author_login: String::new(),
+            timeout_secs: None,
+        });
+        let deleted: Vec<bool> = state.messages.iter().map(|m| m.deleted).collect();
+        assert_eq!(deleted, [false, false]);
     }
 
     #[test]
