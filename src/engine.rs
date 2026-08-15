@@ -168,16 +168,22 @@ impl Engine {
 
         let mut tasks = tokio::task::JoinSet::new();
 
+        // Remember which task belongs to which platform. If a task panics we get
+        // back only its id, not the tuple it would have returned, so without this
+        // map there is no way to say which platform failed.
+        let mut task_platforms = HashMap::new();
+
         // Take every backend out of the map so each can be moved into a task.
         for (platform, mut backend) in self.backends.drain() {
             let plan = plan.clone();
-            tasks.spawn(async move {
+            let handle = tasks.spawn(async move {
                 let outcome = backend
                     .go_live(&plan)
                     .await
                     .map_err(|err| format!("{err:#}"));
                 (platform, backend, outcome)
             });
+            task_platforms.insert(handle.id(), platform);
         }
 
         let mut results = Vec::new();
@@ -192,9 +198,21 @@ impl Engine {
                     // A panic inside a backend. Report it rather than losing the
                     // platform silently — but the backend is gone, so that
                     // platform will simply be absent from the stats panel.
-                    tracing::error!(?err, "a platform task panicked while going live");
+                    //
+                    // The id lookup is what names the platform that actually
+                    // failed. Guessing one instead would blame a healthy platform
+                    // for the error and hide the broken one entirely.
+                    let Some(platform) = task_platforms.get(&err.id()).copied() else {
+                        tracing::error!(?err, "a platform task failed with an unknown id");
+                        continue;
+                    };
+                    tracing::error!(
+                        platform = platform.slug(),
+                        ?err,
+                        "a platform task panicked while going live"
+                    );
                     results.push(PlatformResult {
-                        platform: Platform::Twitch,
+                        platform,
                         outcome: Err(format!(
                             "internal error: the platform task stopped unexpectedly ({err})"
                         )),
@@ -392,6 +410,7 @@ pub fn render_results_json(results: &[PlatformResult]) -> String {
 mod tests {
     use super::*;
     use crate::model::GoLiveOutcome;
+    use crate::backend::BoxFuture;
 
     fn ok_result(platform: Platform) -> PlatformResult {
         PlatformResult {
@@ -529,5 +548,74 @@ mod tests {
         // `msm go` can in principle end with nothing to report; a script must
         // not have to special-case an empty stdout.
         assert!(parsed_json(&[]).is_empty());
+    }
+
+    /// A backend that does nothing except succeed, or panic on `go_live`.
+    struct FakeBackend {
+        panics: bool,
+    }
+
+    impl Backend for FakeBackend {
+        fn connect(&mut self) -> BoxFuture<'_, Result<String>> {
+            Box::pin(async { Ok("fake".to_string()) })
+        }
+
+        fn go_live<'a>(&'a mut self, _plan: &'a StreamPlan) -> BoxFuture<'a, Result<GoLiveOutcome>> {
+            let panics = self.panics;
+            Box::pin(async move {
+                assert!(!panics, "deliberate test panic");
+                Ok(GoLiveOutcome::default())
+            })
+        }
+
+        fn fetch_stats(&mut self) -> BoxFuture<'_, Result<PlatformStats>> {
+            Box::pin(async { Ok(PlatformStats::default()) })
+        }
+
+        fn set_access_token(&mut self, _token: String) {}
+    }
+
+    fn engine_with(backends: Vec<(Platform, bool)>) -> Engine {
+        // Point config/token lookups at a scratch directory so the test never
+        // reads or writes the real user's files.
+        let dir = std::env::temp_dir().join("msm-engine-test");
+        std::env::set_var("MSM_CONFIG_DIR", &dir);
+
+        Engine {
+            config: Config::default(),
+            backends: backends
+                .into_iter()
+                .map(|(platform, panics)| {
+                    let backend: Box<dyn Backend> = Box::new(FakeBackend { panics });
+                    (platform, backend)
+                })
+                .collect(),
+        }
+    }
+
+    /// A backend that panics must be reported against *its own* platform. The
+    /// bug this guards against tagged every panic as Twitch, so a broken
+    /// YouTube produced two contradictory Twitch rows and no YouTube row at
+    /// all — the dashboard blamed a healthy platform and `msm go` exited 0.
+    #[tokio::test]
+    async fn a_panicking_backend_is_reported_against_its_own_platform() {
+        let mut engine = engine_with(vec![
+            (Platform::Twitch, false),
+            (Platform::YouTube, true),
+        ]);
+
+        let results = engine.go_live(&StreamPlan::default()).await;
+
+        assert_eq!(results.len(), 2);
+        let twitch = results
+            .iter()
+            .find(|r| r.platform == Platform::Twitch)
+            .expect("twitch must be reported");
+        let youtube = results
+            .iter()
+            .find(|r| r.platform == Platform::YouTube)
+            .expect("the panicking platform must still be reported, under its own name");
+        assert!(twitch.succeeded());
+        assert!(!youtube.succeeded());
     }
 }
