@@ -13,6 +13,16 @@ use crate::model::{
     Category, GoLiveOutcome, IngestEndpoint, Platform, PlatformStats, StaleBroadcast, StreamPlan,
 };
 
+/// How long an audience total — followers, subscribers — is trusted before the
+/// platform is asked again.
+///
+/// These numbers move on a scale of hours, while statistics are polled every
+/// few seconds, so re-fetching them each time spends API budget (and on YouTube,
+/// scarce daily quota) to learn nothing. It lives here rather than in one
+/// backend because every platform has the same problem and should answer it the
+/// same way.
+pub const AUDIENCE_REFRESH: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 /// A boxed future, which is how a trait object can have async methods without
 /// pulling in the `async-trait` crate.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

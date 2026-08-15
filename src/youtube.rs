@@ -42,7 +42,7 @@ use chrono::{Duration, Utc};
 use serde::Deserialize;
 use std::time::{Duration as StdDuration, Instant};
 
-use crate::backend::{Backend, BoxFuture};
+use crate::backend::{Backend, BoxFuture, AUDIENCE_REFRESH};
 use crate::model::{
     Category, GoLiveOutcome, IngestEndpoint, PlatformStats, StaleBroadcast, Stat, StreamPlan,
 };
@@ -78,10 +78,6 @@ pub struct YouTubeBackend {
     /// said the daily quota is gone. See [`QuotaBackoff`].
     quota: QuotaBackoff,
 }
-
-/// How long a cached subscriber count is trusted before the channel is asked
-/// again.
-const SUBSCRIBER_REFRESH: StdDuration = StdDuration::from_secs(10 * 60);
 
 /// Backoff for statistics polling after the YouTube API reports its quota is
 /// exhausted.
@@ -717,15 +713,13 @@ impl Backend for YouTubeBackend {
 
             // Subscriber count comes from the channel, not the video — and a
             // `channels.list` call costs quota, so the cached value is used
-            // until it is SUBSCRIBER_REFRESH old. A stale-by-ten-minutes
+            // until it is AUDIENCE_REFRESH old. A stale-by-ten-minutes
             // subscriber total is invisible; the quota it saves is not.
             let now = Instant::now();
             let cache_is_fresh = self
                 .subscriber_cache
                 .as_ref()
-                .is_some_and(|(fetched_at, _)| {
-                    now.duration_since(*fetched_at) < SUBSCRIBER_REFRESH
-                });
+                .is_some_and(|(fetched_at, _)| now.duration_since(*fetched_at) < AUDIENCE_REFRESH);
             if !cache_is_fresh {
                 match self.my_channel().await {
                     Ok(channel) => {

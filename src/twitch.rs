@@ -12,8 +12,9 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
+use std::time::Instant;
 
-use crate::backend::{Backend, BoxFuture};
+use crate::backend::{Backend, BoxFuture, AUDIENCE_REFRESH};
 use crate::model::{Category, GoLiveOutcome, PlatformStats, Stat, StreamPlan};
 
 const HELIX: &str = "https://api.twitch.tv/helix";
@@ -32,6 +33,13 @@ pub struct TwitchBackend {
     /// tests point it at a local server so real request behaviour — how many
     /// calls are made, and whether they overlap — can be observed.
     base: String,
+    /// The follower and subscriber totals, with the time they were fetched.
+    ///
+    /// Both are re-read only every [`AUDIENCE_REFRESH`]; see that constant for
+    /// why. `None` inside the tuple means the platform declined to answer — a
+    /// non-affiliate channel gets a 403 for subscriptions — and that is cached
+    /// too, so polls stop re-asking a question already refused.
+    audience_cache: Option<(Instant, Option<u64>, Option<u64>)>,
 }
 
 impl TwitchBackend {
@@ -43,6 +51,7 @@ impl TwitchBackend {
             broadcaster_id: None,
             login: None,
             base: HELIX.to_string(),
+            audience_cache: None,
         }
     }
 
@@ -286,8 +295,24 @@ impl Backend for TwitchBackend {
                     .context("parsing the Twitch stream status")
             };
 
-            let (body, followers, subs) =
-                tokio::join!(live, self.follower_count(), self.subscriber_count());
+            // Follower and subscriber totals are re-read only occasionally, so
+            // most polls make one request rather than three.
+            let cached = match &self.audience_cache {
+                Some((at, followers, subs)) if at.elapsed() < AUDIENCE_REFRESH => {
+                    Some((*followers, *subs))
+                }
+                _ => None,
+            };
+
+            let (body, (followers, subs)) = match cached {
+                Some(audience) => (live.await, audience),
+                None => {
+                    let (body, followers, subs) =
+                        tokio::join!(live, self.follower_count(), self.subscriber_count());
+                    self.audience_cache = Some((Instant::now(), followers, subs));
+                    (body, (followers, subs))
+                }
+            };
             let body = body?;
 
             let mut stats = PlatformStats::default();
@@ -601,5 +626,37 @@ mod tests {
             elapsed < delay * 2,
             "the three requests took {elapsed:?}, which means they were still serialised"
         );
+    }
+
+    /// Follower and subscriber totals change on a scale of hours, but statistics
+    /// are polled every 15 seconds. Re-fetching them each time spent two
+    /// requests per poll to learn nothing.
+    #[tokio::test]
+    async fn repeat_polls_reuse_the_follower_and_subscriber_totals() {
+        let (base, seen) = fake_helix(StdDuration::from_millis(0)).await;
+        let mut backend = backend_for(base);
+
+        for _ in 0..5 {
+            let stats = backend
+                .fetch_stats()
+                .await
+                .expect("the fake server always answers");
+            // The cached values are still reported, not dropped from the panel.
+            assert!(stats.extra.iter().any(|s| s.label == "Followers"));
+            assert!(stats.extra.iter().any(|s| s.label == "Subscribers"));
+        }
+
+        let paths = seen.lock().unwrap().clone();
+        let audience = paths
+            .iter()
+            .filter(|p| p.contains("followers") || p.contains("subscriptions"))
+            .count();
+        assert_eq!(
+            audience, 2,
+            "five polls should fetch the totals once: {paths:?}"
+        );
+        // The live/viewer status is genuinely time-sensitive and is still asked
+        // for on every poll.
+        assert_eq!(paths.iter().filter(|p| p.ends_with("/streams")).count(), 5);
     }
 }
