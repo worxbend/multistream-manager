@@ -97,6 +97,56 @@ fn expiry_from_now(secs: i64) -> Option<DateTime<Utc>> {
     Utc::now().checked_add_signed(delta)
 }
 
+/// An exclusive, cross-process advisory lock over the token store.
+///
+/// Every read-modify-write cycle on `tokens.json` must hold one of these for
+/// its whole duration. The write itself is already atomic (temp file plus
+/// rename), but atomicity alone cannot stop a *lost update*: process A loads
+/// the store, spends seconds refreshing a token over the network, and saves —
+/// while process B (say, `msm login youtube` in another terminal) saved fresh
+/// tokens in between. A's save then writes back its stale snapshot and B's
+/// brand-new login is erased. Twitch makes this worse by rotating the refresh
+/// token on every refresh, so the erased token may be the only valid one.
+///
+/// The lock lives on a separate `tokens.json.lock` file because the store is
+/// replaced by rename: a lock on the old inode would not cover the new file.
+/// It is advisory, so it only protects against other cooperating `msm`
+/// processes — which is the only writer there is.
+///
+/// Dropping the guard releases the lock (the OS also releases it if the
+/// process dies, so a crash can never leave the store locked forever).
+pub struct StoreLock {
+    file: std::fs::File,
+}
+
+impl StoreLock {
+    /// Block until this process holds the token-store lock.
+    ///
+    /// This can wait on another process mid-refresh, so from async code call
+    /// it through `spawn_blocking` rather than directly.
+    pub fn acquire() -> Result<Self> {
+        use fs4::fs_std::FileExt as _;
+
+        let path = paths::token_lock_file()?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("opening the token lock file {}", path.display()))?;
+        file.lock_exclusive()
+            .with_context(|| format!("locking the token store via {}", path.display()))?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        use fs4::fs_std::FileExt;
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
 /// The whole `tokens.json`: a map from platform slug to that platform's tokens.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -244,5 +294,45 @@ mod tests {
         let remaining = (expires_at - Utc::now()).num_seconds();
         assert!((3500..=3600).contains(&remaining), "{remaining}s");
         assert!(!tokens.needs_refresh());
+    }
+
+    /// Two cooperating writers doing load-modify-save cycles must never erase
+    /// each other's entries. Without the lock this interleaving loses updates:
+    /// each save writes back the whole map from a possibly stale load.
+    #[test]
+    fn locked_read_modify_write_cycles_do_not_lose_updates() {
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("store-lock");
+        const ROUNDS: usize = 50;
+
+        let writer = |platform: Platform| {
+            std::thread::spawn(move || {
+                for i in 0..ROUNDS {
+                    let _lock = StoreLock::acquire().expect("locking must work");
+                    let mut store = TokenStore::load().expect("loading must work");
+                    store.set(
+                        platform,
+                        TokenSet::new(format!("token-{i}"), None, Some(3600), vec![]),
+                    );
+                    store.save().expect("saving must work");
+                }
+            })
+        };
+
+        let a = writer(Platform::Twitch);
+        let b = writer(Platform::YouTube);
+        a.join().unwrap();
+        b.join().unwrap();
+
+        let store = TokenStore::load().unwrap();
+        for platform in Platform::ALL {
+            let tokens = store
+                .get(platform)
+                .unwrap_or_else(|| panic!("{platform:?} was erased by the other writer"));
+            assert_eq!(
+                tokens.access_token,
+                format!("token-{}", ROUNDS - 1),
+                "{platform:?} must hold its own final value"
+            );
+        }
     }
 }

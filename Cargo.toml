@@ -62,6 +62,12 @@ rand = "0.8"
 # Percent-encoding for building OAuth URLs and API query strings safely.
 urlencoding = "2"
 
+# Cross-process advisory file locking, used to serialise read-modify-write
+# cycles on tokens.json so two concurrent msm processes cannot erase each
+# other's freshly saved logins. (std gained File::lock in Rust 1.89, one
+# release past this crate's MSRV of 1.88, so a crate has to provide it.)
+fs4 = { version = "0.13", features = ["sync"] }
+
 # Structured logging to a file (the TUI owns stdout, so logs cannot go there).
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

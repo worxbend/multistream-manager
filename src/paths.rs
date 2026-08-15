@@ -44,6 +44,14 @@ pub fn token_file() -> Result<PathBuf> {
     Ok(config_dir()?.join("tokens.json"))
 }
 
+/// `tokens.json.lock` — the companion file whose advisory lock serialises
+/// read-modify-write cycles on the token store across processes. A separate
+/// file rather than `tokens.json` itself, because the store is replaced by an
+/// atomic rename: a lock taken on the old file would not cover the new one.
+pub fn token_lock_file() -> Result<PathBuf> {
+    Ok(config_dir()?.join("tokens.json.lock"))
+}
+
 /// `msm.log` — the log file. The terminal UI owns stdout, so any diagnostics
 /// have to go to a file instead of being printed.
 pub fn log_file() -> Result<PathBuf> {

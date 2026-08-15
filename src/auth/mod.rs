@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use crate::config::Config;
 use crate::model::Platform;
 use oauth::ProviderSpec;
-use store::{TokenSet, TokenStore};
+use store::{StoreLock, TokenSet, TokenStore};
 
 /// The OAuth details for a platform.
 pub fn spec_for(platform: Platform) -> ProviderSpec {
@@ -47,10 +47,24 @@ pub async fn login(config: &Config, platform: Platform) -> Result<()> {
     )
     .await?;
 
-    let mut store = TokenStore::load()?;
+    // The lock covers the whole load-set-save cycle, so a token refresh
+    // running in another msm process cannot save a stale snapshot over this
+    // brand-new login (or vice versa).
+    let _lock = lock_store().await?;
+    let mut store = load_store().await?;
     store.set(platform, tokens);
-    store.save()?;
+    save_store(store).await?;
     Ok(())
+}
+
+/// Take the cross-process token-store lock without blocking the async runtime.
+///
+/// Acquiring can wait on another process that is mid-refresh, so like the
+/// load/save helpers below it runs on the blocking pool.
+async fn lock_store() -> Result<StoreLock> {
+    tokio::task::spawn_blocking(StoreLock::acquire)
+        .await
+        .context("locking the token store")?
 }
 
 /// Read the token file without blocking the async runtime.
@@ -88,6 +102,21 @@ pub async fn access_tokens(
     config: &Config,
     platforms: &[Platform],
 ) -> Vec<(Platform, Result<String>)> {
+    // Held for the whole load-refresh-save cycle. Without it, this process
+    // could spend seconds in a network refresh and then save a snapshot that
+    // erases whatever another msm process wrote in the meantime — such as the
+    // fresh tokens of an `msm login` running in a second terminal.
+    let lock = match lock_store().await {
+        Ok(lock) => lock,
+        Err(err) => {
+            let message = format!("{err:#}");
+            return platforms
+                .iter()
+                .map(|&platform| (platform, Err(anyhow::anyhow!(message.clone()))))
+                .collect();
+        }
+    };
+
     let mut store = match load_store().await {
         Ok(store) => store,
         // Nothing can be renewed without the file, so every platform gets the
@@ -118,6 +147,7 @@ pub async fn access_tokens(
             tracing::warn!(error = %format!("{err:#}"), "could not save the renewed tokens");
         }
     }
+    drop(lock);
 
     results
 }

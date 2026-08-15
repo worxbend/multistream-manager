@@ -201,6 +201,9 @@ async fn cmd_login(config: &Config, platform_arg: &str) -> Result<()> {
 }
 
 fn cmd_logout(platform_arg: &str) -> Result<()> {
+    // Locked like every other writer, so a background refresh in a running
+    // `msm` cannot save its stale snapshot over this logout.
+    let _lock = auth::store::StoreLock::acquire()?;
     let mut store = auth::store::TokenStore::load()?;
     for platform in parse_platform_arg(platform_arg)? {
         if store.remove(platform) {
