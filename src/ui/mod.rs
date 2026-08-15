@@ -174,12 +174,34 @@ pub async fn run(config: Config) -> Result<()> {
     // Dropping the sender tells the worker to finish, and dropping the guard
     // restores the terminal. Order matters only in that both must happen.
     drop(command_tx);
+
+    // The chat tasks end the same way: dropping each handle's command sender
+    // closes the channel their loop selects on. They must then be *awaited* —
+    // an accepted send or a confirmed moderation call may still be in flight,
+    // and returning from main would kill it mid-request after the composer
+    // already reported it sent.
+    let chat_tasks: Vec<_> = app
+        .chat
+        .open
+        .drain()
+        .map(|(_, chat)| {
+            drop(chat.handle.commands);
+            chat.handle.task
+        })
+        .collect();
+
     drop(guard);
 
-    // Give the worker a moment to wind down, but do not hang on it: a request
-    // already in flight to YouTube could take several seconds, and the user has
-    // asked to quit.
-    let _ = tokio::time::timeout(std::time::Duration::from_millis(500), worker).await;
+    // Give everything a shared moment to wind down, but do not hang on it: a
+    // request already in flight to YouTube could take several seconds, and
+    // the user has asked to quit.
+    let shutdown = async move {
+        let _ = worker.await;
+        for task in chat_tasks {
+            let _ = task.await;
+        }
+    };
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(500), shutdown).await;
 
     Ok(())
 }
