@@ -40,6 +40,13 @@ pub enum Command {
     },
     /// Refresh the statistics.
     PollStats,
+    /// Fetch this platform's stream key and put it on the system clipboard.
+    ///
+    /// The key never travels to the UI half at all: it goes from the API
+    /// straight to the clipboard here, and the UI only learns whether that
+    /// worked. Nothing that could end up on screen or in the log ever holds
+    /// the value.
+    CopyStreamKey(Platform),
     /// Hand a URL to the system browser.
     ///
     /// This goes through the worker rather than happening in the key handler
@@ -251,6 +258,57 @@ pub async fn run(
                 };
                 let stats = engine.poll_stats().await;
                 let _ = events.send(Event::Stats(stats));
+            }
+
+            Command::CopyStreamKey(platform) => {
+                let Some(engine) = engine.as_mut() else {
+                    let _ = events.send(Event::Log {
+                        level: LogLevel::Error,
+                        message: "Not connected yet, so there is no stream key to copy.".into(),
+                    });
+                    continue;
+                };
+                match engine.stream_key(platform).await {
+                    Ok(Some(key)) => {
+                        let outcome = crate::clipboard::copy(&key);
+                        // Drop the key as soon as the copy is done rather than
+                        // letting it live until the end of the match arm.
+                        drop(key);
+                        let _ = events.send(match outcome {
+                            Ok(()) => Event::Log {
+                                level: LogLevel::Success,
+                                message: format!(
+                                    "{} stream key copied to the clipboard — paste it into OBS.",
+                                    platform.label()
+                                ),
+                            },
+                            Err(err) => Event::Log {
+                                level: LogLevel::Error,
+                                message: format!("Could not copy the stream key: {err:#}"),
+                            },
+                        });
+                    }
+                    Ok(None) => {
+                        let _ = events.send(Event::Log {
+                            level: LogLevel::Warning,
+                            message: format!(
+                                "{} did not return a stream key. On Twitch this usually means the \
+                                 saved login predates the `channel:read:stream_key` permission — \
+                                 run `msm login twitch` again.",
+                                platform.label()
+                            ),
+                        });
+                    }
+                    Err(err) => {
+                        let _ = events.send(Event::Log {
+                            level: LogLevel::Error,
+                            message: format!(
+                                "Could not fetch the {} stream key: {err:#}",
+                                platform.label()
+                            ),
+                        });
+                    }
+                }
             }
 
             Command::OpenUrl(url) => {

@@ -129,9 +129,6 @@ pub struct App {
     pub results: Vec<PlatformResult>,
     pub stats: BTreeMap<Platform, PlatformStats>,
 
-    /// Stream keys are masked until deliberately revealed, because this window
-    /// is often visible on the stream itself.
-    pub reveal_key: bool,
     /// `true` while the worker is busy, so the UI can show a spinner and refuse
     /// to submit the same plan twice.
     pub busy: bool,
@@ -196,7 +193,6 @@ impl App {
             accounts: BTreeMap::new(),
             results: Vec::new(),
             stats: BTreeMap::new(),
-            reveal_key: false,
             busy: false,
             should_quit: false,
             toast: None,
@@ -528,9 +524,7 @@ impl App {
                             from_compose: true,
                         };
                     }
-                    KeyCode::Char(c) if is_typed_text(&key) => {
-                        self.chat.compose_push(c)
-                    }
+                    KeyCode::Char(c) if is_typed_text(&key) => self.chat.compose_push(c),
                     _ => {}
                 }
                 return vec![];
@@ -1212,15 +1206,13 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('r') => return vec![Command::PollStats],
-            KeyCode::Char('k') => {
-                self.reveal_key = !self.reveal_key;
-                if self.reveal_key {
-                    self.toast = Some(
-                        "Stream key visible — press k again to hide it before you screen-share."
-                            .to_string(),
-                    );
-                }
-            }
+            // A stream key is never shown, only copied: this window is very
+            // often part of the broadcast, and anyone who reads the key can
+            // stream to your channel. `y` follows the vim convention for
+            // "yank"; the platform is chosen by the case rather than by a
+            // prompt so there is no mode to get stuck in.
+            KeyCode::Char('y') => return self.copy_stream_key(Platform::Twitch),
+            KeyCode::Char('Y') => return self.copy_stream_key(Platform::YouTube),
             KeyCode::Char('o') => {
                 // Open the watch page, which is the one link you actually want
                 // in front of you once the stream is up — to check the delay, to
@@ -1242,7 +1234,6 @@ impl App {
                 // this creates a *new* broadcast rather than editing the old one.
                 self.go_to(Screen::Form);
                 self.ensure_field_visible();
-                self.reveal_key = false;
             }
             // Up walks back into the history, Down returns towards the newest
             // line; reaching zero resumes following the tail.
@@ -1254,6 +1245,23 @@ impl App {
             _ => {}
         }
         vec![]
+    }
+
+    /// Ask the worker to copy a platform's stream key to the clipboard.
+    ///
+    /// The key is fetched and copied entirely inside the worker; this half
+    /// only says which platform, and hears back through the activity log
+    /// whether it worked.
+    fn copy_stream_key(&mut self, platform: Platform) -> Vec<Command> {
+        if !self.is_selected(platform) {
+            self.toast = Some(format!(
+                "{} is not one of the selected platforms.",
+                platform.label()
+            ));
+            return vec![];
+        }
+        self.toast = Some(format!("Copying the {} stream key…", platform.label()));
+        vec![Command::CopyStreamKey(platform)]
     }
 
     /// The successful outcome for a platform, if it has one.
@@ -2081,30 +2089,39 @@ mod tests {
         }
     }
 
+    /// A stream key can only ever be copied, never shown: this window is
+    /// routinely visible on the broadcast itself.
     #[test]
-    fn the_stream_key_starts_hidden_and_toggles_with_k() {
+    fn the_stream_key_is_copied_rather_than_revealed() {
         let mut app = app();
         app.screen = Screen::Dashboard;
-        assert!(!app.reveal_key, "a key must never be visible by default");
+        app.selected = vec![Platform::Twitch, Platform::YouTube];
 
-        app.handle_key(key(KeyCode::Char('k')));
-        assert!(app.reveal_key);
-        assert!(app.toast.as_deref().unwrap().contains("screen-share"));
+        let commands = app.handle_key(key(KeyCode::Char('y')));
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::CopyStreamKey(Platform::Twitch)]
+        ));
 
-        app.handle_key(key(KeyCode::Char('k')));
-        assert!(!app.reveal_key);
+        let commands = app.handle_key(key(KeyCode::Char('Y')));
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::CopyStreamKey(Platform::YouTube)]
+        ));
     }
 
+    /// Asking for the key of a platform that is not part of this session says
+    /// so rather than sending the worker on a pointless errand.
     #[test]
-    fn leaving_the_dashboard_re_hides_the_stream_key() {
+    fn copying_a_key_for_an_unselected_platform_explains_itself() {
         let mut app = app();
         app.screen = Screen::Dashboard;
-        app.reveal_key = true;
+        app.selected = vec![Platform::Twitch];
 
-        app.handle_key(key(KeyCode::Char('e')));
+        let commands = app.handle_key(key(KeyCode::Char('Y')));
 
-        assert_eq!(app.screen, Screen::Form);
-        assert!(!app.reveal_key, "the key must not stay revealed");
+        assert!(commands.is_empty());
+        assert!(app.toast.as_deref().unwrap().contains("YouTube"));
     }
 
     #[test]

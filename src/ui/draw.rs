@@ -188,6 +188,23 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
+    // The hints follow the *tab*, not only the screen. The Stream Info screens
+    // and the Chat tab have entirely different keys, and the footer used to
+    // advertise whichever Stream Info screen happened to be underneath — so
+    // the Chat tab told you to press Enter to connect, which does nothing
+    // there, and never mentioned a single chat binding.
+    if app.tab == super::app::Tab::Chat {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " h/l pane   j/k scroll   [ ] chats   { } accounts   i compose   \
+                 space,c join   / search   ctrl+r reconnect   q quit",
+                Style::new().fg(theme::DIM),
+            ))),
+            area,
+        );
+        return;
+    }
+
     // On the form, colour the "go live" hint by whether the plan is actually
     // submittable, so you can see at a glance that something still needs fixing.
     if app.screen == Screen::Form {
@@ -221,7 +238,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let hints = match app.screen {
         Screen::Platforms => "↑↓ move   Space toggle   a all   Enter connect   q quit",
         Screen::Dashboard => {
-            "r refresh   o open watch page   k show/hide key   e edit & resubmit   q quit"
+            "r refresh   o open watch page   y copy Twitch key   Y copy YouTube key   \
+             e edit   q quit"
         }
         Screen::Form => unreachable!("handled above"),
     };
@@ -698,12 +716,11 @@ fn draw_platform_panel(frame: &mut Frame, area: Rect, app: &App, platform: Platf
                     // Masked by default: this window is frequently on screen
                     // while streaming, and a leaked key lets anyone broadcast
                     // to your channel.
-                    let shown = if app.reveal_key {
-                        key.clone()
-                    } else {
-                        "•".repeat(key.chars().count().min(24))
-                    };
-                    lines.push(field_line("Key", &shown, theme::WARN));
+                    // Always masked. There is no reveal: the key leaves this
+                    // program only by being copied to the clipboard (y / Y),
+                    // so it cannot be read off a shared screen or a recording.
+                    let masked = "•".repeat(key.chars().count().min(24));
+                    lines.push(field_line("Key", &masked, theme::WARN));
                 }
 
                 lines.push(Line::from(""));
@@ -988,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn the_dashboard_masks_the_stream_key_until_it_is_revealed() {
+    fn the_dashboard_never_renders_the_stream_key() {
         let mut app = app();
         app.screen = Screen::Dashboard;
         app.selected = vec![Platform::Twitch];
@@ -1000,16 +1017,16 @@ mod tests {
             }),
         }];
 
-        let hidden = render(&app, 120, 40);
+        let screen = render(&app, 120, 40);
         assert!(
-            !hidden.contains("live_123_secretkey"),
-            "the stream key must not be rendered while masked"
+            !screen.contains("live_123_secretkey"),
+            "a stream key must never reach the screen — it is copy-only"
         );
-        assert!(hidden.contains('•'));
-
-        app.reveal_key = true;
-        let shown = render(&app, 120, 40);
-        assert!(shown.contains("live_123_secretkey"));
+        assert!(screen.contains('\u{2022}'), "it renders as a row of dots");
+        assert!(
+            screen.contains("y copy"),
+            "the footer offers copying instead of revealing"
+        );
     }
 
     #[test]
@@ -1093,7 +1110,8 @@ mod tests {
         for hint in [
             "r refresh",
             "o open watch page",
-            "k show/hide key",
+            "y copy Twitch key",
+            "Y copy YouTube key",
             "e edit",
         ] {
             assert!(

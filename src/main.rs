@@ -7,6 +7,7 @@
 mod auth;
 mod backend;
 mod chat;
+mod clipboard;
 mod config;
 mod engine;
 mod lang;
