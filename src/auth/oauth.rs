@@ -640,7 +640,17 @@ async fn parse_token_response(
         .text()
         .await
         .context("reading the token endpoint response body")?;
+    token_set_from_body(spec, status, &text, fallback_refresh)
+}
 
+/// The body-handling half of [`parse_token_response`], separated so the
+/// redaction rule below can be pinned by an offline test.
+fn token_set_from_body(
+    spec: &ProviderSpec,
+    status: reqwest::StatusCode,
+    text: &str,
+    fallback_refresh: Option<&str>,
+) -> Result<TokenSet> {
     if !status.is_success() {
         // Both providers return a JSON body explaining the failure. Show it,
         // because "invalid_grant" plus its description is the difference between
@@ -648,12 +658,26 @@ async fn parse_token_response(
         bail!(
             "{} rejected the token request (HTTP {status}): {}",
             spec.name,
-            summarise_oauth_error(&text)
+            summarise_oauth_error(text)
         );
     }
 
-    let parsed: TokenResponse = serde_json::from_str(&text)
-        .with_context(|| format!("parsing the {} token response: {text}", spec.name))?;
+    // The body of a *successful* response contains live credentials, so unlike
+    // the error branch above it must never ride along in the error message.
+    // These errors end up in msm.log via the background refresh, and a log
+    // file must not hold what tokens.json goes to owner-only lengths to
+    // protect. The serde error's line/column is kept — it points at the
+    // malformed field without quoting any values.
+    let parsed: TokenResponse = serde_json::from_str(text).map_err(|err| {
+        anyhow!(
+            "parsing the {} token response failed at line {} column {}. \
+             The response body is withheld from this message because it may \
+             contain live tokens.",
+            spec.name,
+            err.line(),
+            err.column()
+        )
+    })?;
 
     let refresh_token = parsed
         .refresh_token
@@ -724,6 +748,55 @@ fn summarise_oauth_error(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A successful-but-malformed token response holds live credentials. The
+    /// parse error is logged by the background refresh, so the body must never
+    /// appear in it — a log file must not out-secret tokens.json.
+    #[test]
+    fn a_malformed_token_body_is_never_quoted_in_the_error() {
+        // Valid credentials, but expires_in has the wrong type, which is
+        // exactly the kind of provider quirk that trips deserialization.
+        let body = r#"{"access_token":"live-access-abc","refresh_token":"live-refresh-xyz","expires_in":"3600"}"#;
+
+        let err = token_set_from_body(&ProviderSpec::twitch(), reqwest::StatusCode::OK, body, None)
+            .expect_err("a wrongly typed field must fail to parse");
+
+        let message = format!("{err:#}");
+        assert!(
+            !message.contains("live-access-abc") && !message.contains("live-refresh-xyz"),
+            "the tokens leaked into the error text: {message}"
+        );
+        assert!(message.contains("withheld"), "say why the body is missing");
+    }
+
+    #[test]
+    fn a_well_formed_token_body_still_parses() {
+        let body =
+            r#"{"access_token":"a","refresh_token":"r","expires_in":3600,"scope":"one two"}"#;
+        let tokens =
+            token_set_from_body(&ProviderSpec::twitch(), reqwest::StatusCode::OK, body, None)
+                .expect("a normal body must parse");
+        assert_eq!(tokens.access_token, "a");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("r"));
+        assert_eq!(tokens.scopes, ["one", "two"]);
+    }
+
+    #[test]
+    fn a_rejected_token_request_still_shows_the_providers_explanation() {
+        // The error branch carries no credentials, and "invalid_grant" plus its
+        // description is what makes the failure fixable — keep showing it.
+        let body = r#"{"error":"invalid_grant","error_description":"Token has been expired"}"#;
+        let err = token_set_from_body(
+            &ProviderSpec::twitch(),
+            reqwest::StatusCode::BAD_REQUEST,
+            body,
+            None,
+        )
+        .expect_err("a 400 must be an error");
+        let message = format!("{err:#}");
+        assert!(message.contains("invalid_grant"));
+        assert!(message.contains("expired"));
+    }
 
     #[test]
     fn pkce_challenge_is_the_base64url_sha256_of_the_verifier() {
