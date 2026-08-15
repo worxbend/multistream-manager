@@ -227,7 +227,7 @@ Status legend: **ported** (Rust module listed) · **planned** (ordered backlog)
 | Y15 | Redaction: never emit request URLs (API-key-in-query) | ported — no API-key mode exists in msm (OAuth only), and error paths never embed URLs; discipline documented in module comment |
 | Y16 | Shortcode `:emote:` fragments, emoji chips, URL fragments, mention fragments | ported → `chat/render.rs` (shared fragmenter) |
 | Y17 | Deleted text never reprinted anywhere | ported → `chat/state.rs` invariant + render |
-| Y18 | Moderation writes: delete message, ban, timeout, unban | planned |
+| Y18 | Moderation writes: delete message, ban, timeout | ported → `chat/youtube.rs` + d/t/b keys in `ui/chat_tab.rs` (unban has no UI in yc either — deliberately not exposed) |
 | Y19 | Search (`/`, n/N), filters 1–4 | planned |
 | Y20 | Activity column, roster, autocomplete, inspect | planned |
 | Y21 | Chat logging JSONL + `export superchats` CSV | planned |
@@ -273,6 +273,20 @@ src/ui/chat_tab.rs     split view, account sub-tabs, composer, join prompt
 - twi/yc flat config files → this repo's real TOML `[chat]` table.
 
 ## 9. Deviations log
+
+- (2026-08-15, adapters) `twitch-irc` v6 hard-codes its capability request to
+  `tags`+`commands`; the `membership` capability cannot be requested, so
+  JOIN/PART roster events are unavailable. Affects T1/T9 (partial) and T21
+  (roster falls back to speakers-only when built). Documented in
+  `chat/twitch.rs`.
+- (2026-08-15, adapters) YouTube local echo shows author "you" until the
+  poller's authoritative copy replaces it — resolving own authorDetails would
+  cost an extra API unit per send.
+- (2026-08-15, UI) Timeout duration is a fixed 10 minutes behind a
+  double-press confirm; yc prompts for a duration. A duration prompt is
+  backlog alongside the other overlay work.
+
+### Historical deviations
 
 - (2026-08-15) `twitch-irc` chosen over hand-rolling despite repo's hand-rolled
   Helix precedent: twi itself sits on a library; the crate is the maintained

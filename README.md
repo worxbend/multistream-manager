@@ -71,6 +71,66 @@ written up in [docs/how-it-works.md](docs/how-it-works.md).
 
 ---
 
+## 💬 Chat
+
+The window has two top-level tabs, switched with <kbd>Alt</kbd>+<kbd>1</kbd> /
+<kbd>Alt</kbd>+<kbd>2</kbd>: **Stream Info** (everything above) and **Chat** —
+Twitch chat on the left, YouTube live chat on the right, always side by side.
+The divider is resizable. Chat behavior is ported from
+[twi](https://github.com/worxbend/twi) and [yc](https://github.com/worxbend/yc);
+`PLAN.md` tracks the feature-parity matrix.
+
+**Multiple accounts.** The account you stream with is also your first chat
+account. Add more identities any time — each becomes its own sub-tab inside
+its platform's pane:
+
+```console
+$ msm login twitch --add     # authorise a second Twitch account in the browser
+$ msm login youtube --add    # same for another YouTube channel
+$ msm logout twitch:thatlogin  # forget one added account again
+```
+
+Opening an account's sub-tab connects its **own** chat automatically (lazily —
+nothing connects until a sub-tab is actually shown). Press <kbd>space</kbd>
+then <kbd>c</kbd> to join any other chat through that account: a Twitch
+channel name, or for YouTube a video id, `@handle`, channel id or a plain
+youtube.com/youtu.be URL.
+
+**Keys** (vim-flavoured):
+
+| Key | Action |
+|---|---|
+| <kbd>h</kbd> / <kbd>l</kbd>, arrows, <kbd>tab</kbd> | focus the other pane |
+| <kbd>{</kbd> / <kbd>}</kbd> | previous / next account sub-tab |
+| <kbd>[</kbd> / <kbd>]</kbd> | previous / next open chat in the account |
+| <kbd>j</kbd> / <kbd>k</kbd> | move the message selection (view follows) |
+| <kbd>PgUp</kbd> / <kbd>PgDn</kbd>, <kbd>g</kbd> / <kbd>G</kbd> | scroll / jump to oldest & newest |
+| <kbd>i</kbd> (or <kbd>o</kbd>/<kbd>a</kbd>) | compose; <kbd>Enter</kbd> sends, <kbd>Esc</kbd> keeps the draft |
+| <kbd>r</kbd> | reply to the selected message |
+| <kbd>d</kbd> / <kbd>t</kbd> / <kbd>b</kbd> | delete / 10-minute timeout / ban (YouTube; press twice to confirm) |
+| <kbd>space</kbd> <kbd>c</kbd> / <kbd>space</kbd> <kbd>x</kbd> | join a chat / close the current chat |
+| <kbd>&lt;</kbd> / <kbd>&gt;</kbd> / <kbd>=</kbd> | resize the split toward/away from the focused pane / reset |
+| <kbd>ctrl</kbd>+<kbd>r</kbd> | reconnect (also overrides a YouTube quota pause) |
+
+Each chat shows its connection state in the pane header (connected,
+reconnecting, failed, **quota paused** — YouTube's daily API quota is tracked
+locally and polling stops before sending would become unaffordable). Messages
+render with per-author stable colors, badge glyphs (◉ owner, ⚔ moderator,
+★ member/subscriber, ✓ verified …), Super Chat amount chips colored by tier,
+and membership events; deleted messages show `[message deleted]` and the
+original text never reappears — these terminals are often on stream.
+
+Chat tuning lives in the `[chat]` section of `config.toml`:
+
+```toml
+[chat]
+scrollback_limit = 1000        # messages kept per chat
+poll_interval_floor_ms = 1000  # YouTube never polls faster (server floor still wins)
+poll_interval_ceiling_ms = 0   # 0 = no ceiling
+daily_quota_units = 10000      # your YouTube API project quota
+quota_reserve_percent = 10     # stop polling early so sends keep working
+```
+
 ## 🤔 Why
 
 If you stream to both platforms at once — for example through OBS with the
