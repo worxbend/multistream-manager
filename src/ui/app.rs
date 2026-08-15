@@ -509,6 +509,11 @@ impl App {
                     KeyCode::Esc => self.chat.mode = ChatFocus::Normal,
                     KeyCode::Enter => self.chat.compose_send(),
                     KeyCode::Backspace => self.chat.compose_backspace(),
+                    // Tab completes a trailing @mention from the roster.
+                    KeyCode::Tab => self.chat.complete_mention(),
+                    KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.chat.mode = ChatFocus::EmojiPicker(String::new());
+                    }
                     KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                         self.chat.compose_push(c)
                     }
@@ -586,6 +591,29 @@ impl App {
                 }
                 return vec![];
             }
+            ChatFocus::EmojiPicker(mut buffer) => {
+                match key.code {
+                    KeyCode::Esc => self.chat.mode = ChatFocus::Compose,
+                    KeyCode::Enter | KeyCode::Tab => {
+                        if let Some(entry) =
+                            crate::chat::emoji::search(&buffer, 1).into_iter().next()
+                        {
+                            self.chat.insert_emoji(entry.emoji);
+                        }
+                        self.chat.mode = ChatFocus::Compose;
+                    }
+                    KeyCode::Backspace => {
+                        buffer.pop();
+                        self.chat.mode = ChatFocus::EmojiPicker(buffer);
+                    }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        buffer.push(c);
+                        self.chat.mode = ChatFocus::EmojiPicker(buffer);
+                    }
+                    _ => {}
+                }
+                return vec![];
+            }
             ChatFocus::Normal => {}
         }
 
@@ -603,8 +631,14 @@ impl App {
         }
 
         if key.modifiers.contains(KeyModifiers::CONTROL) {
-            if let KeyCode::Char('r') = key.code {
-                self.chat.reconnect_active();
+            match key.code {
+                KeyCode::Char('r') => self.chat.reconnect_active(),
+                KeyCode::Char('g') => self.chat.cycle_layout(),
+                KeyCode::Char('b') => self.chat.cycle_badges(),
+                KeyCode::Char('y') => self.chat.toggle_highlight(),
+                KeyCode::Char('n') => self.chat.toggle_full_username(),
+                KeyCode::Char('e') => self.chat.mode = ChatFocus::EmojiPicker(String::new()),
+                _ => {}
             }
             return vec![];
         }

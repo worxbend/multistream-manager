@@ -138,6 +138,21 @@ enum Commands {
         yes: bool,
     },
 
+    /// Export data from the on-disk chat logs.
+    ///
+    /// `msm export superchats` reads the JSON Lines files that
+    /// `chat_logging = true` writes and produces a CSV of every paid event
+    /// (Super Chats, Stickers, gifts) — amounts in integer-exact units,
+    /// zero network, zero API quota.
+    Export {
+        /// What to export. Currently only `superchats`.
+        what: String,
+
+        /// Write the CSV here instead of standard output.
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
+    },
+
     /// Write a commented starter config file.
     Init,
 
@@ -182,6 +197,7 @@ async fn main() -> Result<()> {
         Some(Commands::Categories { query }) => cmd_categories(&config, &query).await,
         Some(Commands::Streams { show_keys }) => cmd_streams(&config, show_keys).await,
         Some(Commands::Cleanup { yes }) => cmd_cleanup(&config, yes).await,
+        Some(Commands::Export { what, out }) => cmd_export(&config, &what, out.as_deref()),
         Some(Commands::Logout { .. }) | Some(Commands::Init) | Some(Commands::Paths) => {
             unreachable!("dispatched before the config is parsed")
         }
@@ -508,6 +524,42 @@ async fn cmd_go(
         bail!("every platform failed");
     }
 
+    Ok(())
+}
+
+fn cmd_export(config: &Config, what: &str, out: Option<&std::path::Path>) -> Result<()> {
+    if !what.eq_ignore_ascii_case("superchats") {
+        bail!("unknown export {what:?}. The available export is: superchats");
+    }
+    let dir = if config.chat.chat_log_dir.is_empty() {
+        paths::chat_log_dir()?
+    } else {
+        std::path::PathBuf::from(&config.chat.chat_log_dir)
+    };
+
+    let rows = match out {
+        Some(path) => {
+            let mut file = std::fs::File::create(path)
+                .with_context(|| format!("creating {}", path.display()))?;
+            let rows = chat::chatlog::export_superchats(&dir, &mut file)?;
+            // A full disk that only surfaces at close would silently truncate
+            // the export; report it instead.
+            use std::io::Write as _;
+            file.flush().context("flushing the export file")?;
+            rows
+        }
+        None => chat::chatlog::export_superchats(&dir, &mut std::io::stdout().lock())?,
+    };
+    eprintln!(
+        "exported {rows} paid event{} from {}",
+        if rows == 1 { "" } else { "s" },
+        dir.display()
+    );
+    if rows == 0 && !config.chat.chat_logging {
+        eprintln!(
+            "note: chat logging is off — set `chat_logging = true` under [chat] to record chats"
+        );
+    }
     Ok(())
 }
 

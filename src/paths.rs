@@ -52,6 +52,11 @@ pub fn token_lock_file() -> Result<PathBuf> {
     Ok(config_dir()?.join("tokens.json.lock"))
 }
 
+/// `chatlog/` — where opt-in chat logs go unless the config names a place.
+pub fn chat_log_dir() -> Result<PathBuf> {
+    Ok(config_dir()?.join("chatlog"))
+}
+
 /// `msm.log` — the log file. The terminal UI owns stdout, so any diagnostics
 /// have to go to a file instead of being printed.
 pub fn log_file() -> Result<PathBuf> {

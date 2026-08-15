@@ -23,7 +23,9 @@ use tokio::sync::mpsc;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::auth::store::TokenStore;
-use crate::chat::render::{render_message, RenderOpts};
+use crate::chat::notify::{high_signal, Notifier};
+use crate::chat::render::{render_message, BadgeMode, MessageLayout, RenderOpts};
+use crate::chat::roster::{mention_prefix, Roster};
 use crate::chat::source::{self, ChatCommand, ChatHandle};
 use crate::chat::state::ChatState;
 use crate::chat::{
@@ -50,6 +52,10 @@ pub struct OpenChat {
     pub state: ChatState,
     /// What the chat strip shows: `#channel` / the typed target.
     pub title: String,
+    /// Everyone observed speaking in this chat, for @-completion.
+    pub roster: Roster,
+    /// Monotonic observation sequence feeding the roster's recency order.
+    pub roster_seq: u64,
 }
 
 /// A moderation action awaiting its confirming second key press.
@@ -82,6 +88,9 @@ pub enum ChatFocus {
     /// jumps the selection to the newest match, enter commits (n/N walk),
     /// esc clears it.
     Search(String),
+    /// The emoji picker (`ctrl+e`): typing filters the built-in catalog,
+    /// enter inserts the top match into the composer, esc cancels.
+    EmojiPicker(String),
     /// A timeout duration prompt (`t` on a selected message): the buffer
     /// holds text like `5m`; enter performs the timeout, esc cancels.
     TimeoutPrompt(String),
@@ -125,6 +134,17 @@ pub struct ChatTabState {
     /// A copy of the config, so composer commands (`/chats <x>`) can open
     /// chats without threading `&Config` through every key path.
     config: Config,
+    /// Presentation switches shared by every pane, cycled with
+    /// ctrl+g/b/y/n. Session-only, like the references — no runtime toggle
+    /// persists to config.
+    pub render: RenderOpts,
+    /// Desktop notifications for high-signal events in off-screen chats.
+    notifier: Notifier,
+    /// Opt-in JSONL chat logging.
+    logger: Option<crate::chat::chatlog::ChatLogger>,
+    /// Whether the Chat tab is currently on screen at all — notifications
+    /// fire for events the user cannot see.
+    tab_visible: bool,
 }
 
 /// The default even split.
@@ -165,6 +185,10 @@ impl ChatTabState {
             active_chat: BTreeMap::new(),
             events_tx,
             events_rx: Some(events_rx),
+            render: RenderOpts::default(),
+            notifier: Notifier::new(config.chat.notifications),
+            logger: build_logger(config),
+            tab_visible: false,
             config: config.clone(),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
@@ -216,11 +240,13 @@ impl ChatTabState {
                 }
             }
         }
+        self.tab_visible = true;
         self.refresh_visibility();
     }
 
     /// The tab left the screen: everything counts as unread again.
     pub fn deactivate(&mut self) {
+        self.tab_visible = false;
         for chat in self.open.values_mut() {
             chat.state.mark_hidden();
         }
@@ -300,6 +326,8 @@ impl ChatTabState {
                 handle,
                 state: ChatState::new(&config.chat),
                 title,
+                roster: Roster::new(),
+                roster_seq: 0,
             },
         );
         let chats = self.chats.entry(account.key.clone()).or_default();
@@ -401,9 +429,29 @@ impl ChatTabState {
     /// An event for a chat closed meanwhile is simply dropped — its task ends
     /// as soon as it notices the closed command channel.
     pub fn handle_event(&mut self, key: ChatKey, event: ChatEvent) {
-        if let Some(chat) = self.open.get_mut(&key) {
-            chat.state.apply(event);
+        let on_screen = self.tab_visible
+            && Platform::ALL
+                .iter()
+                .any(|&platform| self.active_key(platform) == Some(&key));
+        let Some(chat) = self.open.get_mut(&key) else {
+            return;
+        };
+        if let ChatEvent::Message(msg) = &event {
+            // Roster and log observe the stream before the state folds it,
+            // so a local echo replaced later was still logged as sent.
+            chat.roster_seq += 1;
+            chat.roster.observe(&msg.author, chat.roster_seq);
+            if let Some(logger) = self.logger.as_mut() {
+                logger.append(&key.target, msg);
+            }
+            // Notify only for what the user cannot currently see.
+            if !on_screen {
+                if let Some((title, body)) = high_signal(msg) {
+                    self.notifier.notify(&title, &body);
+                }
+            }
         }
+        chat.state.apply(event);
     }
 
     /// The focused pane's active chat, mutably.
@@ -606,6 +654,64 @@ impl ChatTabState {
         }
     }
 
+    /// Cycle the message layout (ctrl+g): inline → grouped → compact.
+    pub fn cycle_layout(&mut self) {
+        self.render.layout = match self.render.layout {
+            MessageLayout::Inline => MessageLayout::Grouped,
+            MessageLayout::Grouped => MessageLayout::Compact,
+            MessageLayout::Compact => MessageLayout::Inline,
+        };
+    }
+
+    /// Cycle badge rendering (ctrl+b): glyph → text → off.
+    pub fn cycle_badges(&mut self) {
+        self.render.badge_mode = match self.render.badge_mode {
+            BadgeMode::Glyph => BadgeMode::Text,
+            BadgeMode::Text => BadgeMode::Off,
+            BadgeMode::Off => BadgeMode::Glyph,
+        };
+    }
+
+    pub fn toggle_highlight(&mut self) {
+        self.render.highlight_emotes = !self.render.highlight_emotes;
+    }
+
+    pub fn toggle_full_username(&mut self) {
+        self.render.full_username = !self.render.full_username;
+    }
+
+    /// Complete the trailing @mention in the composer from the roster
+    /// (tab in compose mode). Prefix matches outrank substring matches;
+    /// the best candidate replaces the typed prefix as `@DisplayName `.
+    pub fn complete_mention(&mut self) {
+        let Some(chat) = self.active_chat_mut() else {
+            return;
+        };
+        let Some(prefix) = mention_prefix(&chat.state.draft) else {
+            return;
+        };
+        let typed = prefix.trim_start_matches('@').to_string();
+        let Some(entry) = chat.roster.complete(&typed, 1).into_iter().next() else {
+            return;
+        };
+        let completion = format!("@{} ", entry.name());
+        // mention_prefix may return the word with or without its @ — cut the
+        // @ too either way, since the completion re-adds it.
+        let mut cut = chat.state.draft.len() - prefix.len();
+        if !prefix.starts_with('@') && chat.state.draft[..cut].ends_with('@') {
+            cut -= 1;
+        }
+        chat.state.draft.truncate(cut);
+        chat.state.draft.push_str(&completion);
+    }
+
+    /// Insert an emoji from the picker into the composer draft.
+    pub fn insert_emoji(&mut self, emoji: &str) {
+        if let Some(chat) = self.active_chat_mut() {
+            chat.state.draft.push_str(emoji);
+        }
+    }
+
     /// Ask the focused chat's task to reconnect (also the manual override for
     /// a quota pause or an ended chat).
     pub fn reconnect_active(&mut self) {
@@ -799,6 +905,29 @@ fn normalize_target(platform: Platform, target: &str) -> String {
         Platform::Twitch => target.trim().trim_start_matches('#').to_lowercase(),
         Platform::YouTube => target.trim().to_string(),
     }
+}
+
+/// The chat logger, when the config opts in.
+fn build_logger(config: &Config) -> Option<crate::chat::chatlog::ChatLogger> {
+    if !config.chat.chat_logging {
+        return None;
+    }
+    let dir = if config.chat.chat_log_dir.is_empty() {
+        match crate::paths::chat_log_dir() {
+            Ok(dir) => dir,
+            Err(err) => {
+                tracing::warn!(error = %format!("{err:#}"), "chat logging disabled");
+                return None;
+            }
+        }
+    } else {
+        std::path::PathBuf::from(&config.chat.chat_log_dir)
+    };
+    Some(crate::chat::chatlog::ChatLogger::new(
+        dir,
+        config.chat.chat_log_max_bytes,
+        config.chat.chat_log_max_files as usize,
+    ))
 }
 
 /// Turn the token store into per-platform account tab lists.
@@ -1094,7 +1223,7 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: 
         return;
     };
 
-    let opts = RenderOpts::default();
+    let mut opts = state.render.clone();
     let height = area.height as usize;
     let len = chat.state.messages.len();
     let newest_visible = len.saturating_sub(chat.state.scroll);
@@ -1127,6 +1256,15 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: 
         if !filters.matches(msg, &self_login) && Some(index) != selected_index {
             continue;
         }
+        // Grouped layout: suppress the header when the previous (older)
+        // message is from the same author — computed here because only the
+        // draw pass knows the final visible order.
+        opts.continues_group = index
+            .checked_sub(1)
+            .and_then(|prev| chat.state.messages.get(prev))
+            .is_some_and(|prev| {
+                !prev.author.id.is_empty() && prev.author.id == msg.author.id && !prev.deleted
+            });
         let mut rendered = render_message(msg, area.width, &opts);
         if Some(index) == selected_index {
             // The selection is a background wash over the whole message so
@@ -1158,6 +1296,21 @@ fn draw_composer(
                 Span::raw(buffer.clone()),
                 Span::styled("▏", Style::default().fg(Color::Cyan)),
             ]),
+            ChatFocus::EmojiPicker(buffer) => {
+                let mut spans = vec![
+                    Span::styled("emoji: ", Style::default().fg(Color::Cyan)),
+                    Span::raw(buffer.clone()),
+                    Span::styled("▏ ", Style::default().fg(Color::Cyan)),
+                ];
+                for entry in crate::chat::emoji::search(buffer, 6) {
+                    spans.push(Span::raw(format!("{} ", entry.emoji)));
+                }
+                spans.push(Span::styled(
+                    " enter inserts the first",
+                    Style::default().fg(Color::DarkGray),
+                ));
+                Line::from(spans)
+            }
             ChatFocus::Search(buffer) => Line::from(vec![
                 Span::styled("/", Style::default().fg(Color::Yellow)),
                 Span::raw(buffer.clone()),
@@ -1285,6 +1438,10 @@ mod tests {
             events_rx: None,
             http: reqwest::Client::new(),
             config: Config::default(),
+            render: RenderOpts::default(),
+            notifier: Notifier::new(false),
+            logger: None,
+            tab_visible: true,
         };
         for (platform, count) in [(Platform::Twitch, twitch), (Platform::YouTube, youtube)] {
             if count > 0 {
@@ -1653,6 +1810,55 @@ mod tests {
         // it mentions nobody.
         filters.notices = true;
         assert!(filters.matches(&local_notice("plain notice"), "streamer"));
+    }
+
+    /// Tab completes the trailing @mention from the roster, prefix-first.
+    #[tokio::test]
+    async fn mention_completion_replaces_the_typed_prefix() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+        let mut m = local_notice("hello");
+        m.author.id = "42".into();
+        m.author.login = "chatperson".into();
+        m.author.display_name = "ChatPerson".into();
+        state.handle_event(key.clone(), ChatEvent::Message(Box::new(m)));
+
+        for c in "hey @chatp".chars() {
+            state.compose_push(c);
+        }
+        state.complete_mention();
+        assert_eq!(state.open[&key].state.draft, "hey @ChatPerson ");
+
+        // No @word at the caret: completion must not touch the draft.
+        state.compose_push('!');
+        state.complete_mention();
+        assert_eq!(state.open[&key].state.draft, "hey @ChatPerson !");
+    }
+
+    /// The display toggles cycle through every mode and back.
+    #[test]
+    fn display_toggles_cycle() {
+        let mut state = tab_state(1, 0);
+        assert_eq!(state.render.layout, MessageLayout::Inline);
+        state.cycle_layout();
+        assert_eq!(state.render.layout, MessageLayout::Grouped);
+        state.cycle_layout();
+        state.cycle_layout();
+        assert_eq!(state.render.layout, MessageLayout::Inline);
+
+        assert_eq!(state.render.badge_mode, BadgeMode::Glyph);
+        state.cycle_badges();
+        state.cycle_badges();
+        state.cycle_badges();
+        assert_eq!(state.render.badge_mode, BadgeMode::Glyph);
+
+        state.toggle_highlight();
+        assert!(!state.render.highlight_emotes);
+        state.toggle_full_username();
+        assert!(state.render.full_username);
     }
 
     /// Scrolling clamps at both ends and g/G jump to them.

@@ -104,6 +104,20 @@ pub struct ChatConfig {
     /// Stop polling when the estimated remaining quota falls below this
     /// percentage, keeping a reserve so message *sending* still works.
     pub quota_reserve_percent: u8,
+
+    /// Desktop notifications for high-signal chat events (Super Chats,
+    /// memberships) arriving in chats that are not on screen.
+    pub notifications: bool,
+
+    /// Write every chat message to append-only JSON Lines files.
+    pub chat_logging: bool,
+    /// Where those files go. Empty means `chatlog/` under the config
+    /// directory (`msm paths` prints where that lives).
+    pub chat_log_dir: String,
+    /// Rotate a log file once it reaches this many bytes.
+    pub chat_log_max_bytes: u64,
+    /// Keep at most this many rotated files; older ones are pruned.
+    pub chat_log_max_files: u64,
 }
 
 impl Default for ChatConfig {
@@ -114,6 +128,11 @@ impl Default for ChatConfig {
             poll_interval_ceiling_ms: 0,
             daily_quota_units: 10_000,
             quota_reserve_percent: 10,
+            notifications: true,
+            chat_logging: false,
+            chat_log_dir: String::new(),
+            chat_log_max_bytes: 10 * 1024 * 1024,
+            chat_log_max_files: 5,
         }
     }
 }
