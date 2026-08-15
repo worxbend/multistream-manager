@@ -67,6 +67,13 @@ pub struct YouTubeBackend {
     /// 15-second poll interval the uncached version was the single biggest
     /// quota consumer in the program.
     subscriber_cache: Option<(Instant, String)>,
+    /// YouTube's video category list, fetched once and then filtered locally.
+    ///
+    /// The list is fixed for a region and it powers a type-ahead field, so
+    /// fetching it per keystroke meant one `videoCategories.list` request per
+    /// character typed — every one of them spending daily quota to return the
+    /// exact same answer.
+    category_cache: Option<Vec<Category>>,
     /// Stops statistics polling from hammering the API after it has already
     /// said the daily quota is gone. See [`QuotaBackoff`].
     quota: QuotaBackoff,
@@ -166,6 +173,7 @@ impl YouTubeBackend {
             broadcast_id: None,
             channel_id: None,
             subscriber_cache: None,
+            category_cache: None,
             quota: QuotaBackoff::default(),
         }
     }
@@ -478,6 +486,22 @@ impl YouTubeBackend {
         Ok(())
     }
 
+    /// The video category list, fetched from the API only the first time.
+    ///
+    /// The autocomplete calls this on every keystroke. The list does not change
+    /// during a session, so after the first call this is a borrow of memory and
+    /// costs nothing — which is the difference between one API request per login
+    /// and one per character typed.
+    async fn cached_video_categories(&mut self, region: &str) -> Result<&[Category]> {
+        if self.category_cache.is_none() {
+            self.category_cache = Some(self.video_categories(region).await?);
+        }
+        Ok(self
+            .category_cache
+            .as_deref()
+            .expect("just populated above if it was empty"))
+    }
+
     /// List YouTube's video categories, used for the category autocomplete.
     ///
     /// Unlike Twitch there is no search endpoint — the list is short and fixed,
@@ -737,14 +761,15 @@ impl Backend for YouTubeBackend {
 
     fn search_categories<'a>(&'a mut self, query: &'a str) -> BoxFuture<'a, Result<Vec<Category>>> {
         Box::pin(async move {
-            let all = self.video_categories("US").await?;
+            let all = self.cached_video_categories("US").await?;
             let needle = query.trim().to_lowercase();
             if needle.is_empty() {
-                return Ok(all);
+                return Ok(all.to_vec());
             }
             Ok(all
-                .into_iter()
+                .iter()
                 .filter(|c| c.name.to_lowercase().contains(&needle))
+                .cloned()
                 .collect())
         })
     }
@@ -1459,5 +1484,44 @@ mod tests {
         assert_eq!(human_minutes(StdDuration::from_secs(60)), "1 min");
         assert_eq!(human_minutes(StdDuration::from_secs(61)), "2 min");
         assert_eq!(human_minutes(StdDuration::from_secs(600)), "10 min");
+    }
+
+    /// The autocomplete calls `search_categories` on every keystroke. It used to
+    /// fetch the whole `videoCategories.list` each time — twenty requests to
+    /// type "Science & Technology", nineteen of them spending daily quota to
+    /// return an answer already in hand.
+    ///
+    /// The backend here is built with an HTTP client that cannot reach anything,
+    /// so any attempt to go to the network fails the test rather than merely
+    /// being slow.
+    #[tokio::test]
+    async fn typing_a_category_name_does_not_go_to_the_network_twice() {
+        let offline = reqwest::Client::builder()
+            .timeout(StdDuration::from_millis(1))
+            .build()
+            .unwrap();
+        let mut backend = YouTubeBackend::new(offline, "token".into(), false, String::new());
+
+        // Stand in for the one fetch a real session performs on first use.
+        backend.category_cache = Some(vec![
+            Category { id: "20".into(), name: "Gaming".into() },
+            Category { id: "28".into(), name: "Science & Technology".into() },
+        ]);
+
+        let typed = "Science & Technology";
+        for end in 1..=typed.len() {
+            let matches = backend
+                .search_categories(&typed[..end])
+                .await
+                .expect("filtering the cached list must not touch the network");
+            assert!(
+                matches.iter().any(|c| c.id == "28"),
+                "expected the science category while typing {:?}",
+                &typed[..end]
+            );
+        }
+
+        // An empty query still offers the whole list.
+        assert_eq!(backend.search_categories("").await.unwrap().len(), 2);
     }
 }
