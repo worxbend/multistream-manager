@@ -142,6 +142,18 @@ async fn main() -> Result<()> {
     // Keep the guard alive for the whole run so buffered log lines get flushed.
     let _log_guard = logging::init().ok();
 
+    // Commands that never read a config value are dispatched before the
+    // config file is parsed. Otherwise a corrupted `config.toml` would lock
+    // the user out of exactly the commands needed to recover from it:
+    // `msm paths` (which tells them where the broken file lives) and
+    // `msm logout` / `msm init` (which only touch other files).
+    match &cli.command {
+        Some(Commands::Logout { platform }) => return cmd_logout(platform),
+        Some(Commands::Init) => return cmd_init(),
+        Some(Commands::Paths) => return cmd_paths(),
+        _ => {}
+    }
+
     let config = match &cli.config {
         Some(path) => Config::load_from(path)?,
         None => Config::load()?,

@@ -79,9 +79,14 @@ impl Engine {
     /// Without this, a session longer than an hour would see every statistics
     /// poll fail with a 401 and the dashboard would freeze on stale numbers —
     /// which is precisely the long-running case this application exists for.
+    ///
+    /// All the platforms are done in one call so that `tokens.json` is read once
+    /// per poll rather than once per platform, and written only when a token was
+    /// genuinely renewed.
     async fn refresh_tokens(&mut self) {
-        for platform in self.platforms() {
-            match auth::access_token(&self.config, platform).await {
+        let platforms = self.platforms();
+        for (platform, result) in auth::access_tokens(&self.config, &platforms).await {
+            match result {
                 Ok(token) => {
                     if let Some(backend) = self.backends.get_mut(&platform) {
                         backend.set_access_token(token);
@@ -579,11 +584,6 @@ mod tests {
     }
 
     fn engine_with(backends: Vec<(Platform, bool)>) -> Engine {
-        // Point config/token lookups at a scratch directory so the test never
-        // reads or writes the real user's files.
-        let dir = std::env::temp_dir().join("msm-engine-test");
-        std::env::set_var("MSM_CONFIG_DIR", &dir);
-
         Engine {
             config: Config::default(),
             backends: backends
@@ -602,6 +602,9 @@ mod tests {
     /// all — the dashboard blamed a healthy platform and `msm go` exited 0.
     #[tokio::test]
     async fn a_panicking_backend_is_reported_against_its_own_platform() {
+        // Token lookups must not touch the real user's files.
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("engine-go-live");
+
         let mut engine = engine_with(vec![(Platform::Twitch, false), (Platform::YouTube, true)]);
 
         let results = engine.go_live(&StreamPlan::default()).await;

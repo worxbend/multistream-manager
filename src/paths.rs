@@ -115,6 +115,54 @@ pub fn write_secret_file(path: &std::path::Path, contents: &str) -> Result<()> {
     result
 }
 
+/// Test helpers for pointing the whole program at a scratch config directory.
+#[cfg(test)]
+pub mod test_support {
+    use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// `MSM_CONFIG_DIR` is process-wide state, and tests run in parallel inside
+    /// one process, so tests that redirect it take this lock for their duration.
+    fn lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// An empty config directory that the program will use until this guard is
+    /// dropped, at which point the directory is removed.
+    pub struct ScratchConfigDir {
+        path: PathBuf,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl ScratchConfigDir {
+        pub fn new(test_name: &str) -> Self {
+            let guard = lock();
+            let path = std::env::temp_dir().join(format!("msm-scratch-{test_name}"));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("creating a scratch config directory");
+            std::env::set_var("MSM_CONFIG_DIR", &path);
+            Self {
+                path,
+                _guard: guard,
+            }
+        }
+
+        pub fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    impl Drop for ScratchConfigDir {
+        fn drop(&mut self) {
+            std::env::remove_var("MSM_CONFIG_DIR");
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

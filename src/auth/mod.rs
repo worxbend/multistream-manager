@@ -53,14 +53,96 @@ pub async fn login(config: &Config, platform: Platform) -> Result<()> {
     Ok(())
 }
 
+/// Read the token file without blocking the async runtime.
+///
+/// `TokenStore::load` and `save` are ordinary blocking filesystem calls, and
+/// `save` includes an `fsync` that can stall for tens of milliseconds on a busy
+/// or networked disk. Called directly from an async task they block a tokio
+/// worker thread — a thread shared with everything else the program is doing —
+/// so they are handed to the blocking pool instead.
+async fn load_store() -> Result<TokenStore> {
+    tokio::task::spawn_blocking(TokenStore::load)
+        .await
+        .context("reading the saved tokens")?
+}
+
+/// Write the token file without blocking the async runtime. See [`load_store`].
+async fn save_store(store: TokenStore) -> Result<()> {
+    tokio::task::spawn_blocking(move || store.save())
+        .await
+        .context("saving the renewed tokens")?
+}
+
 /// Return a usable access token for `platform`, renewing it first if needed.
 ///
 /// This is the function every API client calls before making a request. It
 /// hides the whole expiry/refresh dance from the rest of the program: callers
 /// just ask for a token and get one that works.
 pub async fn access_token(config: &Config, platform: Platform) -> Result<String> {
-    let mut store = TokenStore::load()?;
+    let mut store = load_store().await?;
+    let (token, renewed) = token_from(config, platform, &mut store).await?;
+    if renewed {
+        save_store(store).await?;
+    }
+    Ok(token)
+}
 
+/// Tokens for several platforms at once, reading and writing the file once.
+///
+/// The engine needs one token per platform before every batch of API work. Doing
+/// that through [`access_token`] meant re-reading `tokens.json` once per
+/// platform, on every statistics poll, just to discover that nothing had
+/// expired. This reads the file once and writes it back only if something was
+/// actually renewed.
+///
+/// A platform whose token cannot be produced gets its own error rather than
+/// spoiling the others: a expired YouTube login should not stop Twitch working.
+pub async fn access_tokens(
+    config: &Config,
+    platforms: &[Platform],
+) -> Vec<(Platform, Result<String>)> {
+    let mut store = match load_store().await {
+        Ok(store) => store,
+        // Nothing can be renewed without the file, so every platform gets the
+        // same explanation.
+        Err(err) => {
+            let message = format!("{err:#}");
+            return platforms
+                .iter()
+                .map(|&platform| (platform, Err(anyhow::anyhow!(message.clone()))))
+                .collect();
+        }
+    };
+
+    let mut results = Vec::new();
+    let mut renewed_any = false;
+    for &platform in platforms {
+        match token_from(config, platform, &mut store).await {
+            Ok((token, renewed)) => {
+                renewed_any |= renewed;
+                results.push((platform, Ok(token)));
+            }
+            Err(err) => results.push((platform, Err(err))),
+        }
+    }
+
+    if renewed_any {
+        if let Err(err) = save_store(store).await {
+            tracing::warn!(error = %format!("{err:#}"), "could not save the renewed tokens");
+        }
+    }
+
+    results
+}
+
+/// The token for one platform, renewing it in `store` if it has aged out.
+///
+/// Returns the token and whether `store` was changed and so needs writing back.
+async fn token_from(
+    config: &Config,
+    platform: Platform,
+    store: &mut TokenStore,
+) -> Result<(String, bool)> {
     let Some(tokens) = store.get(platform).cloned() else {
         bail!(
             "not logged in to {}. Run `msm login {}` first.",
@@ -70,7 +152,7 @@ pub async fn access_token(config: &Config, platform: Platform) -> Result<String>
     };
 
     if !tokens.needs_refresh() {
-        return Ok(tokens.access_token);
+        return Ok((tokens.access_token, false));
     }
 
     let Some(refresh_token) = tokens.refresh_token.clone() else {
@@ -102,9 +184,7 @@ pub async fn access_token(config: &Config, platform: Platform) -> Result<String>
 
     let access = refreshed.access_token.clone();
     store.set(platform, refreshed);
-    store.save()?;
-
-    Ok(access)
+    Ok((access, true))
 }
 
 /// A one-line summary of a platform's login state, for `msm status`.
@@ -155,5 +235,43 @@ mod tests {
 
         assert_eq!(credentials(&config, Platform::Twitch).0, "tw");
         assert_eq!(credentials(&config, Platform::YouTube).0, "yt");
+    }
+
+    /// The engine asks for every platform's token before each batch of work.
+    /// This must read `tokens.json` once, not once per platform, and one
+    /// platform that is not logged in must not spoil the other.
+    #[tokio::test]
+    async fn tokens_for_several_platforms_come_from_one_read() {
+        let scratch = crate::paths::test_support::ScratchConfigDir::new("auth-access-tokens");
+
+        // Only Twitch is logged in, with a token that is nowhere near expiring.
+        let mut store = TokenStore::default();
+        store.set(
+            Platform::Twitch,
+            TokenSet::new("twitch-token".into(), Some("r".into()), Some(3600), vec![]),
+        );
+        store.save().expect("writing the scratch token file");
+
+        let config = Config::default();
+        let results = access_tokens(&config, &Platform::ALL).await;
+
+        assert_eq!(results.len(), Platform::ALL.len());
+        let twitch = results
+            .iter()
+            .find(|(p, _)| *p == Platform::Twitch)
+            .unwrap();
+        assert_eq!(twitch.1.as_deref().unwrap(), "twitch-token");
+
+        let youtube = results
+            .iter()
+            .find(|(p, _)| *p == Platform::YouTube)
+            .unwrap();
+        let err = youtube.1.as_ref().unwrap_err().to_string();
+        assert!(err.contains("msm login youtube"), "unhelpful error: {err}");
+
+        // Nothing needed renewing, so the file must not have been rewritten.
+        let written = std::fs::read_to_string(scratch.path().join("tokens.json")).unwrap();
+        assert!(written.contains("twitch-token"));
+        assert!(!written.contains("youtube"));
     }
 }
