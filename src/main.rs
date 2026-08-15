@@ -162,7 +162,6 @@ async fn main() -> Result<()> {
     match cli.command {
         None | Some(Commands::Tui) => ui::run(config).await,
         Some(Commands::Login { platform }) => cmd_login(&config, &platform).await,
-        Some(Commands::Logout { platform }) => cmd_logout(&platform),
         Some(Commands::Status) => cmd_status(&config),
         Some(Commands::Go {
             platforms,
@@ -173,8 +172,9 @@ async fn main() -> Result<()> {
         Some(Commands::Categories { query }) => cmd_categories(&config, &query).await,
         Some(Commands::Streams { show_keys }) => cmd_streams(&config, show_keys).await,
         Some(Commands::Cleanup { yes }) => cmd_cleanup(&config, yes).await,
-        Some(Commands::Init) => cmd_init(),
-        Some(Commands::Paths) => cmd_paths(),
+        Some(Commands::Logout { .. }) | Some(Commands::Init) | Some(Commands::Paths) => {
+            unreachable!("dispatched before the config is parsed")
+        }
     }
 }
 
