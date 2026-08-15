@@ -129,6 +129,12 @@ impl TextInput {
         }
 
         let chars: Vec<char> = self.value.chars().collect();
+        // `<`, not `<=`, because the caret needs a cell of its own. The caret
+        // sits *after* the last character while you are typing, so a value that
+        // exactly fills the window needs width + 1 cells to show both the text
+        // and the caret — one more than there is. Returning the whole value here
+        // would push the caret off the end of the field, where it is clipped and
+        // the field looks like it has stopped accepting input.
         if chars.len() < width {
             return (self.value.clone(), self.cursor);
         }
@@ -256,5 +262,27 @@ mod tests {
     fn a_zero_width_window_is_handled_without_panicking() {
         let input = TextInput::new("abc");
         assert_eq!(input.visible(0), (String::new(), 0));
+    }
+
+    /// The boundary case: a value exactly as wide as the field. Whatever is
+    /// returned has to render in `width` cells including the caret, because
+    /// `draw::editing_spans` draws the caret as a cell of its own.
+    #[test]
+    fn a_value_that_exactly_fills_the_window_still_leaves_room_for_the_caret() {
+        let input = TextInput::new("abcde");
+        let (text, caret) = input.visible(5);
+
+        // The caret is after the last character, so rendering costs
+        // `text.len()` cells with one of them highlighted, or one more when the
+        // caret is past the end.
+        let rendered = text.chars().count().max(caret + 1);
+        assert_eq!(rendered, 5, "rendered {rendered} cells into a 5-wide field");
+        assert!(text.ends_with('e'), "the caret end of the value must be visible");
+
+        // With the caret inside the value there is no extra cell to find, so the
+        // whole value is shown.
+        let mut input = TextInput::new("abcde");
+        input.cursor = 2;
+        assert_eq!(input.visible(5), ("abcde".to_string(), 2));
     }
 }
