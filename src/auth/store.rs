@@ -30,6 +30,14 @@ pub struct TokenSet {
 
 impl TokenSet {
     /// Build a token set from a fresh token endpoint response.
+    ///
+    /// `expires_in_secs` comes straight off the wire, so it is treated as
+    /// untrusted. `Duration::seconds` panics on values chrono cannot represent,
+    /// and adding a huge duration to "now" can overflow the date type as well,
+    /// so both steps are done with their non-panicking `try_`/`checked_`
+    /// equivalents. A value that does not survive them is recorded as "no expiry
+    /// information", which the rest of this type already handles: the token is
+    /// used until the API rejects it with a 401.
     pub fn new(
         access_token: String,
         refresh_token: Option<String>,
@@ -39,7 +47,7 @@ impl TokenSet {
         Self {
             access_token,
             refresh_token,
-            expires_at: expires_in_secs.map(|secs| Utc::now() + Duration::seconds(secs)),
+            expires_at: expires_in_secs.and_then(expiry_from_now),
             scopes,
         }
     }
@@ -74,6 +82,19 @@ impl TokenSet {
             format!("{minutes}m")
         }
     }
+}
+
+/// Turn "valid for this many seconds" into an absolute instant, or `None` if the
+/// number is out of range.
+///
+/// Providers are supposed to send something like 3600. A broken provider, a
+/// misbehaving proxy, or a hostile response can send anything at all, and the
+/// naive `Utc::now() + Duration::seconds(n)` crashes the whole program on a
+/// number chrono cannot hold — including in the background token refresh, which
+/// would take the dashboard down mid-stream.
+fn expiry_from_now(secs: i64) -> Option<DateTime<Utc>> {
+    let delta = Duration::try_seconds(secs)?;
+    Utc::now().checked_add_signed(delta)
 }
 
 /// The whole `tokens.json`: a map from platform slug to that platform's tokens.
@@ -197,5 +218,31 @@ mod tests {
         assert_eq!(back.get(Platform::Twitch).unwrap().access_token, "access");
         assert!(back.get(Platform::YouTube).is_none());
         assert_eq!(back.authorised_platforms(), vec![Platform::Twitch]);
+    }
+
+    /// `expires_in` is a number chosen by the remote server. An absurd one used
+    /// to panic inside chrono and abort the process — during `msm login`, and
+    /// worse, during the silent refresh that runs while the dashboard is up.
+    #[test]
+    fn an_out_of_range_expiry_is_ignored_rather_than_crashing() {
+        for absurd in [i64::MAX, i64::MIN, 9_300_000_000_000_000] {
+            let tokens = TokenSet::new("a".into(), None, Some(absurd), vec![]);
+            assert!(
+                tokens.expires_at.is_none(),
+                "{absurd} should be discarded, not stored"
+            );
+            // No expiry information means "use it until the API says otherwise".
+            assert!(!tokens.needs_refresh());
+            assert_eq!(tokens.expires_in_human(), "unknown");
+        }
+    }
+
+    #[test]
+    fn a_normal_expiry_is_still_recorded() {
+        let tokens = TokenSet::new("a".into(), None, Some(3600), vec![]);
+        let expires_at = tokens.expires_at.expect("an hour is perfectly valid");
+        let remaining = (expires_at - Utc::now()).num_seconds();
+        assert!((3500..=3600).contains(&remaining), "{remaining}s");
+        assert!(!tokens.needs_refresh());
     }
 }
