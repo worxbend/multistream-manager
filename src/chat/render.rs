@@ -1,7 +1,8 @@
 //! Pure rendering: normalized chat messages → styled ratatui lines.
 //!
 //! Ported from `twi` (commit 7c6ad6bbbc3dec1b6af2ddbd03b55f96c0c162cf,
-//! internal/render/message.go + internal/render/badges.go +
+//! internal/render/message.go — inline/grouped/compact layouts, grouped
+//! header gates, full-username, emote highlight chips — + internal/render/badges.go +
 //! internal/theme/palette.go `IdentityColor`) and `yc` (commit
 //! 9e67efd10c0790ec22df2c944bcee6be1bc37cf8, internal/render/superchat.go
 //! `TierColor`/chips + internal/youtube/fragments.go `SplitFragments`).
@@ -520,12 +521,42 @@ pub enum BadgeMode {
     Off,
 }
 
+/// How a message's author and text are arranged (twi message.go LayoutMode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MessageLayout {
+    /// Author and message on one row: `HH:MM badges Name: text`. Densest
+    /// layout; every row is self-describing.
+    #[default]
+    Inline,
+    /// Author on their own header row with the message text indented beneath
+    /// it; consecutive messages from the same author skip the repeated header
+    /// (see [`RenderOpts::continues_group`]).
+    Grouped,
+    /// Drops timestamps and badges, leaving `Name: text` — the most rows of
+    /// actual conversation per screen.
+    Compact,
+}
+
 /// Presentation switches for [`render_message`]. Everything else the layout
 /// needs travels in the message itself.
 #[derive(Debug, Clone)]
 pub struct RenderOpts {
     pub badge_mode: BadgeMode,
     pub timestamps: bool,
+    pub layout: MessageLayout,
+    /// Draw shortcode and emoji fragments on a tinted background chip so
+    /// they stand out from surrounding text (twi/yc HighlightEmotes /
+    /// HighlightEmoji). Off keeps the foreground styling but no chip.
+    pub highlight_emotes: bool,
+    /// Append ` (login)` after the display name when the login is not simply
+    /// a recapitalization of it — Twitch allows CJK and stylized display
+    /// names that are otherwise impossible to tie back to a mentionable
+    /// account (twi FullUsername).
+    pub full_username: bool,
+    /// This message follows another from the same author; the grouped layout
+    /// uses it to suppress the repeated author header so a run of messages
+    /// reads as one block under a single name (twi ContinuesGroup).
+    pub continues_group: bool,
 }
 
 impl Default for RenderOpts {
@@ -533,9 +564,25 @@ impl Default for RenderOpts {
         Self {
             badge_mode: BadgeMode::Glyph,
             timestamps: true,
+            layout: MessageLayout::Inline,
+            highlight_emotes: true,
+            full_username: false,
+            continues_group: false,
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Emote highlight chips (twi emoteHighlight/emojiHighlight, yc
+// shortcodeHighlight/emojiHighlight — Mix(surface, tint, 0.22))
+// ---------------------------------------------------------------------------
+
+/// Fixed 22% blends of the host canvas toward accent/warning, precomputed the
+/// same way the chip-tone mixes above are:
+/// canvas (13,17,23) + 22% accent (145,71,255) → (42,29,74);
+/// canvas (13,17,23) + 22% warning (210,153,34) → (56,47,25).
+const SHORTCODE_HIGHLIGHT: Color = Color::Rgb(42, 29, 74);
+const EMOJI_HIGHLIGHT: Color = Color::Rgb(56, 47, 25);
 
 /// A styled piece queued for wrapping. `atomic` pieces (badges, mentions,
 /// shortcodes, URLs, emoji, chips) move to the next row whole; text pieces
@@ -551,9 +598,16 @@ struct Piece {
 pub fn render_message(msg: &ChatMessage, width: u16, opts: &RenderOpts) -> Vec<Line<'static>> {
     let width = usize::from(width.max(MINIMUM_RENDER_WIDTH));
 
+    if opts.layout == MessageLayout::Grouped {
+        return render_grouped(msg, width, opts);
+    }
+    // Compact trades every decoration for message text: no timestamp, no
+    // badges, straight to "Name: body" (twi messagePrefix LayoutCompact).
+    let compact = opts.layout == MessageLayout::Compact;
+
     let mut prefix: Vec<Piece> = Vec::new();
 
-    if opts.timestamps {
+    if opts.timestamps && !compact {
         // `--:--` for an unknown timestamp: absent data is never a negative
         // fact, but the column must keep its width so rows align.
         let stamp = match msg.timestamp {
@@ -567,7 +621,11 @@ pub fn render_message(msg: &ChatMessage, width: u16, opts: &RenderOpts) -> Vec<L
         });
     }
 
-    match opts.badge_mode {
+    match if compact {
+        BadgeMode::Off
+    } else {
+        opts.badge_mode
+    } {
         BadgeMode::Off => {}
         BadgeMode::Glyph => {
             for badge in &msg.author.badges {
@@ -600,6 +658,22 @@ pub fn render_message(msg: &ChatMessage, width: u16, opts: &RenderOpts) -> Vec<L
         });
     }
 
+    prefix.extend(name_pieces(msg, opts));
+    prefix.push(Piece {
+        // An action reads as prose ("* name does a thing"), so no colon.
+        text: if action { " " } else { ": " }.to_string(),
+        style: Style::new().fg(TEXT),
+        atomic: true,
+    });
+
+    let content = content_pieces(msg, opts);
+    wrap(prefix, content, width)
+}
+
+/// The author-name pieces shared by every layout: the bold identity-colored
+/// display name, plus a muted ` (login)` when [`RenderOpts::full_username`]
+/// asks for it and the login adds information (twi usernameFragment).
+fn name_pieces(msg: &ChatMessage, opts: &RenderOpts) -> Vec<Piece> {
     // The color keys off the stable platform id when there is one, so a
     // display-name change does not recolor someone mid-conversation.
     let identity = if msg.author.id.is_empty() {
@@ -613,24 +687,122 @@ pub fn render_message(msg: &ChatMessage, width: u16, opts: &RenderOpts) -> Vec<L
     } else {
         &msg.author.display_name
     };
-    prefix.push(Piece {
+    let mut pieces = vec![Piece {
         text: name.to_string(),
         style: Style::new().fg(name_color).add_modifier(Modifier::BOLD),
         atomic: true,
-    });
-    prefix.push(Piece {
-        // An action reads as prose ("* name does a thing"), so no colon.
-        text: if action { " " } else { ": " }.to_string(),
-        style: Style::new().fg(TEXT),
-        atomic: true,
-    });
+    }];
+    if opts.full_username {
+        let login = msg.author.login.trim();
+        // A login that is only a case-variant of the display name repeats
+        // nothing the reader cannot already see, so it is not appended.
+        if !login.is_empty() && !login.eq_ignore_ascii_case(name) {
+            pieces.push(Piece {
+                text: format!(" ({login})"),
+                style: Style::new().fg(MUTED),
+                atomic: true,
+            });
+        }
+    }
+    pieces
+}
 
-    let content = content_pieces(msg);
-    wrap(prefix, content, width)
+/// The grouped layout (twi groupedRows): an author header row — bold colored
+/// name, badge glyphs, muted timestamp — followed by the message text
+/// indented beneath it. A message continuing a group skips the header, so a
+/// run of messages reads as one block under a single name.
+fn render_grouped(msg: &ChatMessage, width: usize, opts: &RenderOpts) -> Vec<Line<'static>> {
+    // The indent scales down on narrow terminals so it never eats the
+    // message (twi groupedIndentWidth).
+    let indent = if width >= 40 {
+        3
+    } else if width >= 20 {
+        2
+    } else {
+        0
+    };
+
+    let mut rows: Vec<Line<'static>> = Vec::new();
+
+    if !opts.continues_group {
+        let mut header = name_pieces(msg, opts);
+        // Width gates ported from twi groupedHeaderFragments: badges at
+        // >= 24 cells, timestamp at >= 30 — below those the header is just
+        // the name, because a clipped header row misleads more than a bare
+        // one.
+        if width >= 24 && opts.badge_mode != BadgeMode::Off && !msg.author.badges.is_empty() {
+            header.push(Piece {
+                text: " ".to_string(),
+                style: Style::new().fg(TEXT),
+                atomic: true,
+            });
+            for badge in &msg.author.badges {
+                let (glyph, tone) = badge_glyph(&badge.set);
+                let text = match opts.badge_mode {
+                    BadgeMode::Glyph => format!("{glyph} "),
+                    BadgeMode::Text => format!("[{}] ", badge.set),
+                    // Unreachable: Off returns above; the arm exists so a
+                    // future mode fails to compile rather than silently
+                    // rendering nothing.
+                    BadgeMode::Off => String::new(),
+                };
+                header.push(Piece {
+                    text,
+                    style: Style::new().fg(tone.color()),
+                    atomic: true,
+                });
+            }
+        }
+        if width >= 30 && opts.timestamps {
+            let stamp = match msg.timestamp {
+                Some(ts) => ts.format("%H:%M").to_string(),
+                None => "--:--".to_string(),
+            };
+            header.push(Piece {
+                text: format!(" {stamp}"),
+                style: Style::new().fg(MUTED),
+                atomic: true,
+            });
+        }
+        // The header wraps with the body indent so an overlong header's
+        // continuation aligns with the text below it.
+        let mut wrapper = Wrapper {
+            rows: Vec::new(),
+            current: Vec::new(),
+            used: 0,
+            width,
+            indent,
+        };
+        for piece in header {
+            wrapper.push_atomic(piece.text, piece.style);
+        }
+        rows.extend(wrapper.finish());
+    }
+
+    let mut wrapper = Wrapper {
+        rows: Vec::new(),
+        current: Vec::new(),
+        used: 0,
+        width,
+        indent,
+    };
+    if indent > 0 {
+        wrapper.current.push(Span::raw(" ".repeat(indent)));
+        wrapper.used = indent;
+    }
+    for piece in content_pieces(msg, opts) {
+        if piece.atomic {
+            wrapper.push_atomic(piece.text, piece.style);
+        } else {
+            wrapper.push_text(&piece.text, piece.style);
+        }
+    }
+    rows.extend(wrapper.finish());
+    rows
 }
 
 /// The body pieces of a message, before wrapping.
-fn content_pieces(msg: &ChatMessage) -> Vec<Piece> {
+fn content_pieces(msg: &ChatMessage, opts: &RenderOpts) -> Vec<Piece> {
     // The deleted branch comes first and returns: the original text must
     // never reach the screen once a moderator removed it.
     if msg.deleted {
@@ -710,14 +882,26 @@ fn content_pieces(msg: &ChatMessage) -> Vec<Piece> {
                     .add_modifier(Modifier::BOLD | body_modifier),
                 true,
             ),
-            FragKind::Shortcode => (Style::new().fg(SUCCESS).add_modifier(body_modifier), true),
+            FragKind::Shortcode => {
+                let mut style = Style::new().fg(SUCCESS).add_modifier(body_modifier);
+                if opts.highlight_emotes {
+                    style = style.bg(SHORTCODE_HIGHLIGHT);
+                }
+                (style, true)
+            }
             FragKind::Url => (
                 Style::new()
                     .fg(ACCENT)
                     .add_modifier(Modifier::UNDERLINED | body_modifier),
                 true,
             ),
-            FragKind::Emoji => (Style::new().fg(TEXT).add_modifier(body_modifier), true),
+            FragKind::Emoji => {
+                let mut style = Style::new().fg(TEXT).add_modifier(body_modifier);
+                if opts.highlight_emotes {
+                    style = style.bg(EMOJI_HIGHLIGHT);
+                }
+                (style, true)
+            }
         };
         pieces.push(Piece {
             text: frag.text,
@@ -1400,6 +1584,228 @@ mod tests {
             .add_modifier
             .contains(Modifier::UNDERLINED));
         assert_eq!(find(":wave:").fg, Some(SUCCESS));
+    }
+
+    // -- layouts ------------------------------------------------------------
+
+    fn moderator_badge() -> Badge {
+        Badge {
+            set: "moderator".into(),
+            id: "1".into(),
+            info: String::new(),
+        }
+    }
+
+    #[test]
+    fn grouped_renders_a_header_line_then_indented_body() {
+        let mut msg = message("hello there");
+        msg.author.badges = vec![moderator_badge()];
+        let opts = RenderOpts {
+            layout: MessageLayout::Grouped,
+            ..RenderOpts::default()
+        };
+        let lines = render_message(&msg, 80, &opts);
+        assert!(
+            lines.len() >= 2,
+            "expected header + body: {:?}",
+            joined(&lines)
+        );
+        let header = joined(std::slice::from_ref(&lines[0]));
+        assert!(header.contains("Someone"), "{header}");
+        assert!(header.contains('⚔'), "badges missing from header: {header}");
+        assert!(header.contains("--:--"), "timestamp missing: {header}");
+        // The name is bold and identity-colored on the header row.
+        let name_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("Someone"))
+            .expect("the name span exists (asserted above)");
+        assert!(name_span.style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(
+            name_span.style.fg,
+            Some(identity_color("u1", &[DARK_BG], TEXT))
+        );
+        // Body rows carry the 3-cell indent at width 80 and no header parts.
+        let body = joined(std::slice::from_ref(&lines[1]));
+        assert!(body.starts_with("   hello"), "{body:?}");
+        assert!(
+            !body.contains("Someone") && !body.contains("--:--"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn grouped_indent_narrows_with_the_terminal() {
+        let msg = message("hi");
+        let opts = RenderOpts {
+            layout: MessageLayout::Grouped,
+            ..RenderOpts::default()
+        };
+        // width 39 (< 40): 2-cell indent; width 19 (< 20): none.
+        let body = |width: u16| {
+            let lines = render_message(&msg, width, &opts);
+            joined(std::slice::from_ref(&lines[1]))
+        };
+        assert!(body(39).starts_with("  hi"), "{:?}", body(39));
+        assert!(body(19).starts_with("hi"), "{:?}", body(19));
+    }
+
+    #[test]
+    fn continues_group_suppresses_the_header_entirely() {
+        let msg = message("second message");
+        let opts = RenderOpts {
+            layout: MessageLayout::Grouped,
+            continues_group: true,
+            ..RenderOpts::default()
+        };
+        let text = joined(&render_message(&msg, 80, &opts));
+        assert!(!text.contains("Someone"), "header not suppressed: {text}");
+        assert!(!text.contains("--:--"), "header not suppressed: {text}");
+        assert!(text.contains("second message"), "{text}");
+    }
+
+    #[test]
+    fn grouped_header_gates_badges_and_timestamp_by_width() {
+        let mut msg = message("hi");
+        msg.author.badges = vec![moderator_badge()];
+        let opts = RenderOpts {
+            layout: MessageLayout::Grouped,
+            ..RenderOpts::default()
+        };
+        // Width 29: badges survive (>= 24) but the timestamp (>= 30) drops.
+        let at_29 = joined(&render_message(&msg, 29, &opts));
+        assert!(at_29.contains('⚔'), "{at_29}");
+        assert!(!at_29.contains("--:--"), "{at_29}");
+        // Width 23: both drop; the header is just the name.
+        let at_23 = joined(&render_message(&msg, 23, &opts));
+        assert!(!at_23.contains('⚔'), "{at_23}");
+        assert!(!at_23.contains("--:--"), "{at_23}");
+        assert!(at_23.contains("Someone"), "{at_23}");
+    }
+
+    #[test]
+    fn compact_drops_timestamp_and_badges_but_keeps_name_and_body() {
+        let mut msg = message("dense mode");
+        msg.author.badges = vec![moderator_badge()];
+        let opts = RenderOpts {
+            layout: MessageLayout::Compact,
+            ..RenderOpts::default()
+        };
+        let text = joined(&render_message(&msg, 80, &opts));
+        assert!(
+            !text.contains("--:--"),
+            "timestamp survived compact: {text}"
+        );
+        assert!(!text.contains('⚔'), "badges survived compact: {text}");
+        assert!(text.starts_with("Someone: dense mode"), "{text}");
+    }
+
+    #[test]
+    fn compact_keeps_the_action_star() {
+        let mut msg = message("waves");
+        msg.kind = MessageKind::Action;
+        let opts = RenderOpts {
+            layout: MessageLayout::Compact,
+            ..RenderOpts::default()
+        };
+        let text = joined(&render_message(&msg, 80, &opts));
+        assert!(text.starts_with("* Someone waves"), "{text}");
+    }
+
+    #[test]
+    fn full_username_appends_the_login_muted() {
+        let mut msg = message("hi");
+        msg.author.display_name = "漢字の名前".into();
+        msg.author.login = "kanji_name".into();
+        let opts = RenderOpts {
+            full_username: true,
+            ..RenderOpts::default()
+        };
+        let lines = render_message(&msg, 80, &opts);
+        let text = joined(&lines);
+        assert!(text.contains("漢字の名前 (kanji_name):"), "{text}");
+        let login_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("(kanji_name)"))
+            .expect("the login span exists (asserted above)");
+        assert_eq!(login_span.style.fg, Some(MUTED));
+    }
+
+    #[test]
+    fn full_username_skips_a_recapitalized_login_and_an_empty_one() {
+        let opts = RenderOpts {
+            full_username: true,
+            ..RenderOpts::default()
+        };
+        // "Someone" vs login "someone" — a pure case variant adds nothing.
+        let msg = message("hi");
+        let text = joined(&render_message(&msg, 80, &opts));
+        assert!(!text.contains("(someone)"), "{text}");
+        let mut anon = message("hi");
+        anon.author.login = String::new();
+        anon.author.display_name = "Ghost".into();
+        let text = joined(&render_message(&anon, 80, &opts));
+        assert!(!text.contains('('), "{text}");
+    }
+
+    #[test]
+    fn full_username_off_never_appends_the_login() {
+        let mut msg = message("hi");
+        msg.author.display_name = "Stylized".into();
+        msg.author.login = "plainlogin".into();
+        let text = joined(&render_message(&msg, 80, &RenderOpts::default()));
+        assert!(!text.contains("plainlogin"), "{text}");
+    }
+
+    #[test]
+    fn highlight_toggle_changes_only_backgrounds() {
+        let msg = message("hey :wave: 😀 done");
+        let styles = |highlight: bool| {
+            let opts = RenderOpts {
+                highlight_emotes: highlight,
+                ..RenderOpts::default()
+            };
+            let lines = render_message(&msg, 120, &opts);
+            let find = |needle: &str| {
+                lines[0]
+                    .spans
+                    .iter()
+                    .find(|s| s.content.contains(needle))
+                    .unwrap_or_else(|| panic!("span {needle:?} missing"))
+                    .style
+            };
+            (find(":wave:"), find("😀"))
+        };
+        let (short_on, emoji_on) = styles(true);
+        let (short_off, emoji_off) = styles(false);
+        // Backgrounds: on has a chip, off has none.
+        assert!(short_on.bg.is_some() && emoji_on.bg.is_some());
+        assert!(short_off.bg.is_none() && emoji_off.bg.is_none());
+        // Everything but the background is unchanged.
+        assert_eq!(short_on.fg, short_off.fg);
+        assert_eq!(short_on.add_modifier, short_off.add_modifier);
+        assert_eq!(emoji_on.fg, emoji_off.fg);
+        assert_eq!(emoji_on.add_modifier, emoji_off.add_modifier);
+    }
+
+    #[test]
+    fn grouped_lines_respect_the_width() {
+        let mut msg = message("word ".repeat(30).trim_end());
+        msg.author.badges = vec![moderator_badge()];
+        let opts = RenderOpts {
+            layout: MessageLayout::Grouped,
+            ..RenderOpts::default()
+        };
+        for width in [8u16, 20, 30, 47, 80] {
+            for line in render_message(&msg, width, &opts) {
+                assert!(
+                    line_width(&line) <= usize::from(width),
+                    "grouped line wider than {width}: {:?}",
+                    joined(std::slice::from_ref(&line))
+                );
+            }
+        }
     }
 
     #[test]
