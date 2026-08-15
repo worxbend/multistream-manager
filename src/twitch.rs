@@ -28,6 +28,10 @@ pub struct TwitchBackend {
     broadcaster_id: Option<String>,
     /// The channel's login name, used to build the public channel URL.
     login: Option<String>,
+    /// Where the Helix API lives. Always [`HELIX`] in the running program; the
+    /// tests point it at a local server so real request behaviour — how many
+    /// calls are made, and whether they overlap — can be observed.
+    base: String,
 }
 
 impl TwitchBackend {
@@ -38,6 +42,7 @@ impl TwitchBackend {
             access_token,
             broadcaster_id: None,
             login: None,
+            base: HELIX.to_string(),
         }
     }
 
@@ -95,7 +100,8 @@ impl TwitchBackend {
         }
 
         let url = format!(
-            "{HELIX}/search/categories?query={}&first=25",
+            "{}/search/categories?query={}&first=25",
+            self.base,
             urlencoding::encode(query.trim())
         );
         let response = self
@@ -126,7 +132,8 @@ impl TwitchBackend {
     /// rather show the dashboard without a key than fail the whole go-live.
     async fn fetch_stream_key(&self) -> Option<String> {
         let id = self.broadcaster_id().ok()?;
-        let url = format!("{HELIX}/streams/key?broadcaster_id={id}");
+        let base = &self.base;
+        let url = format!("{base}/streams/key?broadcaster_id={id}");
         let response = self.request(reqwest::Method::GET, &url).send().await.ok()?;
         if !response.status().is_success() {
             tracing::warn!(status = ?response.status(), "could not read the Twitch stream key");
@@ -140,7 +147,8 @@ impl TwitchBackend {
     async fn follower_count(&self) -> Option<u64> {
         let id = self.broadcaster_id().ok()?;
         // `first=1` because we only want the `total` field, not the actual list.
-        let url = format!("{HELIX}/channels/followers?broadcaster_id={id}&first=1");
+        let base = &self.base;
+        let url = format!("{base}/channels/followers?broadcaster_id={id}&first=1");
         let response = self.request(reqwest::Method::GET, &url).send().await.ok()?;
         if !response.status().is_success() {
             return None;
@@ -153,7 +161,8 @@ impl TwitchBackend {
     /// expected and simply means the row is omitted from the stats panel.
     async fn subscriber_count(&self) -> Option<u64> {
         let id = self.broadcaster_id().ok()?;
-        let url = format!("{HELIX}/subscriptions?broadcaster_id={id}&first=1");
+        let base = &self.base;
+        let url = format!("{base}/subscriptions?broadcaster_id={id}&first=1");
         let response = self.request(reqwest::Method::GET, &url).send().await.ok()?;
         if !response.status().is_success() {
             return None;
@@ -182,7 +191,8 @@ impl TwitchBackend {
             tags: if tags.is_empty() { None } else { Some(tags) },
         };
 
-        let url = format!("{HELIX}/channels?broadcaster_id={id}");
+        let base = &self.base;
+        let url = format!("{base}/channels?broadcaster_id={id}");
         let response = self
             .request(reqwest::Method::PATCH, &url)
             .json(&body)
@@ -255,18 +265,30 @@ impl Backend for TwitchBackend {
     fn fetch_stats(&mut self) -> BoxFuture<'_, Result<PlatformStats>> {
         Box::pin(async move {
             let id = self.broadcaster_id()?.to_string();
-            let url = format!("{HELIX}/streams?user_id={id}");
-            let response = self
-                .request(reqwest::Method::GET, &url)
-                .send()
-                .await
-                .context("asking Twitch whether you are live")?;
-            let response = check(response, "reading your Twitch stream status").await?;
 
-            let body: DataList<StreamInfo> = response
-                .json()
-                .await
-                .context("parsing the Twitch stream status")?;
+            // The three calls do not depend on each other, so they are started
+            // together and awaited together. Run one after another they cost
+            // three round trips on every poll — at the default 15-second
+            // interval, on a slow connection, that was a noticeable part of the
+            // interval spent waiting.
+            let base = &self.base;
+            let url = format!("{base}/streams?user_id={id}");
+            let live = async {
+                let response = self
+                    .request(reqwest::Method::GET, &url)
+                    .send()
+                    .await
+                    .context("asking Twitch whether you are live")?;
+                let response = check(response, "reading your Twitch stream status").await?;
+                response
+                    .json::<DataList<StreamInfo>>()
+                    .await
+                    .context("parsing the Twitch stream status")
+            };
+
+            let (body, followers, subs) =
+                tokio::join!(live, self.follower_count(), self.subscriber_count());
+            let body = body?;
 
             let mut stats = PlatformStats::default();
 
@@ -284,13 +306,13 @@ impl Backend for TwitchBackend {
                 }
             }
 
-            if let Some(followers) = self.follower_count().await {
+            if let Some(followers) = followers {
                 stats.extra.push(Stat {
                     label: "Followers".into(),
                     value: format_count(followers),
                 });
             }
-            if let Some(subs) = self.subscriber_count().await {
+            if let Some(subs) = subs {
                 stats.extra.push(Stat {
                     label: "Subscribers".into(),
                     value: format_count(subs),
@@ -422,6 +444,7 @@ struct UpdateChannelRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration as StdDuration;
 
     #[test]
     fn counts_are_abbreviated_for_display() {
@@ -492,5 +515,91 @@ mod tests {
         let backend = TwitchBackend::new(reqwest::Client::new(), "id".into(), "token".into());
         let err = backend.broadcaster_id().unwrap_err().to_string();
         assert!(err.contains("before connect()"));
+    }
+
+    /// A minimal Helix stand-in: every endpoint takes `delay` to answer, so the
+    /// wall-clock time of one `fetch_stats` says whether the calls overlapped.
+    ///
+    /// Returns the base URL to point a backend at, and a counter of how many
+    /// requests each path received.
+    async fn fake_helix(
+        delay: StdDuration,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let recorded = recorded.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 2048];
+                    let read = socket.read(&mut buffer).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                    let path = request
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .split('?')
+                        .next()
+                        .unwrap_or("/")
+                        .to_string();
+                    recorded.lock().unwrap().push(path);
+
+                    tokio::time::sleep(delay).await;
+
+                    let body = r#"{"data":[],"total":7}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+
+        (base, seen)
+    }
+
+    fn backend_for(base: String) -> TwitchBackend {
+        let mut backend =
+            TwitchBackend::new(reqwest::Client::new(), "client".into(), "token".into());
+        backend.base = base;
+        backend.broadcaster_id = Some("123".into());
+        backend.login = Some("someone".into());
+        backend
+    }
+
+    /// The stream status, the follower total and the subscriber total are three
+    /// independent requests. Awaited one after another they cost three round
+    /// trips on every single poll; started together they cost one.
+    #[tokio::test]
+    async fn a_stats_poll_makes_its_three_requests_at_the_same_time() {
+        let delay = StdDuration::from_millis(200);
+        let (base, seen) = fake_helix(delay).await;
+        let mut backend = backend_for(base);
+
+        let started = std::time::Instant::now();
+        backend
+            .fetch_stats()
+            .await
+            .expect("the fake server always answers");
+        let elapsed = started.elapsed();
+
+        let paths = seen.lock().unwrap().clone();
+        assert_eq!(paths.len(), 3, "expected three requests, got {paths:?}");
+        assert!(
+            elapsed < delay * 2,
+            "the three requests took {elapsed:?}, which means they were still serialised"
+        );
     }
 }
