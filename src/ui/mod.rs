@@ -1,6 +1,7 @@
 //! The terminal UI: setup, teardown and the main event loop.
 
 pub mod app;
+pub mod chat_tab;
 pub mod draw;
 pub mod input;
 pub mod worker;

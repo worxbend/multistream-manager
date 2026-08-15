@@ -66,10 +66,23 @@ impl Popup {
     }
 }
 
+/// The top-level tabs. Stream Info is everything the app did before chat
+/// arrived; Chat is the split Twitch/YouTube chat view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    StreamInfo,
+    Chat,
+}
+
 /// The whole UI state.
 pub struct App {
     pub screen: Screen,
     pub config: Config,
+    /// Which top-level tab is showing. Alt+1 / Alt+2 switch (alt rather than
+    /// ctrl because terminals cannot tell ctrl+1 from a plain 1).
+    pub tab: Tab,
+    /// State for the Chat tab (pane focus, account sub-tabs, split width).
+    pub chat: super::chat_tab::ChatTabState,
 
     /// Which platforms are ticked on the first screen.
     pub selected: Vec<Platform>,
@@ -151,6 +164,8 @@ impl App {
         };
 
         Self {
+            tab: Tab::StreamInfo,
+            chat: super::chat_tab::ChatTabState::new(),
             screen: Screen::Platforms,
             config,
             selected,
@@ -434,11 +449,55 @@ impl App {
             return vec![];
         }
 
+        // Alt+digit switches top-level tabs from anywhere — including inside
+        // a text field, because the Alt modifier keeps it unambiguous.
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            match key.code {
+                KeyCode::Char('1') => {
+                    self.tab = Tab::StreamInfo;
+                    return vec![];
+                }
+                KeyCode::Char('2') => {
+                    self.tab = Tab::Chat;
+                    return vec![];
+                }
+                _ => {}
+            }
+        }
+
+        if self.tab == Tab::Chat {
+            return self.key_chat(key);
+        }
+
         match self.screen {
             Screen::Platforms => self.key_platforms(key),
             Screen::Form => self.key_form(key),
             Screen::Dashboard => self.key_dashboard(key),
         }
+    }
+
+    /// Keys on the Chat tab. Vim-flavoured, following the conventions the two
+    /// reference chat TUIs establish: h/l (or arrows / tab) move between the
+    /// panes, [ and ] cycle the focused pane's account sub-tabs, < and >
+    /// resize the split toward/away from the focused pane, = resets it.
+    fn key_chat(&mut self, key: KeyEvent) -> Vec<Command> {
+        match key.code {
+            KeyCode::Char('h')
+            | KeyCode::Left
+            | KeyCode::Char('l')
+            | KeyCode::Right
+            | KeyCode::Tab => {
+                self.chat.focus_other();
+            }
+            KeyCode::Char(']') => self.chat.cycle_account(true),
+            KeyCode::Char('[') => self.chat.cycle_account(false),
+            KeyCode::Char('>') => self.chat.resize(true),
+            KeyCode::Char('<') => self.chat.resize(false),
+            KeyCode::Char('=') => self.chat.reset_split(),
+            KeyCode::Char('q') => self.should_quit = true,
+            _ => {}
+        }
+        vec![]
     }
 
     // -- Screen 1: choosing platforms ---------------------------------------

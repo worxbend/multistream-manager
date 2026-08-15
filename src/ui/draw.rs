@@ -35,21 +35,100 @@ fn platform_color(platform: Platform) -> Color {
 /// Draw the whole screen.
 pub fn draw(frame: &mut Frame, app: &App) {
     let areas = Layout::vertical([
+        Constraint::Length(1), // top-level tab bar
         Constraint::Length(3), // header
         Constraint::Min(0),    // body
         Constraint::Length(1), // footer / key hints
     ])
     .split(frame.area());
 
-    draw_header(frame, areas[0], app);
+    draw_tab_bar(frame, areas[0], app);
+    draw_header(frame, areas[1], app);
 
-    match app.screen {
-        Screen::Platforms => draw_platforms(frame, areas[1], app),
-        Screen::Form => draw_form(frame, areas[1], app),
-        Screen::Dashboard => draw_dashboard(frame, areas[1], app),
+    match app.tab {
+        super::app::Tab::Chat => {
+            super::chat_tab::draw(frame, areas[2], &app.chat, &app.config);
+        }
+        super::app::Tab::StreamInfo => match app.screen {
+            Screen::Platforms if stream_info_unconfigured(app) => {
+                draw_stream_info_empty(frame, areas[2], app)
+            }
+            Screen::Platforms => draw_platforms(frame, areas[2], app),
+            Screen::Form => draw_form(frame, areas[2], app),
+            Screen::Dashboard => draw_dashboard(frame, areas[2], app),
+        },
     }
 
-    draw_footer(frame, areas[2], app);
+    draw_footer(frame, areas[3], app);
+}
+
+/// The top-level tab strip: `1 Stream Info` and `2 Chat`.
+fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
+    let tab = |label: &str, active: bool| {
+        if active {
+            Span::styled(
+                format!(" {label} "),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(format!(" {label} "), Style::default().fg(Color::Gray))
+        }
+    };
+    let line = Line::from(vec![
+        tab("1 Stream Info", app.tab == super::app::Tab::StreamInfo),
+        Span::raw(" "),
+        tab("2 Chat", app.tab == super::app::Tab::Chat),
+        Span::styled(
+            "   alt+1/alt+2 to switch",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// True when nothing is set up at all: no API credentials for either
+/// platform. The platform picker would only offer choices that cannot work,
+/// so an explanation with the exact setup commands replaces it.
+fn stream_info_unconfigured(app: &App) -> bool {
+    Platform::ALL
+        .iter()
+        .all(|&platform| app.config.check_credentials(&[platform]).is_err())
+}
+
+/// The Stream Info empty state: what is missing and how to fix it, using the
+/// commands this program actually ships.
+fn draw_stream_info_empty(frame: &mut Frame, area: Rect, _app: &App) {
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "No streaming accounts are connected yet.",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("This tab configures your Twitch and YouTube broadcasts, but it"),
+        Line::from("needs API credentials and a login for each platform first:"),
+        Line::from(""),
+        Line::from("  1. Quit (q) and run `msm init` to write a starter config file."),
+        Line::from("  2. Fill in the [twitch] and [youtube] credential sections —"),
+        Line::from("     the file explains where each value comes from, and"),
+        Line::from("     `msm paths` prints where the file lives."),
+        Line::from("  3. Run `msm login twitch` and `msm login youtube` to authorise"),
+        Line::from("     your accounts in the browser."),
+        Line::from("  4. Start `msm` again — this tab then offers both platforms."),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Chat accounts are separate: add them with `msm login <platform> --add`",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "and they appear on the Chat tab (alt+2).",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -785,7 +864,14 @@ mod tests {
     }
 
     fn app() -> App {
-        App::new(Config::default())
+        // Credentials present, so the Stream Info tab shows its normal
+        // screens rather than the unconfigured empty state.
+        let mut config = Config::default();
+        config.twitch.client_id = "id".into();
+        config.twitch.client_secret = "secret".into();
+        config.youtube.client_id = "id".into();
+        config.youtube.client_secret = "secret".into();
+        App::new(config)
     }
 
     #[test]
@@ -794,6 +880,46 @@ mod tests {
         assert!(screen.contains("Twitch"));
         assert!(screen.contains("YouTube"));
         assert!(screen.contains("Where are you streaming?"));
+    }
+
+    /// With no credentials configured at all, the platform picker would only
+    /// offer choices that cannot work — the empty state with the real setup
+    /// commands replaces it.
+    #[test]
+    fn an_unconfigured_app_shows_the_setup_instructions_instead() {
+        let app = App::new(Config::default());
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains("No streaming accounts are connected yet"));
+        assert!(screen.contains("msm init"));
+        assert!(screen.contains("msm login twitch"));
+        assert!(screen.contains("msm login youtube"));
+        assert!(!screen.contains("Where are you streaming?"));
+    }
+
+    /// The Chat tab always shows both panes; without accounts each pane
+    /// carries its own actionable hint.
+    #[test]
+    fn the_chat_tab_shows_both_panes_with_empty_state_hints() {
+        // Point the token store at an empty scratch directory so the test
+        // cannot pick up real logins from the developer's machine.
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("draw-chat-empty");
+        let mut app = App::new(Config::default());
+        app.tab = super::super::app::Tab::Chat;
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("Twitch"));
+        assert!(screen.contains("YouTube"));
+        assert!(screen.contains("No Twitch chat accounts yet"));
+        assert!(screen.contains("No YouTube chat accounts yet"));
+        assert!(screen.contains("--add"));
+    }
+
+    /// The tab bar names both tabs and how to switch.
+    #[test]
+    fn the_tab_bar_is_always_visible() {
+        let screen = render(&app(), 100, 30);
+        assert!(screen.contains("1 Stream Info"));
+        assert!(screen.contains("2 Chat"));
+        assert!(screen.contains("alt+1/alt+2"));
     }
 
     #[test]
