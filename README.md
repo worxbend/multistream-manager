@@ -30,7 +30,7 @@
 │ Followers 12.4K                      ││ Viewers   38                               │
 │ Uptime    1h 23m                     ││ Likes     17                               │
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────╯
- r refresh   o open watch page   k show/hide key   e edit & resubmit   q quit
+ r refresh   o open watch page   y copy Twitch key   Y copy YouTube key   e edit   q quit
 ```
 
 ---
@@ -53,7 +53,7 @@ totals, likes and uptime side by side, so neither website needs to be open.
 | 🌍 Language | ✅ | ✅ |
 | 👁️ Visibility | ❌ | ✅ public / unlisted / private |
 | 📺 Creates the broadcast | ❌ not needed — the channel always exists | ✅ a new broadcast per session |
-| 🔑 Stream key shown | ✅ | ✅ reused, never regenerated |
+| 🔑 Stream key | 🔒 copy-only, never shown | 🔒 copy-only, reused and never regenerated |
 | 👥 Live viewer count | ✅ | ✅ |
 | ⭐ Followers / subscribers | ✅ | ✅ |
 | 👍 Likes | ❌ | ✅ |
@@ -73,9 +73,13 @@ written up in [docs/how-it-works.md](docs/how-it-works.md).
 
 ## 💬 Chat
 
-The window has two top-level tabs, switched with <kbd>Alt</kbd>+<kbd>1</kbd> /
-<kbd>Alt</kbd>+<kbd>2</kbd>: **Stream Info** (everything above) and **Chat** —
-Twitch chat on the left, YouTube live chat on the right, always side by side.
+The window has three top-level tabs, switched with <kbd>Alt</kbd>+<kbd>1</kbd> /
+<kbd>Alt</kbd>+<kbd>2</kbd> / <kbd>Alt</kbd>+<kbd>3</kbd>: **Stream Info**
+(everything above), **Chat** — Twitch chat on the left, YouTube live chat on the
+right, always side by side — and **Combined**, which puts a compact line of
+channel state (connected account, live or not, viewers, uptime) above those same
+two chat panes for a second monitor. On the combined tab <kbd>Alt</kbd>+<kbd>w</kbd>
+swaps which half the keyboard talks to, since both halves want the same letters.
 The divider is resizable. Chat behavior is ported from
 [twi](https://github.com/worxbend/twi) and [yc](https://github.com/worxbend/yc);
 `PLAN.md` tracks the feature-parity matrix.
@@ -90,8 +94,11 @@ $ msm login youtube --add    # same for another YouTube channel
 $ msm logout twitch:thatlogin  # forget one added account again
 ```
 
-Opening an account's sub-tab connects its **own** chat automatically (lazily —
-nothing connects until a sub-tab is actually shown). Press <kbd>space</kbd>
+Entering the Chat tab connects every logged-in account's **own** chat (lazily —
+nothing connects until you open the tab for the first time; accounts whose
+sub-tab is off screen still collect messages, so their unread counts are
+truthful). Each pane keeps its own message box, so a half-written Twitch
+message survives switching to the YouTube side and back. Press <kbd>space</kbd>
 then <kbd>c</kbd> to join any other chat through that account: a Twitch
 channel name, or for YouTube a video id, `@handle`, channel id or a plain
 youtube.com/youtu.be URL.
@@ -203,14 +210,28 @@ click-by-click walkthrough, including the Google settings that are easy to miss,
 is in **[docs/getting-started.md](docs/getting-started.md)**.
 
 ```bash
+msm               # open the interface — it walks you through the rest
+```
+
+On a fresh install the interface opens on a **Set up API access** form: paste
+the client id and client secret each developer console gave you (secrets are
+shown as dots while you type, because this window is often on screen while you
+stream) and press <kbd>Enter</kbd>. It saves them to `config.toml` for you.
+
+Next comes **Authorise your accounts** — tick Twitch, YouTube or both and press
+<kbd>Enter</kbd>. Your browser opens for each in turn; approve the access and
+come back. The main view then opens on its own, showing whether each channel is
+live, how many people are watching, and the stream info that would be applied.
+Press <kbd>e</kbd> to edit that info, <kbd>Ctrl</kbd>+<kbd>G</kbd> to apply it,
+then "Start Streaming" in OBS.
+
+The command line can still do all of it, if you prefer:
+
+```bash
 msm init          # write a commented config file, then paste your credentials in
 msm login all     # authorise Twitch and Google in your browser
 msm status        # confirm both are logged in
-msm               # open the interface
 ```
-
-In the interface: pick your platforms, fill the form, press
-<kbd>Ctrl</kbd>+<kbd>G</kbd>, then press "Start Streaming" in OBS.
 
 Prefer to stay on the command line? The `[preset]` section of the config file
 holds the same fields the form does, so you can skip the interface entirely:
@@ -238,7 +259,7 @@ msm --config ~/streams/gaming.toml go
 | `msm logout <twitch\|youtube\|all>` | Forget a saved login |
 | `msm status` | Show which platforms are logged in |
 | `msm go [--platforms <LIST>] [-y] [--json]` | Apply the preset without the interface |
-| `msm key <twitch\|youtube>` | Print one stream key — a separate command so a key is never printed by accident |
+| `msm key <twitch\|youtube>` | Print one stream key — a separate command so a key is never printed by accident (inside the interface, <kbd>y</kbd>/<kbd>Y</kbd> copy it to the clipboard instead) |
 | `msm categories <QUERY>` | Search Twitch's category list |
 | `msm streams [--show-keys]` | List the stream objects on your YouTube channel |
 | `msm cleanup [-y]` | List (and with `-y`, delete) broadcasts that never went live |
@@ -250,6 +271,19 @@ including the shape of the `--json` document, is in
 [docs/commands.md](docs/commands.md).
 
 </details>
+
+---
+
+### 🔒 Stream keys are copy-only
+
+The interface never draws a stream key, not even behind a "reveal" key. On the
+dashboard (and on the combined tab's stream-info half) <kbd>y</kbd> copies your
+Twitch key and <kbd>Y</kbd> your YouTube key straight to the system clipboard —
+the value goes from the API to the clipboard inside the background task, so
+nothing that could end up on screen, in a recording, or in `msm.log` ever holds
+it. Copying uses `wl-copy`/`xclip`/`xsel`/`pbcopy`/`clip` when one is installed
+and falls back to the OSC 52 terminal escape sequence, which is what makes it
+work over SSH.
 
 ---
 
