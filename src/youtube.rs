@@ -66,7 +66,13 @@ pub struct YouTubeBackend {
     /// hours, but every `channels.list` call spends daily API quota, so at a
     /// 15-second poll interval the uncached version was the single biggest
     /// quota consumer in the program.
-    subscriber_cache: Option<(Instant, String)>,
+    ///
+    /// The inner `Option` records "the channel was asked and had no visible
+    /// subscriber count" (subscriber totals can be hidden in channel
+    /// settings). Caching that absence matters: if only present counts were
+    /// cached, a hidden-count channel would re-fetch on every single poll —
+    /// exactly the quota burn the cache exists to remove.
+    subscriber_cache: Option<(Instant, Option<String>)>,
     /// YouTube's video category list, fetched once and then filtered locally.
     ///
     /// The list is fixed for a region and it powers a type-ahead field, so
@@ -536,14 +542,13 @@ impl Backend for YouTubeBackend {
             let channel = self.my_channel().await?;
             self.channel_id = Some(channel.id.clone());
             // Seed the subscriber cache from this fetch, so the first stats
-            // poll does not need its own channel request.
-            if let Some(subs) = channel
+            // poll does not need its own channel request. A missing count
+            // (hidden in channel settings) is cached too, as "asked, none".
+            let subs = channel
                 .statistics
                 .as_ref()
-                .and_then(|s| s.subscriber_count.clone())
-            {
-                self.subscriber_cache = Some((Instant::now(), subs));
-            }
+                .and_then(|s| s.subscriber_count.clone());
+            self.subscriber_cache = Some((Instant::now(), subs));
             Ok(channel.snippet.title)
         })
     }
@@ -722,10 +727,12 @@ impl Backend for YouTubeBackend {
                 .is_some_and(|(fetched_at, _)| now.duration_since(*fetched_at) < AUDIENCE_REFRESH);
             if !cache_is_fresh {
                 match self.my_channel().await {
+                    // Stamp the cache even when the count is absent (hidden
+                    // subscriber counts are a channel setting), otherwise a
+                    // hidden count would mean one channels.list call per poll.
                     Ok(channel) => {
-                        if let Some(subs) = channel.statistics.and_then(|s| s.subscriber_count) {
-                            self.subscriber_cache = Some((now, subs));
-                        }
+                        let subs = channel.statistics.and_then(|s| s.subscriber_count);
+                        self.subscriber_cache = Some((now, subs));
                     }
                     // Not worth failing the whole stats row over; the viewer
                     // count above is the number people actually watch. But do
@@ -738,7 +745,7 @@ impl Backend for YouTubeBackend {
                     }
                 }
             }
-            if let Some((_, subs)) = &self.subscriber_cache {
+            if let Some((_, Some(subs))) = &self.subscriber_cache {
                 stats.extra.push(Stat {
                     label: "Subscribers".into(),
                     value: subs.clone(),
