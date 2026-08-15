@@ -83,6 +83,10 @@ pub struct YouTubeBackend {
     /// Stops statistics polling from hammering the API after it has already
     /// said the daily quota is gone. See [`QuotaBackoff`].
     quota: QuotaBackoff,
+    /// Where the Data API lives. Always [`API`] in the running program; the
+    /// tests point it at a local server so real request behaviour — such as
+    /// whether page tokens are followed — can be observed.
+    base: String,
 }
 
 /// Backoff for statistics polling after the YouTube API reports its quota is
@@ -177,6 +181,7 @@ impl YouTubeBackend {
             subscriber_cache: None,
             category_cache: None,
             quota: QuotaBackoff::default(),
+            base: API.to_string(),
         }
     }
 
@@ -188,7 +193,8 @@ impl YouTubeBackend {
 
     /// Fetch the authenticated user's own channel.
     async fn my_channel(&self) -> Result<ChannelResource> {
-        let url = format!("{API}/channels?part=snippet,statistics&mine=true");
+        let base = &self.base;
+        let url = format!("{base}/channels?part=snippet,statistics&mine=true");
         let response = self
             .request(reqwest::Method::GET, &url)
             .send()
@@ -277,20 +283,50 @@ impl YouTubeBackend {
     /// `contentDetails` is deliberately absent from the requested parts: it is
     /// not a supported part value for this method, and including it makes the
     /// whole request invalid.
+    ///
+    /// This follows page tokens the same way `list_broadcasts` does. It used
+    /// to fetch a single page of 50, which was almost always enough — but a
+    /// channel that has accumulated more stream objects than that (easy to do
+    /// with tooling that creates one per session) would have a pinned
+    /// `stream_id` beyond the first page reported as "does not exist on your
+    /// channel", telling the user to delete a perfectly valid setting. The
+    /// page cap bounds quota spend and protects against a reply that keeps
+    /// handing back a token.
     async fn list_streams(&self) -> Result<Vec<LiveStreamResource>> {
-        let url = format!("{API}/liveStreams?part=id,snippet,cdn,status&mine=true&maxResults=50");
-        let response = self
-            .request(reqwest::Method::GET, &url)
-            .send()
-            .await
-            .context("listing your YouTube stream keys")?;
-        let response = check(response, "listing your YouTube stream keys").await?;
+        const MAX_PAGES: usize = 10;
 
-        let body: ListResponse<LiveStreamResource> = response
-            .json()
-            .await
-            .context("parsing your YouTube stream key list")?;
-        Ok(body.items)
+        let mut out = Vec::new();
+        let mut page_token: Option<String> = None;
+
+        for _ in 0..MAX_PAGES {
+            let base = &self.base;
+            let mut url =
+                format!("{base}/liveStreams?part=id,snippet,cdn,status&mine=true&maxResults=50");
+            if let Some(token) = &page_token {
+                url.push_str(&format!("&pageToken={}", urlencoding::encode(token)));
+            }
+
+            let response = self
+                .request(reqwest::Method::GET, &url)
+                .send()
+                .await
+                .context("listing your YouTube stream keys")?;
+            let response = check(response, "listing your YouTube stream keys").await?;
+
+            let body: ListResponse<LiveStreamResource> = response
+                .json()
+                .await
+                .context("parsing your YouTube stream key list")?;
+
+            out.extend(body.items);
+
+            match body.next_page_token {
+                Some(token) if !token.is_empty() => page_token = Some(token),
+                _ => break,
+            }
+        }
+
+        Ok(out)
     }
 
     /// Create a new reusable RTMP stream.
@@ -308,7 +344,8 @@ impl YouTubeBackend {
             "contentDetails": { "isReusable": true }
         });
 
-        let url = format!("{API}/liveStreams?part=id,snippet,cdn,contentDetails");
+        let base = &self.base;
+        let url = format!("{base}/liveStreams?part=id,snippet,cdn,contentDetails");
         let response = self
             .request(reqwest::Method::POST, &url)
             .json(&body)
@@ -357,7 +394,8 @@ impl YouTubeBackend {
             }
         });
 
-        let url = format!("{API}/liveBroadcasts?part=id,snippet,status,contentDetails");
+        let base = &self.base;
+        let url = format!("{base}/liveBroadcasts?part=id,snippet,status,contentDetails");
         let response = self
             .request(reqwest::Method::POST, &url)
             .json(&body)
@@ -374,8 +412,9 @@ impl YouTubeBackend {
 
     /// Join the broadcast to the stream, so the RTMP feed reaches the event.
     async fn bind(&self, broadcast_id: &str, stream_id: &str) -> Result<()> {
+        let base = &self.base;
         let url = format!(
-            "{API}/liveBroadcasts/bind?id={}&streamId={}&part=id,contentDetails",
+            "{base}/liveBroadcasts/bind?id={}&streamId={}&part=id,contentDetails",
             urlencoding::encode(broadcast_id),
             urlencoding::encode(stream_id)
         );
@@ -415,7 +454,8 @@ impl YouTubeBackend {
 
         let body = serde_json::json!({ "id": video_id, "snippet": snippet });
 
-        let url = format!("{API}/videos?part=snippet");
+        let base = &self.base;
+        let url = format!("{base}/videos?part=snippet");
         let response = self
             .request(reqwest::Method::PUT, &url)
             .json(&body)
@@ -447,8 +487,9 @@ impl YouTubeBackend {
         let mut page_token: Option<String> = None;
 
         for _ in 0..MAX_PAGES {
+            let base = &self.base;
             let mut url =
-                format!("{API}/liveBroadcasts?part=id,snippet,status&mine=true&maxResults=50");
+                format!("{base}/liveBroadcasts?part=id,snippet,status&mine=true&maxResults=50");
             if let Some(token) = &page_token {
                 url.push_str(&format!("&pageToken={}", urlencoding::encode(token)));
             }
@@ -478,7 +519,8 @@ impl YouTubeBackend {
 
     /// Delete one broadcast from the channel.
     async fn delete_broadcast_by_id(&self, id: &str) -> Result<()> {
-        let url = format!("{API}/liveBroadcasts?id={}", urlencoding::encode(id));
+        let base = &self.base;
+        let url = format!("{base}/liveBroadcasts?id={}", urlencoding::encode(id));
         let response = self
             .request(reqwest::Method::DELETE, &url)
             .send()
@@ -509,7 +551,8 @@ impl YouTubeBackend {
     /// Unlike Twitch there is no search endpoint — the list is short and fixed,
     /// so it is fetched whole and filtered locally.
     async fn video_categories(&self, region: &str) -> Result<Vec<Category>> {
-        let url = format!("{API}/videoCategories?part=snippet&regionCode={region}");
+        let base = &self.base;
+        let url = format!("{base}/videoCategories?part=snippet&regionCode={region}");
         let response = self
             .request(reqwest::Method::GET, &url)
             .send()
@@ -650,8 +693,9 @@ impl Backend for YouTubeBackend {
                 );
             }
 
+            let base = &self.base;
             let url = format!(
-                "{API}/videos?part=liveStreamingDetails,statistics,status&id={}",
+                "{base}/videos?part=liveStreamingDetails,statistics,status&id={}",
                 urlencoding::encode(&broadcast_id)
             );
             let response = self
@@ -1126,6 +1170,75 @@ pub fn category_name(id: &str) -> String {
 mod tests {
     use super::*;
     use crate::model::Privacy;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A local stand-in for the Data API that serves `liveStreams.list` in two
+    /// pages, so the real pagination behaviour can be observed.
+    ///
+    /// The first request (no `pageToken`) answers with one stream and a
+    /// `nextPageToken`; a request carrying that token answers with a second
+    /// stream and no token. Every request path+query is recorded.
+    async fn fake_data_api() -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let recorded = recorded.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 4096];
+                    let read = socket.read(&mut buffer).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                    let target = request.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    recorded.lock().unwrap().push(target.clone());
+
+                    let body = if target.contains("pageToken=PAGE2") {
+                        r#"{"items":[{"id":"beyond-the-first-page","snippet":{"title":"older"}}]}"#
+                    } else {
+                        r#"{"items":[{"id":"first","snippet":{"title":"newest"}}],"nextPageToken":"PAGE2"}"#
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+
+        (base, seen)
+    }
+
+    /// A pinned `stream_id` used to be findable only within the first 50
+    /// streams, because `list_streams` fetched a single page. A channel with
+    /// more stream objects than that had a perfectly valid pinned id reported
+    /// as "does not exist on your channel".
+    #[tokio::test]
+    async fn listing_streams_follows_page_tokens_to_the_end() {
+        let (base, seen) = fake_data_api().await;
+        let mut backend =
+            YouTubeBackend::new(reqwest::Client::new(), "token".into(), true, String::new());
+        backend.base = base;
+
+        let streams = backend.list_streams().await.expect("the fake API answers");
+
+        let ids: Vec<&str> = streams.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["first", "beyond-the-first-page"]);
+
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.len(), 2, "one request per page: {requests:?}");
+        assert!(
+            !requests[0].contains("pageToken") && requests[1].contains("pageToken=PAGE2"),
+            "the second request must carry the token the first one returned: {requests:?}"
+        );
+    }
 
     #[test]
     fn known_category_ids_get_a_readable_name() {
