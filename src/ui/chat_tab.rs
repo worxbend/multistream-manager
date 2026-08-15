@@ -236,12 +236,19 @@ impl ChatTabState {
         chats.get(*self.active_chat.get(&account.key).unwrap_or(&0))
     }
 
-    /// The tab became visible (or the selection changed): make sure both
-    /// panes' selected accounts have their own chat open, and update
-    /// viewed/hidden marks so unread counts stay truthful.
+    /// The tab became visible (or the selection changed): make sure every
+    /// logged-in account has its own chat open, and update viewed/hidden
+    /// marks so unread counts stay truthful.
+    ///
+    /// Every account, not only the two on screen: an account whose sub-tab is
+    /// not showing still collects messages into its ring buffer, so its unread
+    /// badge is meaningful and switching to it is instant. The connections are
+    /// still lazy in the sense that matters — nothing is opened until the Chat
+    /// tab is entered for the first time.
     pub fn activate(&mut self, config: &Config) {
         for platform in Platform::ALL {
-            if let Some(account) = self.selected_account(platform).cloned() {
+            let accounts = self.accounts.get(&platform).cloned().unwrap_or_default();
+            for account in accounts {
                 let has_chats = self
                     .chats
                     .get(&account.key)
@@ -1744,18 +1751,23 @@ mod tests {
     /// Activation lazily opens the selected accounts' own chats — and only
     /// those, not every account's.
     #[tokio::test]
-    async fn activation_opens_own_chats_for_the_selected_accounts_only() {
+    async fn activation_opens_the_own_chat_of_every_logged_in_account() {
         let config = Config::default();
         let mut state = tab_state(2, 1);
         assert!(state.open.is_empty(), "nothing connects at startup");
 
         state.activate(&config);
 
-        assert_eq!(state.open.len(), 2, "one chat per visible pane");
-        assert_eq!(state.active_key(Platform::Twitch).unwrap().target, "own0");
+        assert_eq!(state.open.len(), 3, "two Twitch accounts and one YouTube");
+        assert_eq!(
+            state.active_key(Platform::Twitch).unwrap().target,
+            "own0",
+            "the first account is the one on screen"
+        );
         assert!(
-            !state.open.keys().any(|key| key.account == "twitch:1"),
-            "the unselected account stays unconnected"
+            state.open.keys().any(|key| key.account == "twitch:1"),
+            "an off-screen account still collects its messages, so its unread \
+             count means something"
         );
     }
 
