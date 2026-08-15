@@ -553,8 +553,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
 
-        let mut config = Config::default();
-        config.source_path = Some(path.clone());
+        let config = Config {
+            source_path: Some(path.clone()),
+            ..Default::default()
+        };
         config.save().unwrap();
 
         let saved = std::fs::read_to_string(&path).unwrap();
