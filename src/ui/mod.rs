@@ -94,7 +94,18 @@ pub async fn run(config: Config) -> Result<()> {
 
         tokio::select! {
             // Keyboard input.
-            Some(event) = keys.next() => {
+            // `next()` yielding `None` means the terminal input stream has
+            // ended — the emulator closed, or the program was detached from its
+            // tty. Without handling it the `Some(...)` pattern simply stops
+            // matching, tokio::select! disables the arm, and the loop spins on
+            // its redraw tick forever with no way to type a quit key. Treating
+            // end-of-stream like an error and quitting is the only sane exit.
+            event = keys.next() => {
+                let Some(event) = event else {
+                    tracing::info!("terminal input ended; shutting down");
+                    app.should_quit = true;
+                    continue;
+                };
                 match event {
                     Ok(TermEvent::Key(key)) => {
                         // Windows reports both press and release; acting on both
