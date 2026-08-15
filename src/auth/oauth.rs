@@ -442,22 +442,33 @@ fn decode_form_component(raw: &str) -> String {
         .into_owned()
 }
 
+/// Escape the five characters that would otherwise be read as HTML markup.
+///
+/// The text shown on the callback page can come from the provider's redirect —
+/// `error` and `error_description` are simply query parameters, so their
+/// contents are whatever the browser was pointed at. Interpolating them raw
+/// would mean that a URL containing `<script>…</script>` executes that script in
+/// the `http://localhost:8017` origin, i.e. inside the loopback listener this
+/// program runs during a login. Escaping turns the markup into visible text.
+fn escape_html(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Write a small styled HTML page back to the browser so the user gets a clear
 /// visual confirmation rather than a blank page or a connection error.
 async fn respond(socket: &mut tokio::net::TcpStream, heading: &str, message: &str, success: bool) {
-    let accent = if success { "#3fb950" } else { "#f85149" };
-    let body = format!(
-        r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>{heading}</title></head>
-<body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#0d1117;color:#e6edf3;font:16px/1.6 system-ui,sans-serif">
-  <main style="max-width:32rem;padding:2rem;text-align:center">
-    <div style="width:3rem;height:3rem;margin:0 auto 1.5rem;border-radius:50%;background:{accent}"></div>
-    <h1 style="margin:0 0 .75rem;font-size:1.5rem">{heading}</h1>
-    <p style="margin:0;color:#8b949e">{message}</p>
-    <p style="margin-top:2rem;color:#484f58;font-size:.85rem">multistream-manager</p>
-  </main>
-</body></html>"#
-    );
+    let body = callback_page(heading, message, success);
 
     let status = if success { "200 OK" } else { "400 Bad Request" };
     let response = format!(
@@ -470,6 +481,26 @@ async fn respond(socket: &mut tokio::net::TcpStream, heading: &str, message: &st
 
     let _ = socket.write_all(response.as_bytes()).await;
     let _ = socket.flush().await;
+}
+
+/// Build the HTML of that page. Separate from sending it so the escaping can be
+/// tested without opening a socket.
+fn callback_page(heading: &str, message: &str, success: bool) -> String {
+    let accent = if success { "#3fb950" } else { "#f85149" };
+    let heading = escape_html(heading);
+    let message = escape_html(message);
+    format!(
+        r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>{heading}</title></head>
+<body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#0d1117;color:#e6edf3;font:16px/1.6 system-ui,sans-serif">
+  <main style="max-width:32rem;padding:2rem;text-align:center">
+    <div style="width:3rem;height:3rem;margin:0 auto 1.5rem;border-radius:50%;background:{accent}"></div>
+    <h1 style="margin:0 0 .75rem;font-size:1.5rem">{heading}</h1>
+    <p style="margin:0;color:#8b949e">{message}</p>
+    <p style="margin-top:2rem;color:#484f58;font-size:.85rem">multistream-manager</p>
+  </main>
+</body></html>"#
+    )
 }
 
 /// Trade the one-time authorisation code for real tokens.
@@ -711,5 +742,27 @@ mod tests {
     fn a_non_json_error_body_is_still_reported() {
         let summary = summarise_oauth_error("<html>502 Bad Gateway</html>");
         assert!(summary.contains("502"));
+    }
+
+    /// The provider's `error_description` is just a query parameter, so it is
+    /// attacker-controlled text. Before this was escaped, pointing the browser
+    /// at the callback with a `<script>` tag in that parameter ran the script in
+    /// the http://localhost:8017 origin — the listener used for logging in.
+    #[test]
+    fn provider_supplied_text_cannot_inject_markup_into_the_callback_page() {
+        let hostile = "<script>alert(document.domain)</script>";
+        let page = callback_page("Authorisation refused", &format!("access_denied: {hostile}"), false);
+
+        assert!(!page.contains("<script>"), "raw script tag in:\n{page}");
+        assert!(page.contains("&lt;script&gt;alert(document.domain)&lt;/script&gt;"));
+        // The wording around it is still readable.
+        assert!(page.contains("access_denied:"));
+    }
+
+    #[test]
+    fn ordinary_text_is_left_alone_apart_from_markup_characters() {
+        assert_eq!(escape_html("The user denied you access"), "The user denied you access");
+        assert_eq!(escape_html("a & b"), "a &amp; b");
+        assert_eq!(escape_html("\"quoted\""), "&quot;quoted&quot;");
     }
 }
