@@ -101,6 +101,20 @@ trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 
 # ---------------------------------------------------------------------------
+# Everything that *does* something lives inside main(), which is only called
+# on the very last line of the file. This matters because the documented way
+# to run this script is `curl ... | sh`: the shell executes whatever it has
+# received so far, so if the connection drops mid-transfer, a plain
+# top-to-bottom script would run an arbitrary prefix of itself — possibly
+# ending on a truncated command. With the main() wrapper, a partial download
+# only ever *defines* an incomplete function (a syntax error at worst) and the
+# final `main "$@"` line, the one that starts the work, is by definition the
+# last thing to arrive. Nothing above this point runs anything either: it only
+# sets variables, defines helpers and installs the cleanup trap.
+# ---------------------------------------------------------------------------
+main() {
+
+# ---------------------------------------------------------------------------
 # Arguments
 # ---------------------------------------------------------------------------
 
@@ -452,3 +466,8 @@ esac
 
 say ""
 say "Next: run '$BINARY login all' to authorise Twitch and YouTube, then '$BINARY' to open the interface."
+
+}
+
+# The only line in the file that starts any work — see the note above main().
+main "$@"
