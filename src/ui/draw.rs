@@ -49,6 +49,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         super::app::Tab::Chat => {
             super::chat_tab::draw(frame, areas[2], &app.chat, &app.config);
         }
+        super::app::Tab::Combined => draw_combined(frame, areas[2], app),
         super::app::Tab::StreamInfo => match app.screen {
             Screen::Setup => draw_setup(frame, areas[2], app),
             Screen::Login => draw_login(frame, areas[2], app),
@@ -80,8 +81,10 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
         tab("1 Stream Info", app.tab == super::app::Tab::StreamInfo),
         Span::raw(" "),
         tab("2 Chat", app.tab == super::app::Tab::Chat),
+        Span::raw(" "),
+        tab("3 Combined", app.tab == super::app::Tab::Combined),
         Span::styled(
-            "   alt+1/alt+2 to switch",
+            "   alt+1/2/3 to switch",
             Style::default().fg(Color::DarkGray),
         ),
     ]);
@@ -248,6 +251,131 @@ fn draw_login(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(List::new(items), areas[1]);
 }
 
+/// The combined tab: channel state on top, both chats underneath.
+///
+/// The strip on top is deliberately small — the point of this tab is to watch
+/// chat while keeping an eye on whether you are actually live and how many
+/// people are watching, not to duplicate the whole dashboard.
+fn draw_combined(frame: &mut Frame, area: Rect, app: &App) {
+    use super::app::CombinedFocus;
+
+    let areas = Layout::vertical([Constraint::Length(7), Constraint::Min(0)]).split(area);
+    let focused_border = |focused: bool| {
+        if focused {
+            Style::new().fg(theme::ACCENT)
+        } else {
+            Style::new().fg(theme::BORDER)
+        }
+    };
+
+    let stream_focused = app.combined_focus == CombinedFocus::StreamInfo;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(focused_border(stream_focused))
+        .title(" Stream info — alt+w swaps halves ")
+        .padding(ratatui::widgets::Padding::horizontal(1));
+    let inner = block.inner(areas[0]);
+    frame.render_widget(block, areas[0]);
+    frame.render_widget(
+        Paragraph::new(stream_summary_lines(app)).wrap(Wrap { trim: false }),
+        inner,
+    );
+
+    let chat_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(focused_border(!stream_focused))
+        .title(" Chat ");
+    let chat_inner = chat_block.inner(areas[1]);
+    frame.render_widget(chat_block, areas[1]);
+    super::chat_tab::draw(frame, chat_inner, &app.chat, &app.config);
+}
+
+/// A few lines describing where each platform stands right now: which account
+/// is connected, whether it is live, and what the stream is called.
+fn stream_summary_lines(app: &App) -> Vec<Line<'static>> {
+    let plan = app.plan();
+    let mut lines = vec![Line::from(vec![
+        Span::styled("Title  ", Style::new().fg(theme::DIM)),
+        Span::styled(
+            if plan.title.is_empty() {
+                "(not set — press alt+1 to edit)".to_string()
+            } else {
+                plan.title.clone()
+            },
+            Style::new().fg(theme::TEXT),
+        ),
+    ])];
+
+    for platform in Platform::ALL {
+        if !app.is_selected(platform) {
+            continue;
+        }
+        let mut spans = vec![Span::styled(
+            format!("{:<9}", platform.label()),
+            Style::new()
+                .fg(platform_color(platform))
+                .add_modifier(Modifier::BOLD),
+        )];
+
+        match app.accounts.get(&platform) {
+            Some(Ok(name)) => spans.push(Span::styled(
+                format!("{name}  "),
+                Style::new().fg(theme::TEXT),
+            )),
+            Some(Err(_)) => spans.push(Span::styled(
+                "not connected  ",
+                Style::new().fg(theme::ERROR),
+            )),
+            None => spans.push(Span::styled("connecting…  ", Style::new().fg(theme::DIM))),
+        }
+
+        match app.stats_for(platform) {
+            Some(stats) if stats.error.is_none() => {
+                spans.push(Span::styled(
+                    if stats.live {
+                        "● live  "
+                    } else {
+                        "○ offline  "
+                    },
+                    Style::new().fg(if stats.live { theme::OK } else { theme::DIM }),
+                ));
+                if let Some(viewers) = stats.viewers {
+                    spans.push(Span::styled(
+                        format!("{viewers} watching  "),
+                        Style::new().fg(theme::TEXT),
+                    ));
+                }
+                if let Some(started) = stats.started_at {
+                    spans.push(Span::styled(
+                        format!("up {}", uptime(started)),
+                        Style::new().fg(theme::DIM),
+                    ));
+                }
+            }
+            Some(_) => spans.push(Span::styled(
+                "statistics unavailable",
+                Style::new().fg(theme::WARN),
+            )),
+            None => spans.push(Span::styled(
+                "no statistics yet",
+                Style::new().fg(theme::DIM),
+            )),
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    if lines.len() == 1 {
+        lines.push(Line::from(Span::styled(
+            "No platform is connected — alt+1 opens the Stream Info tab.",
+            Style::new().fg(theme::DIM),
+        )));
+    }
+    lines
+}
+
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let selected: Vec<Span> = Platform::ALL
         .iter()
@@ -310,6 +438,19 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     // advertise whichever Stream Info screen happened to be underneath — so
     // the Chat tab told you to press Enter to connect, which does nothing
     // there, and never mentioned a single chat binding.
+    if app.tab == super::app::Tab::Combined {
+        let hints = if app.combined_focus == super::app::CombinedFocus::StreamInfo {
+            " alt+w chat   r refresh   y copy Twitch key   Y copy YouTube key   q quit"
+        } else {
+            " alt+w stream info   h/l pane   j/k scroll   i compose   / search   q quit"
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(hints, Style::new().fg(theme::DIM)))),
+            area,
+        );
+        return;
+    }
+
     if app.tab == super::app::Tab::Chat {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -1082,6 +1223,26 @@ mod tests {
         assert!(screen.contains("YouTube"));
     }
 
+    /// The combined tab really shows both halves at once.
+    #[test]
+    fn the_combined_tab_shows_stream_state_above_the_chats() {
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("draw-combined");
+        let mut app = app();
+        app.tab = super::super::app::Tab::Combined;
+        app.selected = vec![Platform::Twitch];
+        app.accounts
+            .insert(Platform::Twitch, Ok("examplestreamer".into()));
+
+        let screen = render(&app, 120, 40);
+
+        assert!(screen.contains("Stream info"));
+        assert!(screen.contains("examplestreamer"));
+        assert!(
+            screen.contains("No Twitch chat accounts yet"),
+            "the chat panes are drawn underneath:\n{screen}"
+        );
+    }
+
     /// The Chat tab always shows both panes; without accounts each pane
     /// carries its own actionable hint.
     #[test]
@@ -1105,7 +1266,8 @@ mod tests {
         let screen = render(&app(), 100, 30);
         assert!(screen.contains("1 Stream Info"));
         assert!(screen.contains("2 Chat"));
-        assert!(screen.contains("alt+1/alt+2"));
+        assert!(screen.contains("3 Combined"));
+        assert!(screen.contains("alt+1/2/3"));
     }
 
     #[test]

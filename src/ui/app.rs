@@ -147,6 +147,21 @@ impl Popup {
 pub enum Tab {
     StreamInfo,
     Chat,
+    /// Both at once: a compact strip of channel state above the two chat
+    /// panes, for a second monitor where nothing should need switching.
+    Combined,
+}
+
+/// Which half of the combined tab the keyboard is talking to.
+///
+/// The two halves want the same letters (`r` refreshes statistics on one side
+/// and starts a reply on the other), so one of them holds the keyboard at a
+/// time and `alt+w` swaps. Alt keeps the swap reachable even from inside the
+/// message composer, where every plain letter is text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CombinedFocus {
+    StreamInfo,
+    Chat,
 }
 
 /// The whole UI state.
@@ -158,6 +173,8 @@ pub struct App {
     pub tab: Tab,
     /// State for the Chat tab (pane focus, account sub-tabs, split width).
     pub chat: super::chat_tab::ChatTabState,
+    /// Which half of the combined tab has the keyboard.
+    pub combined_focus: CombinedFocus,
 
     /// The credential boxes on the setup screen, and which one has focus.
     pub setup_inputs: BTreeMap<SetupField, TextInput>,
@@ -274,6 +291,7 @@ impl App {
         Self {
             tab: Tab::StreamInfo,
             chat: super::chat_tab::ChatTabState::new(&config),
+            combined_focus: CombinedFocus::Chat,
             screen,
             config,
             setup_inputs,
@@ -609,8 +627,26 @@ impl App {
         // a text field, because the Alt modifier keeps it unambiguous.
         if key.modifiers.contains(KeyModifiers::ALT) {
             match key.code {
+                // Swap which half of the combined tab the keyboard talks to.
+                KeyCode::Char('w') if self.tab == Tab::Combined => {
+                    self.combined_focus = match self.combined_focus {
+                        CombinedFocus::Chat => CombinedFocus::StreamInfo,
+                        CombinedFocus::StreamInfo => CombinedFocus::Chat,
+                    };
+                    self.chat.pending_mod = None;
+                    self.chat.pending_space = false;
+                    return vec![];
+                }
+                KeyCode::Char('3') => {
+                    self.chat.pending_mod = None;
+                    self.chat.pending_space = false;
+                    self.tab = Tab::Combined;
+                    self.combined_focus = CombinedFocus::Chat;
+                    self.chat.activate(&self.config);
+                    return vec![];
+                }
                 KeyCode::Char('1') => {
-                    if self.tab == Tab::Chat {
+                    if self.chat_is_showing() {
                         self.chat.deactivate();
                     }
                     // Leaving the tab must not carry an armed destructive
@@ -633,7 +669,7 @@ impl App {
             }
         }
 
-        if self.tab == Tab::Chat {
+        if self.chat_has_the_keyboard() {
             return self.key_chat(key);
         }
 
@@ -643,6 +679,21 @@ impl App {
             Screen::Platforms => self.key_platforms(key),
             Screen::Form => self.key_form(key),
             Screen::Dashboard => self.key_dashboard(key),
+        }
+    }
+
+    /// Whether the chat panes are on screen at all.
+    pub fn chat_is_showing(&self) -> bool {
+        matches!(self.tab, Tab::Chat | Tab::Combined)
+    }
+
+    /// Whether key presses belong to the chat panes. On the Chat tab they
+    /// always do; on the combined tab only while that half has the focus.
+    fn chat_has_the_keyboard(&self) -> bool {
+        match self.tab {
+            Tab::Chat => true,
+            Tab::Combined => self.combined_focus == CombinedFocus::Chat,
+            Tab::StreamInfo => false,
         }
     }
 
@@ -2437,6 +2488,51 @@ mod tests {
             }
             other => panic!("the join prompt should still be open, got {other:?}"),
         }
+    }
+
+    /// The combined tab shows both halves, and `alt+w` decides which one the
+    /// keyboard is talking to — the two halves want the same letters.
+    #[test]
+    fn the_combined_tab_hands_the_keyboard_to_one_half_at_a_time() {
+        let mut app = app();
+        app.screen = Screen::Dashboard;
+        app.selected = vec![Platform::Twitch];
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::ALT));
+        assert_eq!(app.tab, Tab::Combined);
+        assert_eq!(app.combined_focus, CombinedFocus::Chat);
+
+        // With the chat half focused, dashboard keys do not fire: `y` is a
+        // chat key there, not "copy the stream key".
+        let split = app.chat.split_percent;
+        assert!(app.handle_key(key(KeyCode::Char('y'))).is_empty());
+        // …and a chat key does act: `<` narrows the focused pane.
+        app.handle_key(key(KeyCode::Char('<')));
+        assert_ne!(app.chat.split_percent, split);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT));
+        assert_eq!(app.combined_focus, CombinedFocus::StreamInfo);
+
+        // Now the same keys reach the dashboard: `y` copies the stream key.
+        let commands = app.handle_key(key(KeyCode::Char('y')));
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::CopyStreamKey(Platform::Twitch)]
+        ));
+    }
+
+    /// Leaving a tab that shows chat must mark the chats hidden, whichever of
+    /// the two chat-showing tabs it was.
+    #[test]
+    fn leaving_the_combined_tab_hides_the_chats() {
+        let mut app = app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::ALT));
+        assert!(app.chat_is_showing());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT));
+
+        assert_eq!(app.tab, Tab::StreamInfo);
+        assert!(!app.chat_is_showing());
     }
 
     /// A fresh install opens on the credential form rather than on a picker
