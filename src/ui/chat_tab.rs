@@ -717,13 +717,20 @@ impl ChatTabState {
             }
             return;
         }
-        let reply_to = chat.state.reply_to.take().map(|(id, _)| id);
+        let reply_to = chat.state.reply_to.as_ref().map(|(id, _)| id.clone());
         match chat
             .handle
             .commands
             .try_send(ChatCommand::Send { text, reply_to })
         {
-            Ok(()) => chat.state.draft.clear(),
+            Ok(()) => {
+                chat.state.draft.clear();
+                // The reply is only spent once the chat task has actually
+                // accepted the message; clearing it earlier meant a refused
+                // send silently dropped the threading, and the retry went out
+                // as an ordinary message with no indication anything changed.
+                chat.state.reply_to = None;
+            }
             Err(_) => {
                 chat.state.apply(ChatEvent::Message(Box::new(local_notice(
                     "the chat task is busy — the message was kept in the composer, try again",
@@ -868,11 +875,19 @@ impl ChatTabState {
             .unwrap_or_default();
         if let Some(chat) = self.active_chat_mut() {
             let len = chat.state.messages.len();
+            if len == 0 {
+                return;
+            }
             let filters = chat.state.filters;
-            let current = chat.state.cursor.unwrap_or(0);
-            let mut offset = current;
+            // With no selection the walk starts *at* the newest row rather
+            // than past it: after clearing the selection (esc, or any scroll),
+            // pressing n used to skip a match sitting on the newest message.
+            let mut offset = chat.state.cursor.unwrap_or(0);
+            let mut test_current = chat.state.cursor.is_none();
             loop {
-                if older {
+                if test_current {
+                    test_current = false;
+                } else if older {
                     offset += 1;
                     if offset >= len {
                         return; // no wrap
@@ -1455,8 +1470,18 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: 
         // Grouped layout: suppress the header when the previous (older)
         // message is from the same author — computed here because only the
         // draw pass knows the final visible order.
-        opts.continues_group = index
-            .checked_sub(1)
+        // "Previous" means the previous *visible* row, not simply the one
+        // before it in the ring: with a filter on, the header-carrying message
+        // can be hidden, and suppressing the header of the row that is still
+        // on screen left an authorless message with nothing above it.
+        opts.continues_group = (0..index)
+            .rev()
+            .find(|older| {
+                chat.state
+                    .messages
+                    .get(*older)
+                    .is_some_and(|m| filters.matches(m, &self_login) || Some(*older) == selected_index)
+            })
             .and_then(|prev| chat.state.messages.get(prev))
             .is_some_and(|prev| {
                 !prev.author.id.is_empty() && prev.author.id == msg.author.id && !prev.deleted
@@ -1980,6 +2005,69 @@ mod tests {
         assert_eq!(state.open[&key].state.cursor, Some(2));
         state.search_step(false); // N → newer again
         assert_eq!(state.open[&key].state.cursor, Some(0));
+    }
+
+    /// After clearing the selection, `n` must still consider the newest row:
+    /// the walk used to step past it before testing anything, so a match on
+    /// the very last message was unreachable.
+    #[tokio::test]
+    async fn search_step_tests_the_newest_row_when_nothing_is_selected() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+        for (i, text) in ["hello", "cake time"].iter().enumerate() {
+            let mut m = local_notice(text);
+            m.id = format!("m{i}");
+            state.handle_event(key.clone(), ChatEvent::Message(Box::new(m)));
+        }
+
+        state.commit_search("cake".into());
+        state.clear_selection();
+        state.search_step(true);
+
+        assert_eq!(
+            state.open[&key].state.cursor,
+            Some(0),
+            "the newest row holds the only match"
+        );
+    }
+
+    /// A send the chat task refuses keeps the draft; it must keep the reply
+    /// target too, or the retry silently goes out as an ordinary message.
+    #[tokio::test]
+    async fn a_refused_send_keeps_the_reply_target() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+
+        {
+            let chat = state.open.get_mut(&key).unwrap();
+            chat.state.reply_to = Some(("parent-id".into(), "someone".into()));
+            chat.state.draft = "sure thing".into();
+            // Fill the command queue so the next send cannot be accepted.
+            while chat
+                .handle
+                .commands
+                .try_send(ChatCommand::Send {
+                    text: "filler".into(),
+                    reply_to: None,
+                })
+                .is_ok()
+            {}
+        }
+
+        state.compose_send();
+
+        let chat = &state.open[&key];
+        assert_eq!(chat.state.draft, "sure thing", "the draft is kept");
+        assert!(
+            chat.state.reply_to.is_some(),
+            "the reply target must survive a refused send"
+        );
     }
 
     /// Filters are view predicates with union semantics; the mentions filter
