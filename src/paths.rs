@@ -50,34 +50,128 @@ pub fn log_file() -> Result<PathBuf> {
     Ok(config_dir()?.join("msm.log"))
 }
 
-/// Write a file that only the current user can read.
+/// Write a file that only the current user can read, atomically.
 ///
-/// On Unix this sets mode `0600` (read/write for the owner, nothing for anyone
-/// else) *before* the secret content is written, so there is no window during
-/// which the file exists with looser permissions. On other platforms it falls
-/// back to a plain write, since Windows ACL handling is a different problem.
+/// Two properties matter here and this function provides both:
+///
+/// 1. **Owner-only permissions from the first instant.** On Unix the file is
+///    created with mode `0600` (read/write for the owner, nothing for anyone
+///    else) *before* the secret content is written, so there is no window
+///    during which the content exists with looser permissions. On other
+///    platforms it falls back to default permissions, since Windows ACL
+///    handling is a different problem.
+///
+/// 2. **All-or-nothing replacement.** The content is written to a temporary
+///    file in the same directory and then renamed over the target. A rename
+///    within one filesystem is atomic, so a crash or power cut mid-write
+///    leaves either the complete old file or the complete new file — never a
+///    truncated half of one, which for `tokens.json` would mean being logged
+///    out of everything.
 pub fn write_secret_file(path: &std::path::Path, contents: &str) -> Result<()> {
+    use std::io::Write;
+
+    // The temporary file must live in the same directory as the target,
+    // because rename is only atomic within a single filesystem. The process id
+    // keeps two concurrent writers from scribbling on the same temp file.
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("{} has no file name to write to", path.display()))?;
+    let tmp_path = path.with_file_name(format!(".{file_name}.tmp-{}", std::process::id()));
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
-        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
 
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .with_context(|| format!("opening {} for writing", path.display()))?;
+    let result = (|| {
+        let mut file = options
+            .open(&tmp_path)
+            .with_context(|| format!("opening {} for writing", tmp_path.display()))?;
         file.write_all(contents.as_bytes())
-            .with_context(|| format!("writing {}", path.display()))?;
-        file.sync_all().ok();
+            .with_context(|| format!("writing {}", tmp_path.display()))?;
+        // Force the bytes to disk before the rename makes them the real file,
+        // otherwise the rename could survive a crash that the content did not.
+        file.sync_all()
+            .with_context(|| format!("flushing {} to disk", tmp_path.display()))?;
+        drop(file);
+        std::fs::rename(&tmp_path, path).with_context(|| {
+            format!(
+                "moving {} into place at {}",
+                tmp_path.display(),
+                path.display()
+            )
+        })
+    })();
+
+    if result.is_err() {
+        // Best-effort cleanup so a failed write does not leave a stray secret
+        // file behind; the temp file already has owner-only permissions.
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch directory that removes itself when the test ends.
+    struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        fn new(test_name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("msm-paths-test-{}-{test_name}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
     }
 
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))?;
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
-    Ok(())
+    #[test]
+    fn write_secret_file_writes_the_content_and_cleans_up_its_temp_file() {
+        let scratch = ScratchDir::new("content");
+        let target = scratch.0.join("tokens.json");
+
+        write_secret_file(&target, "first").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "first");
+
+        // Replacing an existing file must also work (the common case: every
+        // token refresh rewrites the store).
+        write_secret_file(&target, "second").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "second");
+
+        // The temporary file used for the atomic rename must not be left
+        // behind — the target should be the only file in the directory.
+        let entries: Vec<_> = std::fs::read_dir(&scratch.0).unwrap().collect();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_secret_file_is_owner_only_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = ScratchDir::new("mode");
+        let target = scratch.0.join("tokens.json");
+        write_secret_file(&target, "secret").unwrap();
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn write_secret_file_rejects_a_path_with_no_file_name() {
+        let err = write_secret_file(std::path::Path::new("/"), "x").unwrap_err();
+        assert!(err.to_string().contains("no file name"));
+    }
 }
