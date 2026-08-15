@@ -457,10 +457,16 @@ impl App {
                     if self.tab == Tab::Chat {
                         self.chat.deactivate();
                     }
+                    // Leaving the tab must not carry an armed destructive
+                    // confirmation (or a half-typed chord) back in later.
+                    self.chat.pending_mod = None;
+                    self.chat.pending_space = false;
                     self.tab = Tab::StreamInfo;
                     return vec![];
                 }
                 KeyCode::Char('2') => {
+                    self.chat.pending_mod = None;
+                    self.chat.pending_space = false;
                     self.tab = Tab::Chat;
                     // Lazy connection happens here: entering the tab opens
                     // the selected accounts' own chats if they are not open.

@@ -103,6 +103,10 @@ impl ChatState {
                 self.messages.clear();
                 self.scroll = 0;
                 self.unread = 0;
+                // A cleared chat has nothing selected; a stale cursor would
+                // re-attach to whatever arrives next — and moderation acts on
+                // the cursor.
+                self.cursor = None;
             }
             ChatEvent::Connection { status, detail } => {
                 self.connection = (status, detail);
@@ -142,6 +146,22 @@ impl ChatState {
             if evicted {
                 self.scroll = self.scroll.min(self.messages.len().saturating_sub(1));
             }
+        }
+
+        // The selection is an offset from the bottom too, so it must shift
+        // with every arrival for the same reason the scroll does — with the
+        // extra stake that moderation acts on the selected row: a selection
+        // that silently slid to a newer message could delete the wrong
+        // message or ban the wrong person.
+        if let Some(cursor) = self.cursor {
+            let shifted = cursor + 1;
+            self.cursor = if evicted && shifted >= self.messages.len() {
+                // The selected row itself was evicted; no selection is the
+                // only honest state.
+                None
+            } else {
+                Some(shifted.min(self.messages.len().saturating_sub(1)))
+            };
         }
 
         if is_news && !self.viewed {

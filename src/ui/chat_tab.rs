@@ -423,7 +423,14 @@ impl ChatTabState {
                 return;
             }
             let max = (len - 1) as i64;
-            let current = chat.state.cursor.map(|c| c as i64).unwrap_or(-1);
+            // Starting a selection picks the row at the current view's
+            // bottom edge — not the newest message, which would yank a
+            // scrolled-back reader to the tail.
+            let current = chat
+                .state
+                .cursor
+                .map(|c| c as i64)
+                .unwrap_or(chat.state.scroll as i64 - delta);
             let next = (current + delta).clamp(0, max) as usize;
             chat.state.cursor = Some(next);
             // The view follows the selection: anchoring the selected row at
@@ -433,11 +440,13 @@ impl ChatTabState {
         }
     }
 
-    /// Drop the selection (and any pending moderation confirmation).
+    /// Drop the selection, any pending moderation confirmation, and an armed
+    /// reply — esc means "stop what I was lining up", all of it.
     pub fn clear_selection(&mut self) {
         self.pending_mod = None;
         if let Some(chat) = self.active_chat_mut() {
             chat.state.cursor = None;
+            chat.state.reply_to = None;
         }
     }
 
@@ -1193,6 +1202,64 @@ mod tests {
             }
             other => panic!("expected a ban, got {other:?}"),
         }
+    }
+
+    /// The armed-moderation race: a message arriving between the arming and
+    /// the confirming press must not shift what the confirmation acts on.
+    #[tokio::test]
+    async fn a_message_arriving_mid_confirmation_cannot_change_the_target() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+        let (tx, mut rx) = mpsc::channel(8);
+        state.open.get_mut(&key).unwrap().handle.commands = tx;
+
+        let mut troll = local_notice("bad");
+        troll.id = "troll-msg".into();
+        troll.author.id = "UCtroll".into();
+        state.handle_event(key.clone(), ChatEvent::Message(Box::new(troll)));
+        state.select_move(1);
+        state.moderate(ModAction::Ban);
+        assert_eq!(state.pending_mod, Some(ModAction::Ban));
+
+        // An innocent viewer speaks between the two presses.
+        let mut innocent = local_notice("hi!");
+        innocent.id = "innocent-msg".into();
+        innocent.author.id = "UCinnocent".into();
+        state.handle_event(key.clone(), ChatEvent::Message(Box::new(innocent)));
+
+        state.moderate(ModAction::Ban);
+        match rx.try_recv().expect("the ban must be sent") {
+            ChatCommand::Ban { channel_id, .. } => {
+                assert_eq!(channel_id, "UCtroll", "the ban must hit the armed target");
+            }
+            other => panic!("expected a ban, got {other:?}"),
+        }
+    }
+
+    /// Starting a selection while scrolled back picks the row at the view's
+    /// edge instead of yanking the reader to the newest message.
+    #[tokio::test]
+    async fn starting_a_selection_respects_the_scroll_position() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+        for i in 0..10 {
+            let mut m = local_notice("x");
+            m.id = format!("m{i}");
+            state.handle_event(key.clone(), ChatEvent::Message(Box::new(m)));
+        }
+        state.scroll_by(5);
+        state.select_move(1);
+        assert_eq!(
+            state.open[&key].state.cursor,
+            Some(5),
+            "selection starts at the scrolled view's edge, not the newest row"
+        );
     }
 
     /// Scrolling clamps at both ends and g/G jump to them.
