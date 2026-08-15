@@ -74,17 +74,40 @@ const AUTH_NOTICE_TEXTS: [&str; 3] = [
 /// Spawn the chat task for one Twitch channel. `key.target` must already be
 /// the lowercase channel login; `account_login` is the authenticated user the
 /// connection speaks as (and the local-echo fallback display name).
-pub fn spawn(
-    key: ChatKey,
-    account_login: String,
-    tokens: TokenProvider,
-    events: EventSender,
-) -> ChatHandle {
+/// Everything one Twitch chat task needs beyond the channel itself: the
+/// Helix pieces exist only for `/clip`.
+pub struct TwitchParams {
+    pub key: ChatKey,
+    /// The authenticated account's login (local-echo fallback name).
+    pub account_login: String,
+    /// The authenticated account's user id — the broadcaster id `/clip`
+    /// clips. Empty disables clipping with an explanatory notice.
+    pub account_user_id: String,
+    /// The app's Twitch client id, required in every Helix request header.
+    pub client_id: String,
+    pub tokens: TokenProvider,
+    pub events: EventSender,
+    pub http: reqwest::Client,
+}
+
+pub fn spawn(params: TwitchParams) -> ChatHandle {
+    let TwitchParams {
+        key,
+        account_login,
+        account_user_id,
+        client_id,
+        tokens,
+        events,
+        http,
+    } = params;
     let (commands, command_rx) = mpsc::channel(COMMAND_QUEUE);
     let state = TaskState {
         channel: key.target.clone(),
         key: key.clone(),
         account_login,
+        account_user_id,
+        client_id,
+        http,
         tokens,
         events,
         window: SlidingWindow::twitch(),
@@ -106,6 +129,10 @@ struct TaskState {
     key: ChatKey,
     channel: String,
     account_login: String,
+    /// See [`TwitchParams::account_user_id`].
+    account_user_id: String,
+    client_id: String,
+    http: reqwest::Client,
     tokens: TokenProvider,
     events: EventSender,
     window: SlidingWindow,
@@ -128,6 +155,76 @@ impl TaskState {
             status,
             detail: detail.into(),
         });
+    }
+
+    /// `/clip` (twi: internal/app/clip.go): Helix Create Clip on the
+    /// authenticated user's *own* stream — the API clips a broadcaster, and
+    /// the token can only clip channels it may; twi clips self, so do we.
+    /// Needs the `clips:edit` scope; logins predating it get told to
+    /// re-login. A 404 means "you are not live", per twi.
+    async fn handle_clip(&self) {
+        if self.account_user_id.is_empty() {
+            self.emit_notice(
+                "clipping needs to know your user id; re-run `msm login twitch` \
+                 to refresh the saved account identity",
+            );
+            return;
+        }
+        let token = match (self.tokens)().await {
+            Ok(token) => token,
+            Err(err) => {
+                self.emit_notice(format!(
+                    "could not get a Twitch token for the clip: {err:#}"
+                ));
+                return;
+            }
+        };
+        let url = format!(
+            "https://api.twitch.tv/helix/clips?broadcaster_id={}",
+            urlencoding::encode(&self.account_user_id)
+        );
+        let sent = self
+            .http
+            .post(&url)
+            .header("Client-Id", &self.client_id)
+            .bearer_auth(&token)
+            .send()
+            .await;
+        let response = match sent {
+            Ok(response) => response,
+            Err(_) => {
+                self.emit_notice("could not reach Twitch to create the clip");
+                return;
+            }
+        };
+        match response.status().as_u16() {
+            200..=299 => {
+                #[derive(serde::Deserialize, Default)]
+                struct ClipData {
+                    #[serde(default)]
+                    data: Vec<ClipEntry>,
+                }
+                #[derive(serde::Deserialize, Default)]
+                struct ClipEntry {
+                    #[serde(default)]
+                    edit_url: String,
+                }
+                let body = response.json::<ClipData>().await.unwrap_or_default();
+                match body.data.first() {
+                    Some(entry) if !entry.edit_url.is_empty() => self.emit_notice(format!(
+                        "clip created — trim and publish it at {}",
+                        entry.edit_url
+                    )),
+                    _ => self.emit_notice("clip created"),
+                }
+            }
+            401 | 403 => self.emit_notice(
+                "your Twitch login is missing the clips:edit permission; \
+                 run `msm login twitch` again to grant it",
+            ),
+            404 => self.emit_notice("clips aren't available: you are not currently live"),
+            status => self.emit_notice(format!("clip failed (HTTP {status})")),
+        }
     }
 
     fn emit_notice(&self, text: impl Into<String>) {
@@ -159,6 +256,7 @@ async fn park(commands: &mut mpsc::Receiver<ChatCommand>, state: &TaskState) -> 
                      use the Twitch mod tools for this channel",
                 );
             }
+            Some(ChatCommand::Clip) => state.handle_clip().await,
             Some(ChatCommand::Send { .. }) => {
                 state.emit_notice("not connected to Twitch chat; press ctrl+r to reconnect");
             }
@@ -224,6 +322,7 @@ async fn run(mut state: TaskState, mut commands: mpsc::Receiver<ChatCommand>) {
                                  use the Twitch mod tools for this channel",
                             );
                         }
+                        Some(ChatCommand::Clip) => state.handle_clip().await,
                     }
                 }
             }
@@ -300,6 +399,7 @@ async fn run(mut state: TaskState, mut commands: mpsc::Receiver<ChatCommand>) {
                              use the Twitch mod tools for this channel",
                         );
                     }
+                    Some(ChatCommand::Clip) => state.handle_clip().await,
                 },
                 msg = incoming.recv() => match msg {
                     None => {

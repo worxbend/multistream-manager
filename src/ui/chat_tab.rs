@@ -38,6 +38,8 @@ pub struct AccountTab {
     pub key: String,
     pub label: String,
     pub own_target: Option<String>,
+    /// The account's platform user/channel id (for /clip on Twitch).
+    pub user_id: Option<String>,
 }
 
 /// A live chat: its running task and the state the UI folds events into.
@@ -260,12 +262,15 @@ impl ChatTabState {
 
         let tokens = source::token_provider(config, &account.key);
         let handle = match platform {
-            Platform::Twitch => crate::chat::twitch::spawn(
-                key.clone(),
-                account.own_target.clone().unwrap_or_default(),
+            Platform::Twitch => crate::chat::twitch::spawn(crate::chat::twitch::TwitchParams {
+                key: key.clone(),
+                account_login: account.own_target.clone().unwrap_or_default(),
+                account_user_id: account.user_id.clone().unwrap_or_default(),
+                client_id: config.twitch.client_id.clone(),
                 tokens,
-                self.events_tx.clone(),
-            ),
+                events: self.events_tx.clone(),
+                http: self.http.clone(),
+            }),
             Platform::YouTube => crate::chat::youtube::spawn(crate::chat::youtube::SpawnParams {
                 key: key.clone(),
                 poll_floor_ms: config.chat.poll_interval_floor_ms,
@@ -557,6 +562,14 @@ impl ChatTabState {
         // yc's /chats): bare opens the join prompt, with an argument joins
         // directly. Everything else — including other /commands — is sent
         // verbatim; /me is handled by the Twitch adapter.
+        if text == "/clip" {
+            chat.state.draft.clear();
+            self.mode = ChatFocus::Normal;
+            if let Some(chat) = self.active_chat_mut() {
+                let _ = chat.handle.commands.try_send(ChatCommand::Clip);
+            }
+            return;
+        }
         if let Some(rest) = text
             .strip_prefix("/chats")
             .or_else(|| text.strip_prefix("/channels"))
@@ -802,6 +815,7 @@ fn discover_accounts(store: &TokenStore) -> BTreeMap<Platform, Vec<AccountTab>> 
                         Platform::Twitch => identity.login.clone(),
                         Platform::YouTube => identity.id.clone(),
                     }),
+                    user_id: identity.map(|identity| identity.id.clone()),
                 }
             })
             .collect();
@@ -1181,6 +1195,7 @@ mod tests {
                             key: format!("{}:{i}", platform.slug()),
                             label: format!("acct{i}"),
                             own_target: Some(format!("own{i}")),
+                            user_id: Some(format!("id{i}")),
                         })
                         .collect(),
                 );

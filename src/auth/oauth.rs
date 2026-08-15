@@ -89,6 +89,8 @@ impl ProviderSpec {
                 // Reading and sending chat over IRC, for the Chat tab.
                 "chat:read",
                 "chat:edit",
+                // The Chat tab's /clip command (Helix Create Clip).
+                "clips:edit",
                 // Required to change title, category, language and tags.
                 "channel:manage:broadcast",
                 // Lets us show you the RTMP stream key in the dashboard.

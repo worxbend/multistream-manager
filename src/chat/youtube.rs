@@ -1740,6 +1740,9 @@ impl Poller {
                         channel_id,
                         timeout_secs,
                     }) => self.handle_ban(channel_id, timeout_secs).await,
+                    Some(ChatCommand::Clip) => {
+                        self.emit_local_notice("clips are a Twitch feature; YouTube has no clip API here")
+                    }
                 },
             }
         }
@@ -1759,6 +1762,8 @@ impl Poller {
                     channel_id,
                     timeout_secs,
                 }) => self.handle_ban(channel_id, timeout_secs).await,
+                Some(ChatCommand::Clip) => self
+                    .emit_local_notice("clips are a Twitch feature; YouTube has no clip API here"),
             }
         }
     }

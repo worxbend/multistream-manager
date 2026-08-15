@@ -46,6 +46,10 @@ pub enum ChatCommand {
         channel_id: String,
         timeout_secs: Option<u64>,
     },
+    /// Create a clip of the account's own live stream (Twitch Helix Create
+    /// Clip, twi's `/clip`). YouTube chats answer with a notice — clips are
+    /// a Twitch feature.
+    Clip,
 }
 
 /// One running chat: its identity, its command channel, and its task.
