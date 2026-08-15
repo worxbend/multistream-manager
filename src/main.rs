@@ -54,6 +54,15 @@ enum Commands {
     Login {
         /// `twitch`, `youtube`, or `all`.
         platform: String,
+
+        /// Store this login as an additional chat account instead of
+        /// replacing the primary one.
+        ///
+        /// The primary account (a plain `msm login twitch`) is the one
+        /// streaming uses. Extra accounts only appear as sub-tabs on the
+        /// Chat tab, so you can read and write chat as a second identity.
+        #[arg(long)]
+        add: bool,
     },
 
     /// Forget a platform's saved login.
@@ -162,7 +171,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         None | Some(Commands::Tui) => ui::run(config).await,
-        Some(Commands::Login { platform }) => cmd_login(&config, &platform).await,
+        Some(Commands::Login { platform, add }) => cmd_login(&config, &platform, add).await,
         Some(Commands::Status) => cmd_status(&config),
         Some(Commands::Go {
             platforms,
@@ -193,9 +202,12 @@ fn parse_platform_arg(value: &str) -> Result<Vec<Platform>> {
         .collect()
 }
 
-async fn cmd_login(config: &Config, platform_arg: &str) -> Result<()> {
+async fn cmd_login(config: &Config, platform_arg: &str, add: bool) -> Result<()> {
     for platform in parse_platform_arg(platform_arg)? {
-        auth::login(config, platform).await?;
+        let key = auth::login(config, platform, add).await?;
+        if add {
+            println!("Added chat account `{key}` for {}.", platform.label());
+        }
     }
     println!("\nDone. Run `msm` to open the interface.");
     Ok(())
@@ -206,6 +218,18 @@ fn cmd_logout(platform_arg: &str) -> Result<()> {
     // `msm` cannot save its stale snapshot over this logout.
     let _lock = auth::store::StoreLock::acquire()?;
     let mut store = auth::store::TokenStore::load()?;
+
+    // `msm logout twitch:somelogin` forgets one extra chat account. The bare
+    // platform names below keep their old meaning: the primary login.
+    if platform_arg.contains(':') {
+        if store.remove_keyed(platform_arg) {
+            println!("Forgot the saved chat account `{platform_arg}`.");
+        } else {
+            println!("There was no saved chat account `{platform_arg}`.");
+        }
+        return store.save();
+    }
+
     for platform in parse_platform_arg(platform_arg)? {
         if store.remove(platform) {
             println!("Forgot the saved {} login.", platform.label());
@@ -222,6 +246,28 @@ fn cmd_status(config: &Config) -> Result<()> {
     println!("Logins");
     for platform in Platform::ALL {
         println!("  {}", auth::describe(platform, store.get(platform)));
+        // Extra chat accounts (added with `msm login <platform> --add`) are
+        // indented under their platform's primary line.
+        for (key, tokens) in store.accounts(platform) {
+            if key == platform.slug() {
+                continue;
+            }
+            let name = tokens
+                .identity
+                .as_ref()
+                .map(|identity| {
+                    if identity.display_name.is_empty() {
+                        identity.login.clone()
+                    } else {
+                        identity.display_name.clone()
+                    }
+                })
+                .unwrap_or_else(|| key.to_string());
+            println!(
+                "           chat account {name} — token valid for {}",
+                tokens.expires_in_human()
+            );
+        }
     }
 
     println!("\nCredentials configured");

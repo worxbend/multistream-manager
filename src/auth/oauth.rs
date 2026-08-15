@@ -86,6 +86,9 @@ impl ProviderSpec {
             auth_url: "https://id.twitch.tv/oauth2/authorize",
             token_url: "https://id.twitch.tv/oauth2/token",
             scopes: vec![
+                // Reading and sending chat over IRC, for the Chat tab.
+                "chat:read",
+                "chat:edit",
                 // Required to change title, category, language and tags.
                 "channel:manage:broadcast",
                 // Lets us show you the RTMP stream key in the dashboard.

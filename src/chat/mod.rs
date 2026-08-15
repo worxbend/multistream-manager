@@ -229,9 +229,7 @@ pub enum ChatEvent {
         detail: String,
     },
     /// One message was removed (Twitch CLEARMSG, YouTube tombstone/deletion).
-    MessageDeleted {
-        message_id: String,
-    },
+    MessageDeleted { message_id: String },
     /// Every message from one author was removed (Twitch CLEARCHAT with a
     /// target). `timeout_secs` is `None` for a permanent ban.
     UserPurged {

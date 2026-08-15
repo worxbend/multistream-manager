@@ -26,6 +26,26 @@ pub struct TokenSet {
     /// can notice when a token predates a newly added feature's scope.
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Who this token belongs to, resolved once at login time. Cached so the
+    /// Chat tab can label account sub-tabs without spending an API call, and
+    /// so `msm login --add` can key extra accounts by identity. Absent on
+    /// tokens saved by older versions — `None` means unknown, and everything
+    /// keeps working without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<AccountIdentity>,
+}
+
+/// The account a token authenticates as.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccountIdentity {
+    /// Twitch user id / YouTube channel id.
+    pub id: String,
+    /// Twitch login. Empty for YouTube (channels have no login).
+    #[serde(default)]
+    pub login: String,
+    /// Human-facing name (Twitch display name / YouTube channel title).
+    #[serde(default)]
+    pub display_name: String,
 }
 
 impl TokenSet {
@@ -49,6 +69,7 @@ impl TokenSet {
             refresh_token,
             expires_at: expires_in_secs.and_then(expiry_from_now),
             scopes,
+            identity: None,
         }
     }
 
@@ -194,6 +215,42 @@ impl TokenStore {
         self.tokens.remove(platform.slug()).is_some()
     }
 
+    /// Store tokens under an explicit key (used for extra chat accounts,
+    /// which live under `twitch:<login>` / `youtube:<channel-id>` beside the
+    /// primary per-platform entries).
+    pub fn set_keyed(&mut self, key: String, tokens: TokenSet) {
+        self.tokens.insert(key, tokens);
+    }
+
+    // Consumed by the chat adapters (which authenticate per account key) in
+    // a following commit; the allow goes with the first caller.
+    #[allow(dead_code)]
+    pub fn get_keyed(&self, key: &str) -> Option<&TokenSet> {
+        self.tokens.get(key)
+    }
+
+    pub fn remove_keyed(&mut self, key: &str) -> bool {
+        self.tokens.remove(key).is_some()
+    }
+
+    /// Every account stored for one platform, primary first, then the extra
+    /// chat accounts in stable (alphabetical) order. Each entry is the token
+    /// store key and the tokens behind it.
+    pub fn accounts(&self, platform: Platform) -> Vec<(&str, &TokenSet)> {
+        let slug = platform.slug();
+        let prefix = format!("{slug}:");
+        let mut out = Vec::new();
+        if let Some(primary) = self.tokens.get(slug) {
+            out.push((slug, primary));
+        }
+        for (key, tokens) in &self.tokens {
+            if key.starts_with(&prefix) {
+                out.push((key.as_str(), tokens));
+            }
+        }
+        out
+    }
+
     /// Which platforms currently have any stored credentials.
     pub fn authorised_platforms(&self) -> Vec<Platform> {
         Platform::ALL
@@ -215,6 +272,7 @@ mod tests {
             // 30 seconds left is inside the 60 second margin.
             expires_at: Some(Utc::now() + Duration::seconds(30)),
             scopes: vec![],
+            identity: None,
         };
         assert!(soon.needs_refresh());
     }
@@ -232,6 +290,7 @@ mod tests {
             refresh_token: None,
             expires_at: None,
             scopes: vec![],
+            identity: None,
         };
         assert!(!unknown.needs_refresh());
     }
@@ -250,6 +309,7 @@ mod tests {
             refresh_token: None,
             expires_at: Some(Utc::now() - Duration::hours(1)),
             scopes: vec![],
+            identity: None,
         };
         assert_eq!(tokens.expires_in_human(), "expired");
     }
@@ -285,6 +345,75 @@ mod tests {
             assert!(!tokens.needs_refresh());
             assert_eq!(tokens.expires_in_human(), "unknown");
         }
+    }
+
+    /// tokens.json written by older versions has no `identity` field and no
+    /// prefixed account keys. It must load unchanged: identity reads as
+    /// unknown, and the platform entry is simply the only account.
+    #[test]
+    fn a_token_file_from_an_older_version_still_loads() {
+        let json = r#"{"twitch":{"access_token":"a","refresh_token":"r",
+            "expires_at":null,"scopes":["chat:read"]}}"#;
+        let store: TokenStore = serde_json::from_str(json).unwrap();
+        let tokens = store.get(Platform::Twitch).unwrap();
+        assert!(tokens.identity.is_none(), "absent identity means unknown");
+        let accounts = store.accounts(Platform::Twitch);
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].0, "twitch");
+    }
+
+    /// Extra chat accounts live under `twitch:<login>` beside the primary
+    /// `twitch` entry; accounts() lists the primary first, extras after, and
+    /// the other platform's entries never bleed in.
+    #[test]
+    fn extra_accounts_are_listed_after_the_primary() {
+        let mut store = TokenStore::default();
+        store.set(
+            Platform::Twitch,
+            TokenSet::new("main".into(), None, Some(3600), vec![]),
+        );
+        store.set_keyed(
+            "twitch:alt".into(),
+            TokenSet::new("alt".into(), None, Some(3600), vec![]),
+        );
+        store.set_keyed(
+            "youtube:UCx".into(),
+            TokenSet::new("yt".into(), None, Some(3600), vec![]),
+        );
+
+        let twitch: Vec<&str> = store
+            .accounts(Platform::Twitch)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(twitch, ["twitch", "twitch:alt"]);
+
+        assert!(store.get_keyed("twitch:alt").is_some());
+        assert!(store.remove_keyed("twitch:alt"));
+        assert!(store.get_keyed("twitch:alt").is_none());
+    }
+
+    /// An identity, once stored, round-trips through the JSON file.
+    #[test]
+    fn the_account_identity_round_trips() {
+        let mut tokens = TokenSet::new("a".into(), None, Some(3600), vec![]);
+        tokens.identity = Some(AccountIdentity {
+            id: "123".into(),
+            login: "someone".into(),
+            display_name: "Someone".into(),
+        });
+        let mut store = TokenStore::default();
+        store.set(Platform::Twitch, tokens);
+
+        let json = serde_json::to_string(&store).unwrap();
+        let back: TokenStore = serde_json::from_str(&json).unwrap();
+        let identity = back
+            .get(Platform::Twitch)
+            .unwrap()
+            .identity
+            .as_ref()
+            .unwrap();
+        assert_eq!(identity.login, "someone");
     }
 
     #[test]

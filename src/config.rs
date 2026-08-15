@@ -30,6 +30,8 @@ pub struct Config {
     pub twitch: TwitchConfig,
     pub youtube: YouTubeConfig,
     pub general: GeneralConfig,
+    /// Chat pane settings.
+    pub chat: ChatConfig,
     /// The saved stream settings the form starts from.
     pub preset: PresetConfig,
 }
@@ -70,6 +72,50 @@ pub struct YouTubeConfig {
     /// application pick the first reusable stream on your channel, which is what
     /// you want if you only have one.
     pub stream_id: String,
+}
+
+/// Settings for the Chat tab.
+///
+/// The defaults mirror the two reference implementations this feature was
+/// ported from (`twi` for Twitch, `yc` for YouTube), except `scrollback_limit`
+/// which defaults to 1000 messages per chat.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatConfig {
+    /// How many messages each chat keeps in memory. Older messages are
+    /// discarded; this is what keeps a chat open for hours from growing
+    /// memory without bound.
+    pub scrollback_limit: usize,
+
+    /// The fastest the YouTube chat poller may ever poll, in milliseconds.
+    /// YouTube's own `pollingIntervalMillis` still wins when it is higher —
+    /// the server's floor is absolute.
+    pub poll_interval_floor_ms: u64,
+
+    /// An optional ceiling on the YouTube poll interval, in milliseconds.
+    /// 0 means no ceiling. Raising the floor and ceiling stretches the daily
+    /// API quota over a longer session at the cost of chat latency.
+    pub poll_interval_ceiling_ms: u64,
+
+    /// Your project's daily YouTube API quota, in units. The default matches
+    /// Google's default allocation.
+    pub daily_quota_units: u64,
+
+    /// Stop polling when the estimated remaining quota falls below this
+    /// percentage, keeping a reserve so message *sending* still works.
+    pub quota_reserve_percent: u8,
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            scrollback_limit: 1000,
+            poll_interval_floor_ms: 1000,
+            poll_interval_ceiling_ms: 0,
+            daily_quota_units: 10_000,
+            quota_reserve_percent: 10,
+        }
+    }
 }
 
 /// Settings that are not specific to one platform.
@@ -567,5 +613,16 @@ mod tests {
         Config::load_from(&path).expect("what was written must parse back");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A config file from before the Chat tab existed has no [chat] table;
+    /// it must load with the documented defaults rather than failing.
+    #[test]
+    fn a_config_without_a_chat_table_gets_chat_defaults() {
+        let config: Config = toml::from_str("[twitch]\nclient_id = \"x\"\n").unwrap();
+        assert_eq!(config.chat.scrollback_limit, 1000);
+        assert_eq!(config.chat.poll_interval_floor_ms, 1000);
+        assert_eq!(config.chat.daily_quota_units, 10_000);
+        assert_eq!(config.chat.quota_reserve_percent, 10);
     }
 }

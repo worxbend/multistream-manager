@@ -33,12 +33,18 @@ fn credentials(config: &Config, platform: Platform) -> (String, String) {
 }
 
 /// Run the interactive browser login for one platform and save the result.
-pub async fn login(config: &Config, platform: Platform) -> Result<()> {
+///
+/// With `add = false` the tokens become the platform's primary account (the
+/// one streaming uses), exactly as before. With `add = true` — `msm login
+/// twitch --add` — the tokens are stored as an *additional* account under
+/// `twitch:<login>` / `youtube:<channel-id>`, for the Chat tab's multi-account
+/// support. Returns the token-store key the login landed under.
+pub async fn login(config: &Config, platform: Platform, add: bool) -> Result<String> {
     config.check_credentials(&[platform])?;
     let (client_id, client_secret) = credentials(config, platform);
     let spec = spec_for(platform);
 
-    let tokens = oauth::interactive_login(
+    let mut tokens = oauth::interactive_login(
         &spec,
         &client_id,
         &client_secret,
@@ -47,14 +53,143 @@ pub async fn login(config: &Config, platform: Platform) -> Result<()> {
     )
     .await?;
 
+    // Ask the platform who this token belongs to, so account sub-tabs can be
+    // labelled and extra accounts keyed by identity. Best-effort for a
+    // primary login (the app worked for years without it); required for
+    // --add, because without an identity there is nothing to key the extra
+    // account by.
+    let identity = resolve_identity(platform, &tokens.access_token).await;
+    let key = match (&identity, add) {
+        (Ok(identity), true) => {
+            let suffix = match platform {
+                Platform::Twitch => identity.login.clone(),
+                Platform::YouTube => identity.id.clone(),
+            };
+            format!("{}:{}", platform.slug(), suffix.to_lowercase())
+        }
+        (Err(err), true) => {
+            return Err(anyhow::anyhow!("{err:#}")).context(
+                "could not find out which account this login belongs to, and an \
+                 additional account cannot be stored without knowing that. The \
+                 login itself succeeded — try again.",
+            );
+        }
+        (_, false) => platform.slug().to_string(),
+    };
+    if let Ok(identity) = identity {
+        tokens.identity = Some(identity);
+    }
+
     // The lock covers the whole load-set-save cycle, so a token refresh
     // running in another msm process cannot save a stale snapshot over this
     // brand-new login (or vice versa).
     let _lock = lock_store().await?;
     let mut store = load_store().await?;
-    store.set(platform, tokens);
+
+    // Logging in with --add using the account that is already the primary
+    // would create a confusing duplicate; update the primary instead.
+    let final_key = match (add, store.get(platform).and_then(|t| t.identity.as_ref())) {
+        (true, Some(primary)) if tokens.identity.as_ref() == Some(primary) => {
+            platform.slug().to_string()
+        }
+        _ => key,
+    };
+    store.set_keyed(final_key.clone(), tokens);
     save_store(store).await?;
-    Ok(())
+    Ok(final_key)
+}
+
+/// Ask the platform which account an access token belongs to.
+///
+/// Twitch: `GET id.twitch.tv/oauth2/validate` (the same endpoint the token
+/// preflight uses; note its non-standard `OAuth` authorization scheme).
+/// YouTube: `GET youtube/v3/channels?mine=true` (1 quota unit, spent once per
+/// login).
+async fn resolve_identity(
+    platform: Platform,
+    access_token: &str,
+) -> Result<store::AccountIdentity> {
+    let http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("building the HTTP client for the identity lookup")?;
+
+    match platform {
+        Platform::Twitch => {
+            #[derive(serde::Deserialize)]
+            struct Validate {
+                #[serde(default)]
+                user_id: String,
+                #[serde(default)]
+                login: String,
+            }
+            let response = http
+                .get("https://id.twitch.tv/oauth2/validate")
+                .header("Authorization", format!("OAuth {access_token}"))
+                .send()
+                .await
+                .context("asking Twitch whose login this is")?;
+            if !response.status().is_success() {
+                bail!(
+                    "Twitch rejected the token validation (HTTP {})",
+                    response.status()
+                );
+            }
+            let v: Validate = response
+                .json()
+                .await
+                .context("parsing the Twitch validation response")?;
+            Ok(store::AccountIdentity {
+                id: v.user_id,
+                login: v.login.clone(),
+                display_name: v.login,
+            })
+        }
+        Platform::YouTube => {
+            #[derive(serde::Deserialize)]
+            struct List {
+                #[serde(default)]
+                items: Vec<Channel>,
+            }
+            #[derive(serde::Deserialize)]
+            struct Channel {
+                id: String,
+                snippet: Snippet,
+            }
+            #[derive(serde::Deserialize)]
+            struct Snippet {
+                #[serde(default)]
+                title: String,
+            }
+            let response = http
+                .get("https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true")
+                .bearer_auth(access_token)
+                .send()
+                .await
+                .context("asking YouTube which channel this login belongs to")?;
+            if !response.status().is_success() {
+                bail!(
+                    "YouTube rejected the channel lookup (HTTP {})",
+                    response.status()
+                );
+            }
+            let list: List = response
+                .json()
+                .await
+                .context("parsing the YouTube channel response")?;
+            let channel = list
+                .items
+                .into_iter()
+                .next()
+                .context("this Google account has no YouTube channel")?;
+            Ok(store::AccountIdentity {
+                id: channel.id,
+                login: String::new(),
+                display_name: channel.snippet.title,
+            })
+        }
+    }
 }
 
 /// Take the cross-process token-store lock without blocking the async runtime.
