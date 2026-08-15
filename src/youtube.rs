@@ -40,6 +40,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{Duration, Utc};
 use serde::Deserialize;
+use std::time::{Duration as StdDuration, Instant};
 
 use crate::backend::{Backend, BoxFuture};
 use crate::model::{
@@ -60,7 +61,95 @@ pub struct YouTubeBackend {
     broadcast_id: Option<String>,
     /// The channel id, resolved during `connect`.
     channel_id: Option<String>,
+    /// The subscriber count, cached so statistics polls do not re-fetch the
+    /// whole channel every few seconds. Subscriber totals change on a scale of
+    /// hours, but every `channels.list` call spends daily API quota, so at a
+    /// 15-second poll interval the uncached version was the single biggest
+    /// quota consumer in the program.
+    subscriber_cache: Option<(Instant, String)>,
+    /// Stops statistics polling from hammering the API after it has already
+    /// said the daily quota is gone. See [`QuotaBackoff`].
+    quota: QuotaBackoff,
 }
+
+/// How long a cached subscriber count is trusted before the channel is asked
+/// again.
+const SUBSCRIBER_REFRESH: StdDuration = StdDuration::from_secs(10 * 60);
+
+/// Backoff for statistics polling after the YouTube API reports its quota is
+/// exhausted.
+///
+/// The quota is a *daily* budget that resets at midnight Pacific time, so once
+/// it is gone, retrying every poll interval cannot succeed — it only burns
+/// network traffic and fills the log with the same error. Instead the first
+/// quota error pauses polling for five minutes, and each further quota error
+/// doubles the pause up to an hour. One successful poll resets the whole
+/// state, so recovery after the daily reset is automatic.
+struct QuotaBackoff {
+    /// While set and in the future, statistics polls return an explanatory
+    /// error without touching the network.
+    paused_until: Option<Instant>,
+    /// The pause the *next* quota error will apply.
+    next_pause: StdDuration,
+}
+
+const QUOTA_PAUSE_INITIAL: StdDuration = StdDuration::from_secs(5 * 60);
+const QUOTA_PAUSE_MAX: StdDuration = StdDuration::from_secs(60 * 60);
+
+impl Default for QuotaBackoff {
+    fn default() -> Self {
+        Self {
+            paused_until: None,
+            next_pause: QUOTA_PAUSE_INITIAL,
+        }
+    }
+}
+
+impl QuotaBackoff {
+    /// How much longer polling should stay paused, or `None` if it may run.
+    fn remaining(&self, now: Instant) -> Option<StdDuration> {
+        let until = self.paused_until?;
+        if now < until {
+            Some(until - now)
+        } else {
+            None
+        }
+    }
+
+    /// Record a quota error: pause polling and double the next pause.
+    /// Returns the pause that was just applied, for the error message.
+    fn on_quota_error(&mut self, now: Instant) -> StdDuration {
+        let pause = self.next_pause;
+        self.paused_until = Some(now + pause);
+        self.next_pause = (pause * 2).min(QUOTA_PAUSE_MAX);
+        pause
+    }
+
+    /// Record a successful call: the quota is evidently back, forget it all.
+    fn on_success(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// Rounds a duration up to whole minutes for a human-facing message.
+fn human_minutes(duration: StdDuration) -> String {
+    format!("{} min", duration.as_secs().div_ceil(60).max(1))
+}
+
+/// Marker attached to errors caused by an exhausted API quota, so callers can
+/// tell "out of quota" apart from every other failure without parsing message
+/// text. Retrieved with `error.downcast_ref::<QuotaExceeded>()`, which walks
+/// the whole anyhow context chain.
+#[derive(Debug)]
+struct QuotaExceeded;
+
+impl std::fmt::Display for QuotaExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the YouTube API quota is exhausted")
+    }
+}
+
+impl std::error::Error for QuotaExceeded {}
 
 impl YouTubeBackend {
     pub fn new(
@@ -76,6 +165,8 @@ impl YouTubeBackend {
             preferred_stream_id,
             broadcast_id: None,
             channel_id: None,
+            subscriber_cache: None,
+            quota: QuotaBackoff::default(),
         }
     }
 
@@ -424,6 +515,15 @@ impl Backend for YouTubeBackend {
         Box::pin(async move {
             let channel = self.my_channel().await?;
             self.channel_id = Some(channel.id.clone());
+            // Seed the subscriber cache from this fetch, so the first stats
+            // poll does not need its own channel request.
+            if let Some(subs) = channel
+                .statistics
+                .as_ref()
+                .and_then(|s| s.subscriber_count.clone())
+            {
+                self.subscriber_cache = Some((Instant::now(), subs));
+            }
             Ok(channel.snippet.title)
         })
     }
@@ -514,6 +614,17 @@ impl Backend for YouTubeBackend {
                 return Ok(PlatformStats::default());
             };
 
+            // If a recent poll already learned the daily quota is gone, do not
+            // spend network traffic confirming it again — it resets at
+            // midnight Pacific time, not in the next fifteen seconds.
+            if let Some(left) = self.quota.remaining(Instant::now()) {
+                bail!(
+                    "YouTube statistics are paused for another {} because the API said \
+                     its daily quota is exhausted. Polling resumes automatically.",
+                    human_minutes(left)
+                );
+            }
+
             let url = format!(
                 "{API}/videos?part=liveStreamingDetails,statistics,status&id={}",
                 urlencoding::encode(&broadcast_id)
@@ -523,7 +634,24 @@ impl Backend for YouTubeBackend {
                 .send()
                 .await
                 .context("reading your YouTube broadcast statistics")?;
-            let response = check(response, "reading your YouTube broadcast statistics").await?;
+            let response = match check(response, "reading your YouTube broadcast statistics").await
+            {
+                Ok(response) => {
+                    self.quota.on_success();
+                    response
+                }
+                Err(err) => {
+                    if err.downcast_ref::<QuotaExceeded>().is_some() {
+                        let pause = self.quota.on_quota_error(Instant::now());
+                        return Err(err.context(format!(
+                            "pausing statistics polls for {} — retrying sooner cannot \
+                             succeed, it only spends more of tomorrow's patience",
+                            human_minutes(pause)
+                        )));
+                    }
+                    return Err(err);
+                }
+            };
 
             let body: ListResponse<VideoResource> = response
                 .json()
@@ -563,14 +691,40 @@ impl Backend for YouTubeBackend {
                 }
             }
 
-            // Subscriber count comes from the channel, not the video.
-            if let Ok(channel) = self.my_channel().await {
-                if let Some(subs) = channel.statistics.and_then(|s| s.subscriber_count) {
-                    stats.extra.push(Stat {
-                        label: "Subscribers".into(),
-                        value: subs,
-                    });
+            // Subscriber count comes from the channel, not the video — and a
+            // `channels.list` call costs quota, so the cached value is used
+            // until it is SUBSCRIBER_REFRESH old. A stale-by-ten-minutes
+            // subscriber total is invisible; the quota it saves is not.
+            let now = Instant::now();
+            let cache_is_fresh = self
+                .subscriber_cache
+                .as_ref()
+                .is_some_and(|(fetched_at, _)| {
+                    now.duration_since(*fetched_at) < SUBSCRIBER_REFRESH
+                });
+            if !cache_is_fresh {
+                match self.my_channel().await {
+                    Ok(channel) => {
+                        if let Some(subs) = channel.statistics.and_then(|s| s.subscriber_count) {
+                            self.subscriber_cache = Some((now, subs));
+                        }
+                    }
+                    // Not worth failing the whole stats row over; the viewer
+                    // count above is the number people actually watch. But do
+                    // say why the subscriber figure stopped updating.
+                    Err(err) => {
+                        tracing::warn!("could not refresh the subscriber count: {err:#}");
+                        if err.downcast_ref::<QuotaExceeded>().is_some() {
+                            self.quota.on_quota_error(now);
+                        }
+                    }
                 }
+            }
+            if let Some((_, subs)) = &self.subscriber_cache {
+                stats.extra.push(Stat {
+                    label: "Subscribers".into(),
+                    value: subs.clone(),
+                });
             }
 
             Ok(stats)
@@ -733,7 +887,14 @@ async fn check(response: reqwest::Response, action: &str) -> Result<reqwest::Res
         },
     };
 
-    bail!("{action} failed (HTTP {status}): {message}{hint}")
+    let full_message = format!("{action} failed (HTTP {status}): {message}{hint}");
+
+    // Quota exhaustion gets a typed marker in the error chain so callers can
+    // recognise it (and back off) without matching on message text.
+    if matches!(reason.as_str(), "quotaExceeded" | "dailyLimitExceeded") {
+        return Err(anyhow::Error::new(QuotaExceeded).context(full_message));
+    }
+    bail!("{full_message}")
 }
 
 // ---------------------------------------------------------------------------
@@ -1240,5 +1401,63 @@ mod tests {
         assert_eq!(endpoint.id, "sid");
         assert_eq!(endpoint.title, "Default stream key");
         assert_eq!(endpoint.key.as_deref(), Some("abcd-efgh"));
+    }
+
+    #[test]
+    fn quota_backoff_starts_unpaused() {
+        let backoff = QuotaBackoff::default();
+        assert!(backoff.remaining(Instant::now()).is_none());
+    }
+
+    #[test]
+    fn quota_backoff_pauses_and_doubles() {
+        let mut backoff = QuotaBackoff::default();
+        let now = Instant::now();
+
+        let first = backoff.on_quota_error(now);
+        assert_eq!(first, QUOTA_PAUSE_INITIAL);
+        assert!(backoff.remaining(now).is_some());
+        // Just before the pause ends it is still paused; at the end it is not.
+        assert!(backoff
+            .remaining(now + first - StdDuration::from_secs(1))
+            .is_some());
+        assert!(backoff.remaining(now + first).is_none());
+
+        let second = backoff.on_quota_error(now + first);
+        assert_eq!(second, QUOTA_PAUSE_INITIAL * 2);
+    }
+
+    #[test]
+    fn quota_backoff_is_capped_and_reset_by_success() {
+        let mut backoff = QuotaBackoff::default();
+        let now = Instant::now();
+        for _ in 0..10 {
+            backoff.on_quota_error(now);
+        }
+        assert_eq!(backoff.on_quota_error(now), QUOTA_PAUSE_MAX);
+
+        backoff.on_success();
+        assert!(backoff.remaining(now).is_none());
+        assert_eq!(backoff.on_quota_error(now), QUOTA_PAUSE_INITIAL);
+    }
+
+    #[test]
+    fn quota_marker_survives_the_anyhow_context_chain() {
+        let err = anyhow::Error::new(QuotaExceeded)
+            .context("reading stats failed")
+            .context("outer");
+        assert!(err.downcast_ref::<QuotaExceeded>().is_some());
+
+        let plain = anyhow::anyhow!("some other failure").context("outer");
+        assert!(plain.downcast_ref::<QuotaExceeded>().is_none());
+    }
+
+    #[test]
+    fn human_minutes_rounds_up_and_never_says_zero() {
+        assert_eq!(human_minutes(StdDuration::from_secs(0)), "1 min");
+        assert_eq!(human_minutes(StdDuration::from_secs(59)), "1 min");
+        assert_eq!(human_minutes(StdDuration::from_secs(60)), "1 min");
+        assert_eq!(human_minutes(StdDuration::from_secs(61)), "2 min");
+        assert_eq!(human_minutes(StdDuration::from_secs(600)), "10 min");
     }
 }
