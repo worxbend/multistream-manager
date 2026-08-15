@@ -715,13 +715,16 @@ pub fn uptime(since: chrono::DateTime<chrono::Utc>) -> String {
 fn draw_log(frame: &mut Frame, area: Rect, app: &App) {
     let visible = area.height.saturating_sub(2) as usize;
 
-    // Show the newest lines, which is what matters while something is happening.
-    let start = app.log.len().saturating_sub(visible);
+    // Show the newest lines, which is what matters while something is happening,
+    // unless the user has scrolled back with Up to read something older.
+    let last = app.log.len().saturating_sub(app.log_scroll_back);
+    let start = last.saturating_sub(visible);
 
     let lines: Vec<Line> = app
         .log
         .iter()
         .skip(start)
+        .take(visible)
         .map(|entry| {
             let colour = match entry.level {
                 LogLevel::Info => theme::DIM,
@@ -1012,5 +1015,49 @@ mod tests {
             platform_color(Platform::Twitch),
             platform_color(Platform::YouTube)
         );
+    }
+
+    /// Up and Down used to move a `log_scroll` field that the drawing code never
+    /// read, so the activity log always showed the tail and an error that had
+    /// scrolled past was unreachable.
+    #[test]
+    fn scrolling_back_shows_older_log_lines() {
+        let mut app = app();
+        app.screen = Screen::Form;
+        app.selected = Platform::ALL.to_vec();
+        for i in 0..50 {
+            app.push_log(LogLevel::Info, format!("line {i}"));
+        }
+
+        let tail = render(&app, 120, 40);
+        assert!(tail.contains("line 49"), "the newest line should be visible");
+        assert!(!tail.contains("line 0"), "the oldest line should be off-screen");
+
+        // Scroll all the way back, as holding Up would.
+        app.log_scroll_back = 49;
+        let top = render(&app, 120, 40);
+        assert!(top.contains("line 0"), "scrolling back must reach the oldest line:\n{top}");
+        assert!(!top.contains("line 49"), "the newest line should now be off-screen");
+
+        // Coming back down returns to following the tail.
+        app.log_scroll_back = 0;
+        assert_eq!(render(&app, 120, 40), tail);
+    }
+
+    /// While scrolled back, new activity must not yank the view to the bottom.
+    #[test]
+    fn a_new_line_does_not_move_a_reader_who_scrolled_back() {
+        let mut app = app();
+        app.screen = Screen::Form;
+        app.selected = Platform::ALL.to_vec();
+        for i in 0..50 {
+            app.push_log(LogLevel::Info, format!("line {i}"));
+        }
+        app.log_scroll_back = 40;
+        let before = render(&app, 120, 40);
+
+        app.push_log(LogLevel::Info, "something new");
+        assert_eq!(app.log_scroll_back, 41, "the view should stay on the same lines");
+        assert_eq!(render(&app, 120, 40), before);
     }
 }

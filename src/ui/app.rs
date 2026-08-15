@@ -110,8 +110,14 @@ pub struct App {
     pub should_quit: bool,
     /// A transient one-line message shown at the bottom.
     pub toast: Option<String>,
-    /// Which log line is at the top of the visible area, for scrolling.
-    pub log_scroll: usize,
+    /// How many lines the activity log is scrolled back from its newest line.
+    ///
+    /// Zero means "show the tail", which is what a running session wants. Any
+    /// other value pins the view that many lines further back so an error that
+    /// has already scrolled past can be read. Counting back from the end rather
+    /// than storing an absolute index means this state does not have to know how
+    /// tall the panel is — only the drawing code does.
+    pub log_scroll_back: usize,
 }
 
 impl App {
@@ -163,7 +169,7 @@ impl App {
             busy: false,
             should_quit: false,
             toast: None,
-            log_scroll: 0,
+            log_scroll_back: 0,
         }
     }
 
@@ -288,11 +294,21 @@ impl App {
             message: message.into(),
             at: chrono::Local::now(),
         });
+        let mut dropped_from_front = false;
         while self.log.len() > 500 {
             self.log.pop_front();
+            dropped_from_front = true;
         }
-        // Follow the tail unless the user has deliberately scrolled up.
-        self.log_scroll = self.log.len().saturating_sub(1);
+        // Follow the tail unless the user has deliberately scrolled up. When
+        // they have, the view stays on the lines they are reading: a new line
+        // arriving at the end pushes their position one further back, and a line
+        // dropping off the front pulls it one forward.
+        if self.log_scroll_back > 0 {
+            if !dropped_from_front {
+                self.log_scroll_back += 1;
+            }
+            self.log_scroll_back = self.log_scroll_back.min(self.log.len().saturating_sub(1));
+        }
     }
 
     /// Fold a message from the worker into the state.
@@ -876,10 +892,13 @@ impl App {
                 self.ensure_field_visible();
                 self.reveal_key = false;
             }
-            KeyCode::Up => self.log_scroll = self.log_scroll.saturating_sub(1),
-            KeyCode::Down => {
-                self.log_scroll = (self.log_scroll + 1).min(self.log.len().saturating_sub(1));
+            // Up walks back into the history, Down returns towards the newest
+            // line; reaching zero resumes following the tail.
+            KeyCode::Up => {
+                self.log_scroll_back =
+                    (self.log_scroll_back + 1).min(self.log.len().saturating_sub(1));
             }
+            KeyCode::Down => self.log_scroll_back = self.log_scroll_back.saturating_sub(1),
             _ => {}
         }
         vec![]
