@@ -324,29 +324,64 @@ fn is_bare_handle(value: &str) -> bool {
 /// A local estimate of the daily unit spend. Every dispatched request is
 /// charged before its response is read, because Google charges failed
 /// requests too. A limit of zero disables the ledger entirely.
+///
+/// The allowance is a *daily* budget: Google refills it at midnight Pacific
+/// time. The ledger therefore remembers which Pacific day it is counting and
+/// starts over when that day ends — without this, a session that exhausted
+/// the estimate stayed parked forever, because the real quota came back at
+/// midnight but the local count never did. Like the yc reference's fallback
+/// path, "Pacific" is a fixed UTC−8 (no tz database dependency); being an
+/// hour early during daylight-saving time only makes the estimate more
+/// conservative, never less.
 #[derive(Debug, Clone, Copy)]
 struct QuotaLedger {
     limit: u64,
     used: u64,
+    /// The Pacific calendar day (days since the epoch, UTC−8) `used` counts.
+    day: i64,
+}
+
+/// The fixed offset standing in for America/Los_Angeles (yc's own fallback
+/// when the tz database is unavailable).
+const PACIFIC_FALLBACK_OFFSET_SECS: i64 = -8 * 3600;
+
+/// The Pacific calendar day for `now`, as days since the Unix epoch.
+fn pacific_day(now: chrono::DateTime<Utc>) -> i64 {
+    (now.timestamp() + PACIFIC_FALLBACK_OFFSET_SECS).div_euclid(86_400)
 }
 
 impl QuotaLedger {
     fn new(limit: u64) -> Self {
-        Self { limit, used: 0 }
+        Self {
+            limit,
+            used: 0,
+            day: pacific_day(Utc::now()),
+        }
+    }
+
+    /// Start a fresh count when the Pacific day has rolled over.
+    fn roll_over_if_due(&mut self) {
+        let today = pacific_day(Utc::now());
+        if today != self.day {
+            self.day = today;
+            self.used = 0;
+        }
     }
 
     fn charge(&mut self, units: u64) {
+        self.roll_over_if_due();
         self.used = self.used.saturating_add(units);
     }
 
-    fn remaining(&self) -> u64 {
+    fn remaining(&mut self) -> u64 {
+        self.roll_over_if_due();
         self.limit.saturating_sub(self.used)
     }
 
     /// Why polling must pause, if it must. The reserve exists so running out
     /// of read budget does not also take away the ability to send, which is
     /// the half of the client a stream owner cannot do without.
-    fn pause_reason(&self, reserve_percent: u8) -> Option<String> {
+    fn pause_reason(&mut self, reserve_percent: u8) -> Option<String> {
         if self.limit == 0 {
             return None;
         }
@@ -1354,7 +1389,14 @@ impl Poller {
                 (acc ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
             });
         Self {
-            floor: Duration::from_millis(params.poll_floor_ms.max(1)),
+            // A floor of 0 in the config means "default", not "as fast as
+            // possible": a 1 ms floor would let an error path retry-storm
+            // through the daily quota in minutes.
+            floor: Duration::from_millis(if params.poll_floor_ms == 0 {
+                1000
+            } else {
+                params.poll_floor_ms
+            }),
             ceiling: Duration::from_millis(params.poll_ceiling_ms),
             reserve_percent: params.quota_reserve_percent,
             ledger: QuotaLedger::new(params.daily_quota_units),
@@ -1671,7 +1713,7 @@ impl Poller {
 
     /// Why the local ledger says to pause, honoring a manual override of the
     /// reserve threshold (hard exhaustion still pauses).
-    fn reserve_pause_reason(&self) -> Option<String> {
+    fn reserve_pause_reason(&mut self) -> Option<String> {
         let reserve = if self.reserve_overridden {
             0
         } else {
@@ -2135,6 +2177,62 @@ fn cap_graphemes(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The daily budget refills at the Pacific midnight; the ledger must
+    /// start over then instead of parking the session forever.
+    #[test]
+    fn the_quota_ledger_rolls_over_at_the_pacific_day_boundary() {
+        let mut ledger = QuotaLedger::new(100);
+        ledger.charge(100);
+        assert_eq!(ledger.remaining(), 0);
+        assert!(ledger.pause_reason(0).is_some(), "exhausted pauses");
+
+        // Pretend the count belongs to yesterday: the next check refills.
+        ledger.day -= 1;
+        assert_eq!(ledger.remaining(), 100, "a new Pacific day starts fresh");
+        assert!(ledger.pause_reason(10).is_none());
+    }
+
+    /// The fixed UTC−8 day arithmetic: one second before and after the
+    /// boundary land on different days.
+    #[test]
+    fn pacific_day_changes_exactly_at_utc_minus_eight_midnight() {
+        use chrono::TimeZone as _;
+        // 08:00:00 UTC == 00:00:00 UTC−8.
+        let boundary = Utc.with_ymd_and_hms(2026, 8, 15, 8, 0, 0).unwrap();
+        assert_eq!(
+            pacific_day(boundary) - 1,
+            pacific_day(boundary - chrono::Duration::seconds(1))
+        );
+        assert_eq!(
+            pacific_day(boundary),
+            pacific_day(boundary + chrono::Duration::hours(23))
+        );
+    }
+
+    /// A zero poll floor in the config means the default second, never a
+    /// millisecond retry storm.
+    #[test]
+    fn a_zero_config_floor_falls_back_to_one_second() {
+        let params = SpawnParams {
+            key: ChatKey {
+                platform: crate::model::Platform::YouTube,
+                account: "youtube".into(),
+                target: "x".into(),
+            },
+            poll_floor_ms: 0,
+            poll_ceiling_ms: 0,
+            daily_quota_units: 0,
+            quota_reserve_percent: 0,
+            token: std::sync::Arc::new(|| Box::pin(async { Ok(String::new()) })),
+            events: tokio::sync::mpsc::unbounded_channel().0,
+            client: reqwest::Client::new(),
+            base: None,
+        };
+        let poller = Poller::new(params);
+        assert_eq!(poller.floor, Duration::from_millis(1000));
+    }
+
     use crate::model::Platform;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
