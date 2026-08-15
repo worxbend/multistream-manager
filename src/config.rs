@@ -247,20 +247,49 @@ impl Config {
         Ok(config)
     }
 
-    /// Write the config back out.
+    /// Write the config back out, keeping whatever comments are already there.
     ///
     /// Uses owner-only file permissions because the file contains client
-    /// secrets. The comment header is re-added on every save so a file written
-    /// by the application still explains itself to whoever opens it next.
+    /// secrets.
+    ///
+    /// The obvious implementation — serialise the struct to TOML and write that
+    /// — loses every comment in the file, because comments are not fields.
+    /// `msm init` writes about forty lines of them explaining where to get each
+    /// client id and secret, what `reuse_stream` does and what the YouTube
+    /// category numbers mean, and users add their own notes. Pressing Ctrl+S
+    /// once in the form used to delete all of it.
+    ///
+    /// So the existing file is parsed with `toml_edit`, which keeps comments and
+    /// layout, and only the values are updated in place. A file that does not
+    /// exist yet, or one too damaged to parse, falls back to a freshly generated
+    /// file with the standard header.
     pub fn save(&self) -> Result<()> {
         // Write back to wherever this config came from, not to the default path.
         let path = match &self.source_path {
             Some(path) => path.clone(),
             None => paths::config_file()?,
         };
-        let body = toml::to_string_pretty(self).context("serialising config to TOML")?;
-        let with_header = format!("{}\n{body}", CONFIG_HEADER);
-        paths::write_secret_file(&path, &with_header)?;
+
+        let generated: toml_edit::DocumentMut = toml::to_string_pretty(self)
+            .context("serialising config to TOML")?
+            .parse()
+            .context("re-reading the config this program just serialised")?;
+
+        let existing = std::fs::read_to_string(&path).ok();
+        let text = match existing
+            .as_deref()
+            .map(str::parse::<toml_edit::DocumentMut>)
+        {
+            Some(Ok(mut document)) => {
+                merge_values(&mut document, &generated);
+                document.to_string()
+            }
+            // No file yet, or a file we cannot parse. Either way the only thing
+            // to write is a complete new one; there are no comments to keep.
+            _ => format!("{}\n{generated}", CONFIG_HEADER),
+        };
+
+        paths::write_secret_file(&path, &text)?;
         Ok(())
     }
 
@@ -333,6 +362,33 @@ impl Config {
 }
 
 /// Explanatory comment block written at the top of every saved config file.
+/// Copy every value from `from` into `into`, leaving comments and layout alone.
+///
+/// Assigning into an existing key replaces the value only, so the comment
+/// written above that key — which `toml_edit` stores as part of the key, not the
+/// value — survives. Tables are walked recursively so `[preset]` is updated
+/// key by key rather than replaced wholesale.
+fn merge_values(into: &mut toml_edit::Table, from: &toml_edit::Table) {
+    for (key, incoming) in from.iter() {
+        match (into.get_mut(key), incoming.as_table()) {
+            // Both sides are tables: recurse, so untouched keys keep their place
+            // in the file and their comments.
+            (Some(existing), Some(incoming_table)) if existing.is_table() => {
+                if let Some(existing_table) = existing.as_table_mut() {
+                    merge_values(existing_table, incoming_table);
+                }
+            }
+            // The key is already there: overwrite just its value.
+            (Some(existing), _) => *existing = incoming.clone(),
+            // A key the file has never had — for example a setting added by a
+            // newer version of the program. Append it.
+            (None, _) => {
+                into.insert(key, incoming.clone());
+            }
+        }
+    }
+}
+
 const CONFIG_HEADER: &str = r#"# multistream-manager configuration
 #
 # This file has two halves:
@@ -441,5 +497,73 @@ mod tests {
         let mut config = Config::default();
         config.general.oauth_port = 9999;
         assert_eq!(config.redirect_uri(), "http://localhost:9999/callback");
+    }
+
+    /// Pressing Ctrl+S in the form used to replace the whole file with a
+    /// serialisation of the struct, deleting the setup guidance `msm init`
+    /// wrote and any notes the user had added.
+    #[test]
+    fn saving_keeps_the_comments_already_in_the_file() {
+        let dir = std::env::temp_dir().join(format!("msm-config-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        std::fs::write(
+            &path,
+            "# my own note about this file\n\
+             [twitch]\n\
+             # get this from https://dev.twitch.tv/console/apps\n\
+             client_id = \"abc\"\n\
+             client_secret = \"shh\"\n\
+             \n\
+             [preset]\n\
+             # what the stream is usually called\n\
+             title = \"old title\"\n",
+        )
+        .unwrap();
+
+        let mut config = Config::load_from(&path).unwrap();
+        config.preset.title = "new title".into();
+        config.save().unwrap();
+
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("# my own note about this file"), "{saved}");
+        assert!(
+            saved.contains("# get this from https://dev.twitch.tv/console/apps"),
+            "{saved}"
+        );
+        assert!(
+            saved.contains("# what the stream is usually called"),
+            "{saved}"
+        );
+
+        // The value really was updated, and the untouched ones are intact.
+        assert!(saved.contains("new title"), "{saved}");
+        assert!(!saved.contains("old title"), "{saved}");
+        assert_eq!(Config::load_from(&path).unwrap().twitch.client_id, "abc");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With no file to start from there are no comments to keep, so a complete
+    /// one is written — header included.
+    #[test]
+    fn saving_with_no_existing_file_writes_the_explanatory_header() {
+        let dir = std::env::temp_dir().join(format!("msm-config-new-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let mut config = Config::default();
+        config.source_path = Some(path.clone());
+        config.save().unwrap();
+
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            saved.starts_with("# multistream-manager configuration"),
+            "{saved}"
+        );
+        Config::load_from(&path).expect("what was written must parse back");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

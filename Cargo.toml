@@ -32,6 +32,11 @@ tokio-stream = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+# A comment-preserving TOML editor. Saving from the TUI has to write values back
+# into config.toml without throwing away the explanatory comments `msm init`
+# wrote, and a plain serialise-the-struct round trip cannot do that: comments are
+# not fields.
+toml_edit = "0.22"
 
 # Command line argument parsing.
 clap = { version = "4", features = ["derive"] }
