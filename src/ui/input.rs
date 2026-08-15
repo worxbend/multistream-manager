@@ -277,7 +277,10 @@ mod tests {
         // caret is past the end.
         let rendered = text.chars().count().max(caret + 1);
         assert_eq!(rendered, 5, "rendered {rendered} cells into a 5-wide field");
-        assert!(text.ends_with('e'), "the caret end of the value must be visible");
+        assert!(
+            text.ends_with('e'),
+            "the caret end of the value must be visible"
+        );
 
         // With the caret inside the value there is no extra cell to find, so the
         // whole value is shown.

@@ -138,7 +138,13 @@ impl QuotaBackoff {
         pause
     }
 
-    /// Record a successful call: the quota is evidently back, forget it all.
+    /// Record a poll that finished without any quota error: the quota is
+    /// evidently back, so forget it all.
+    ///
+    /// This must only be called once a whole poll has completed cleanly. Calling
+    /// it after the first successful request of a poll would wipe the escalation
+    /// that a *later* request in the same poll is about to add — see the comment
+    /// in `fetch_stats`.
     fn on_success(&mut self) {
         *self = Self::default();
     }
@@ -693,6 +699,16 @@ impl Backend for YouTubeBackend {
                 );
             }
 
+            // A statistics poll makes two calls — `videos.list` for the
+            // broadcast and `channels.list` for the subscriber count — drawing
+            // on the same daily quota but running out of it at different
+            // moments. The backoff is reset only once *both* have come back
+            // without a quota error. Resetting as soon as the first one
+            // succeeded pinned the pause at its five-minute starting value:
+            // every cycle reset the state and then hit the same quota error
+            // again, so the documented doubling never happened.
+            let mut hit_quota_error = false;
+
             let base = &self.base;
             let url = format!(
                 "{base}/videos?part=liveStreamingDetails,statistics,status&id={}",
@@ -705,10 +721,7 @@ impl Backend for YouTubeBackend {
                 .context("reading your YouTube broadcast statistics")?;
             let response = match check(response, "reading your YouTube broadcast statistics").await
             {
-                Ok(response) => {
-                    self.quota.on_success();
-                    response
-                }
+                Ok(response) => response,
                 Err(err) => {
                     if err.downcast_ref::<QuotaExceeded>().is_some() {
                         let pause = self.quota.on_quota_error(Instant::now());
@@ -785,6 +798,7 @@ impl Backend for YouTubeBackend {
                         tracing::warn!("could not refresh the subscriber count: {err:#}");
                         if err.downcast_ref::<QuotaExceeded>().is_some() {
                             self.quota.on_quota_error(now);
+                            hit_quota_error = true;
                         }
                     }
                 }
@@ -794,6 +808,10 @@ impl Backend for YouTubeBackend {
                     label: "Subscribers".into(),
                     value: subs.clone(),
                 });
+            }
+
+            if !hit_quota_error {
+                self.quota.on_success();
             }
 
             Ok(stats)
@@ -1643,5 +1661,81 @@ mod tests {
 
         // An empty query still offers the whole list.
         assert_eq!(backend.search_categories("").await.unwrap().len(), 2);
+    }
+
+    /// A Data API stand-in where `videos.list` still works but `channels.list`
+    /// is out of quota — the mixed case, which is what a real day looks like
+    /// once one endpoint's cost has eaten the budget before the other's.
+    async fn fake_api_with_exhausted_channel_quota() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 4096];
+                    let read = socket.read(&mut buffer).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                    let target = request.split_whitespace().nth(1).unwrap_or("/").to_string();
+
+                    let (status, body) = if target.contains("/channels") {
+                        (
+                            "403 Forbidden",
+                            r#"{"error":{"message":"quota","errors":[{"reason":"quotaExceeded"}]}}"#,
+                        )
+                    } else {
+                        (
+                            "200 OK",
+                            r#"{"items":[{"id":"abc","liveStreamingDetails":{"concurrentViewers":"3"}}]}"#,
+                        )
+                    };
+
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+
+        base
+    }
+
+    /// The backoff promises "the first quota error pauses polling for five
+    /// minutes, and each further quota error doubles the pause up to an hour".
+    /// Resetting the state as soon as `videos.list` succeeded threw away the
+    /// escalation the `channels.list` failure in the same poll was about to
+    /// add, so the pause sat at five minutes forever.
+    #[tokio::test]
+    async fn a_quota_error_still_escalates_when_another_call_in_the_same_poll_succeeded() {
+        let base = fake_api_with_exhausted_channel_quota().await;
+        let mut backend =
+            YouTubeBackend::new(reqwest::Client::new(), "token".into(), false, String::new());
+        backend.base = base;
+        backend.broadcast_id = Some("abc".into());
+
+        // First poll: the broadcast statistics come back, the subscriber count
+        // does not. The pause starts at its initial value.
+        backend
+            .fetch_stats()
+            .await
+            .expect("a failed subscriber count is not fatal");
+        assert_eq!(backend.quota.next_pause, QUOTA_PAUSE_INITIAL * 2);
+
+        // Pretend the pause elapsed, then poll again: the second quota error
+        // must double the pause rather than start over.
+        backend.quota.paused_until = None;
+        backend.subscriber_cache = None;
+        backend.fetch_stats().await.expect("still not fatal");
+        assert_eq!(
+            backend.quota.next_pause,
+            QUOTA_PAUSE_INITIAL * 4,
+            "the pause is not escalating, so polling would hammer the API forever"
+        );
     }
 }
