@@ -26,7 +26,9 @@ use crate::auth::store::TokenStore;
 use crate::chat::render::{render_message, RenderOpts};
 use crate::chat::source::{self, ChatCommand, ChatHandle};
 use crate::chat::state::ChatState;
-use crate::chat::{ChatAuthor, ChatEvent, ChatKey, ChatMessage, ConnectionStatus, MessageKind};
+use crate::chat::{
+    ChatAuthor, ChatEvent, ChatKey, ChatMessage, ConnectionStatus, MessageKind, PlatformMeta,
+};
 use crate::config::Config;
 use crate::model::Platform;
 
@@ -103,6 +105,9 @@ pub struct ChatTabState {
     /// The Twitch pane's share of the width, in percent. Resizable with
     /// `<`/`>` and reset with `=` — the same keys the reference TUIs use.
     pub split_percent: u16,
+    /// Panes currently showing the activity view (`space a`) instead of the
+    /// message list.
+    pub activity: BTreeMap<Platform, bool>,
 
     /// Every open chat, keyed by (platform, account, target).
     pub open: HashMap<ChatKey, OpenChat>,
@@ -154,6 +159,7 @@ impl ChatTabState {
             accounts,
             selected: BTreeMap::new(),
             split_percent: SPLIT_DEFAULT,
+            activity: BTreeMap::new(),
             open: HashMap::new(),
             chats: BTreeMap::new(),
             active_chat: BTreeMap::new(),
@@ -608,6 +614,12 @@ impl ChatTabState {
         }
     }
 
+    /// Toggle the focused pane between messages and the activity view.
+    pub fn toggle_activity(&mut self) {
+        let entry = self.activity.entry(self.focus).or_insert(false);
+        *entry = !*entry;
+    }
+
     /// Toggle one numbered filter (1–4) on the focused chat; 0 resets.
     pub fn toggle_filter(&mut self, digit: char) {
         if let Some(chat) = self.active_chat_mut() {
@@ -888,7 +900,11 @@ fn draw_pane(
 
     draw_account_strip(frame, rows[0], state, platform);
     draw_chat_strip(frame, rows[1], state, platform);
-    draw_messages(frame, rows[2], state, platform);
+    if state.activity.get(&platform).copied().unwrap_or(false) {
+        draw_activity(frame, rows[2], state, platform);
+    } else {
+        draw_messages(frame, rows[2], state, platform);
+    }
     draw_composer(frame, rows[3], state, platform, focused);
 }
 
@@ -980,6 +996,89 @@ fn draw_chat_strip(frame: &mut Frame, area: Rect, state: &ChatTabState, platform
         }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// One activity line for a message, if it is activity at all. A projection
+/// of history (yc activity.go): no second data store to drift or clear.
+fn activity_line(msg: &ChatMessage) -> Option<Line<'static>> {
+    let (glyph, color, text) = if msg.deleted {
+        (
+            "✖",
+            Color::Red,
+            format!("a message by {} was removed", msg.author.display_name),
+        )
+    } else {
+        match (&msg.kind, &msg.meta) {
+            (MessageKind::Paid, Some(PlatformMeta::YouTube(meta))) => {
+                let amount = meta
+                    .paid
+                    .as_ref()
+                    .map(|paid| paid.display.clone())
+                    .unwrap_or_default();
+                (
+                    "◈",
+                    Color::Yellow,
+                    format!("{} {amount}", msg.author.display_name),
+                )
+            }
+            (MessageKind::Membership, _) => (
+                "★",
+                Color::Cyan,
+                format!("{} — {}", msg.author.display_name, msg.text),
+            ),
+            (_, Some(PlatformMeta::Twitch(meta))) if meta.bits > 0 => (
+                "◈",
+                Color::Yellow,
+                format!("{} cheered {} bits", msg.author.display_name, meta.bits),
+            ),
+            (_, Some(PlatformMeta::Twitch(meta))) if !meta.system_event.is_empty() => {
+                ("★", Color::Cyan, msg.text.clone())
+            }
+            (MessageKind::Notice, _) => ("·", Color::Gray, msg.text.clone()),
+            _ => return None,
+        }
+    };
+    let timestamp = msg
+        .timestamp
+        .map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string())
+        .unwrap_or_else(|| "--:--".into());
+    Some(Line::from(vec![
+        Span::styled(timestamp, Style::default().fg(Color::DarkGray)),
+        Span::raw(" "),
+        Span::styled(glyph.to_string(), Style::default().fg(color)),
+        Span::raw(" "),
+        Span::raw(text),
+    ]))
+}
+
+/// The activity view: the last high-signal events of the active chat,
+/// newest at the bottom, scanning at most the newest 400 messages (yc's
+/// bound) and showing at most 200 rows.
+fn draw_activity(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: Platform) {
+    let Some(key) = state.active_key(platform) else {
+        return;
+    };
+    let Some(chat) = state.open.get(key) else {
+        return;
+    };
+    let len = chat.state.messages.len();
+    let mut lines: Vec<Line> = Vec::new();
+    for index in (len.saturating_sub(400)..len).rev() {
+        if lines.len() >= 200 || lines.len() >= area.height as usize {
+            break;
+        }
+        if let Some(line) = chat.state.messages.get(index).and_then(activity_line) {
+            lines.push(line);
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No activity yet — cheers, Super Chats, memberships and removals land here.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines.reverse();
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_messages(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: Platform) {
@@ -1178,6 +1277,7 @@ mod tests {
             accounts: BTreeMap::new(),
             selected: BTreeMap::new(),
             split_percent: SPLIT_DEFAULT,
+            activity: BTreeMap::new(),
             open: HashMap::new(),
             chats: BTreeMap::new(),
             active_chat: BTreeMap::new(),

@@ -596,6 +596,7 @@ impl App {
             match key.code {
                 KeyCode::Char('c') => self.chat.mode = ChatFocus::Join(String::new()),
                 KeyCode::Char('x') => self.chat.close_active_chat(),
+                KeyCode::Char('a') => self.chat.toggle_activity(),
                 _ => {}
             }
             return vec![];
