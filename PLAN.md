@@ -144,13 +144,26 @@ handle, and the youtube.com/youtu.be URL family. This answers the spec question
 
 ## 5. UI structure
 
-- New top level: `Tab::{StreamInfo, Chat}` in `ui/app.rs`; `alt+1`/`alt+2`
+- Top level: `Tab::{StreamInfo, Chat, Combined}` in `ui/app.rs`; `alt+1`/
+  `alt+2`/`alt+3`
   switch (both Go apps use alt+digit because terminals can't distinguish
   `ctrl+1` from `1`; matches ported muscle memory and avoids every existing
   binding). Tab bar rendered as the first line.
 - Stream Info tab = existing screens untouched, plus an empty state when no
   credentials/logins exist: names the exact commands (`msm init`, edit
   `config.toml` credentials, `msm login twitch`, `msm login youtube`).
+- Before the streaming flow, two host screens added after the port (not twi/yc
+  features): `Screen::Setup` (API credentials typed in-app, secrets masked,
+  saved through the comment-preserving `Config::save`) and `Screen::Login`
+  (browser OAuth run by the worker, progress routed to the activity log via
+  `auth::login_with`, never printed). `App::new` picks the opening screen from
+  what is configured and which logins exist. A finished login connects and
+  opens the dashboard, which shows current channel state before any go-live.
+  Stream keys are copy-only (`y`/`Y` → `clipboard::copy`, helper program or
+  OSC 52); the former reveal toggle is gone.
+- Combined tab: `draw_combined` puts a seven-line channel-state strip above
+  the same chat split; `alt+w` moves the keyboard between the halves because
+  both want the same letters (`r`, `y`, `i`).
 - Chat tab: left pane Twitch, right pane YouTube (both always present; per-pane
   empty state mirrors the hints + `msm login <platform> --add` for more
   accounts). Per-pane sub-tab row: one per account of that platform. Activating
@@ -282,6 +295,10 @@ src/ui/chat_tab.rs     split view, account sub-tabs, composer, join prompt
 - (2026-08-15, adapters) YouTube local echo shows author "you" until the
   poller's authoritative copy replaces it — resolving own authorDetails would
   cost an extra API unit per send.
+- (2026-08-16, UI) Entering the Chat tab now opens the own chat of *every*
+  logged-in account, not only the two whose sub-tabs are on screen: an unread
+  count for an account that was never connected is meaningless. Lazy connection
+  is preserved at the tab boundary (nothing opens until the tab is entered).
 - (2026-08-15, UI) Timeout duration is a fixed 10 minutes behind a
   double-press confirm; yc prompts for a duration. A duration prompt is
   backlog alongside the other overlay work.
