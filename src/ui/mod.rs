@@ -174,9 +174,16 @@ pub async fn run(config: Config) -> Result<()> {
                 }
             }
 
-            // Periodic statistics refresh, only once there is something to poll.
+            // Periodic statistics refresh, wherever the numbers are on screen.
+            //
+            // This used to require a completed go-live. The dashboard now
+            // opens as soon as a platform connects — showing whether the
+            // channel is already live and who is watching — and the combined
+            // tab shows the same numbers beside chat, so both need polling.
             _ = ticker.tick() => {
-                if app.screen == Screen::Dashboard && !app.results.is_empty() {
+                let showing_stats = app.screen == Screen::Dashboard
+                    || app.tab == app::Tab::Combined;
+                if showing_stats && !app.accounts.is_empty() {
                     // Dropping a poll is harmless — the next tick simply asks
                     // again — but leave a trace so a stretch of missing stats
                     // can be explained from the log.
