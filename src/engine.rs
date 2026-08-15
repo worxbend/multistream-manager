@@ -409,8 +409,8 @@ pub fn render_results_json(results: &[PlatformResult]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::GoLiveOutcome;
     use crate::backend::BoxFuture;
+    use crate::model::GoLiveOutcome;
 
     fn ok_result(platform: Platform) -> PlatformResult {
         PlatformResult {
@@ -560,7 +560,10 @@ mod tests {
             Box::pin(async { Ok("fake".to_string()) })
         }
 
-        fn go_live<'a>(&'a mut self, _plan: &'a StreamPlan) -> BoxFuture<'a, Result<GoLiveOutcome>> {
+        fn go_live<'a>(
+            &'a mut self,
+            _plan: &'a StreamPlan,
+        ) -> BoxFuture<'a, Result<GoLiveOutcome>> {
             let panics = self.panics;
             Box::pin(async move {
                 assert!(!panics, "deliberate test panic");
@@ -599,10 +602,7 @@ mod tests {
     /// all — the dashboard blamed a healthy platform and `msm go` exited 0.
     #[tokio::test]
     async fn a_panicking_backend_is_reported_against_its_own_platform() {
-        let mut engine = engine_with(vec![
-            (Platform::Twitch, false),
-            (Platform::YouTube, true),
-        ]);
+        let mut engine = engine_with(vec![(Platform::Twitch, false), (Platform::YouTube, true)]);
 
         let results = engine.go_live(&StreamPlan::default()).await;
 

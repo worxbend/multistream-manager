@@ -89,7 +89,11 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         super::open_log_file(&path).unwrap();
-        assert_eq!(mode_of(&path), 0o600, "a newly created log must be owner-only");
+        assert_eq!(
+            mode_of(&path),
+            0o600,
+            "a newly created log must be owner-only"
+        );
 
         // A log written by an older version is world-readable; reopening must
         // tighten it rather than leaving the old permissions in place.

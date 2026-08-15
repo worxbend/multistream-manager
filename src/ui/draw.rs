@@ -1030,14 +1030,26 @@ mod tests {
         }
 
         let tail = render(&app, 120, 40);
-        assert!(tail.contains("line 49"), "the newest line should be visible");
-        assert!(!tail.contains("line 0"), "the oldest line should be off-screen");
+        assert!(
+            tail.contains("line 49"),
+            "the newest line should be visible"
+        );
+        assert!(
+            !tail.contains("line 0"),
+            "the oldest line should be off-screen"
+        );
 
         // Scroll all the way back, as holding Up would.
         app.log_scroll_back = 49;
         let top = render(&app, 120, 40);
-        assert!(top.contains("line 0"), "scrolling back must reach the oldest line:\n{top}");
-        assert!(!top.contains("line 49"), "the newest line should now be off-screen");
+        assert!(
+            top.contains("line 0"),
+            "scrolling back must reach the oldest line:\n{top}"
+        );
+        assert!(
+            !top.contains("line 49"),
+            "the newest line should now be off-screen"
+        );
 
         // Coming back down returns to following the tail.
         app.log_scroll_back = 0;
@@ -1057,7 +1069,10 @@ mod tests {
         let before = render(&app, 120, 40);
 
         app.push_log(LogLevel::Info, "something new");
-        assert_eq!(app.log_scroll_back, 41, "the view should stay on the same lines");
+        assert_eq!(
+            app.log_scroll_back, 41,
+            "the view should stay on the same lines"
+        );
         assert_eq!(render(&app, 120, 40), before);
     }
 }

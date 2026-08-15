@@ -802,7 +802,11 @@ mod tests {
     #[test]
     fn provider_supplied_text_cannot_inject_markup_into_the_callback_page() {
         let hostile = "<script>alert(document.domain)</script>";
-        let page = callback_page("Authorisation refused", &format!("access_denied: {hostile}"), false);
+        let page = callback_page(
+            "Authorisation refused",
+            &format!("access_denied: {hostile}"),
+            false,
+        );
 
         assert!(!page.contains("<script>"), "raw script tag in:\n{page}");
         assert!(page.contains("&lt;script&gt;alert(document.domain)&lt;/script&gt;"));
@@ -812,7 +816,10 @@ mod tests {
 
     #[test]
     fn ordinary_text_is_left_alone_apart_from_markup_characters() {
-        assert_eq!(escape_html("The user denied you access"), "The user denied you access");
+        assert_eq!(
+            escape_html("The user denied you access"),
+            "The user denied you access"
+        );
         assert_eq!(escape_html("a & b"), "a &amp; b");
         assert_eq!(escape_html("\"quoted\""), "&quot;quoted&quot;");
     }
@@ -836,7 +843,10 @@ mod tests {
         let line = reader.await.unwrap().expect("the line should be read");
         assert_eq!(line, "GET /callback?code=THECODE&state=st HTTP/1.1");
         let path = line.split_whitespace().nth(1).unwrap();
-        assert_eq!(parse_query(path).get("code").map(String::as_str), Some("THECODE"));
+        assert_eq!(
+            parse_query(path).get("code").map(String::as_str),
+            Some("THECODE")
+        );
     }
 
     #[tokio::test]
@@ -854,7 +864,8 @@ mod tests {
         let listener = Loopback::bind(0).await.expect("binding a free port");
         let port = listener.v4.local_addr().unwrap().port();
 
-        let waiting = tokio::spawn(async move { wait_for_callback(&listener, "the-real-state").await });
+        let waiting =
+            tokio::spawn(async move { wait_for_callback(&listener, "the-real-state").await });
 
         // What a hostile page can produce: a navigation to the callback with a
         // state we never issued, and an `error=` that is not from the provider.
@@ -862,7 +873,9 @@ mod tests {
             "GET /callback?state=not-ours&code=whatever HTTP/1.1\r\n\r\n",
             "GET /callback?error=access_denied HTTP/1.1\r\n\r\n",
         ] {
-            let mut probe = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            let mut probe = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
             probe.write_all(forged.as_bytes()).await.unwrap();
             let mut answer = String::new();
             probe.read_to_string(&mut answer).await.unwrap();
@@ -870,13 +883,18 @@ mod tests {
         }
 
         // The genuine redirect still completes the login.
-        let mut browser = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut browser = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
         browser
             .write_all(b"GET /callback?state=the-real-state&code=THECODE HTTP/1.1\r\n\r\n")
             .await
             .unwrap();
 
-        let code = waiting.await.unwrap().expect("the real redirect should be accepted");
+        let code = waiting
+            .await
+            .unwrap()
+            .expect("the real redirect should be accepted");
         assert_eq!(code, "THECODE");
     }
 }

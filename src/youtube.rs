@@ -1504,8 +1504,14 @@ mod tests {
 
         // Stand in for the one fetch a real session performs on first use.
         backend.category_cache = Some(vec![
-            Category { id: "20".into(), name: "Gaming".into() },
-            Category { id: "28".into(), name: "Science & Technology".into() },
+            Category {
+                id: "20".into(),
+                name: "Gaming".into(),
+            },
+            Category {
+                id: "28".into(),
+                name: "Science & Technology".into(),
+            },
         ]);
 
         let typed = "Science & Technology";
