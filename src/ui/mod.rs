@@ -93,9 +93,28 @@ pub async fn run(config: Config) -> Result<()> {
                         // would make every keystroke register twice.
                         if key.kind != KeyEventKind::Release {
                             for command in app.handle_key(key) {
-                                if command_tx.send(command).await.is_err() {
-                                    // The worker has gone; nothing more can happen.
-                                    app.should_quit = true;
+                                // `try_send`, never `send().await`: this loop is
+                                // the only thing that draws the screen and reads
+                                // the keyboard. An awaited send on a full channel
+                                // would park it — no redraw, no Ctrl+C — until
+                                // the single-threaded worker frees a slot, which
+                                // behind a stalled network call can take minutes.
+                                // A full queue already means the worker is far
+                                // behind, so dropping the command and saying so
+                                // beats freezing the whole interface.
+                                use tokio::sync::mpsc::error::TrySendError;
+                                match command_tx.try_send(command) {
+                                    Ok(()) => {}
+                                    Err(TrySendError::Full(_)) => {
+                                        app.push_log(
+                                            worker::LogLevel::Error,
+                                            "Still busy with earlier requests — that key press was ignored, try again in a moment.",
+                                        );
+                                    }
+                                    Err(TrySendError::Closed(_)) => {
+                                        // The worker has gone; nothing more can happen.
+                                        app.should_quit = true;
+                                    }
                                 }
                             }
                         }
@@ -120,7 +139,12 @@ pub async fn run(config: Config) -> Result<()> {
             // Periodic statistics refresh, only once there is something to poll.
             _ = ticker.tick() => {
                 if app.screen == Screen::Dashboard && !app.results.is_empty() {
-                    let _ = command_tx.try_send(worker::Command::PollStats);
+                    // Dropping a poll is harmless — the next tick simply asks
+                    // again — but leave a trace so a stretch of missing stats
+                    // can be explained from the log.
+                    if command_tx.try_send(worker::Command::PollStats).is_err() {
+                        tracing::debug!("statistics poll skipped: the worker is still busy");
+                    }
                 }
             }
 
