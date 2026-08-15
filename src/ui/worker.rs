@@ -125,6 +125,12 @@ pub async fn run(
                         // Only a genuinely global failure lands here (such as
                         // the HTTP client not building), so showing the same
                         // text for every platform is truthful.
+                        //
+                        // The previous engine is dropped rather than kept: it
+                        // was built for an earlier platform selection, and
+                        // letting it linger meant a later go-live could act on
+                        // a platform the user has since deselected.
+                        engine = None;
                         let _ = events.send(Event::Connected(
                             platforms
                                 .into_iter()

@@ -318,6 +318,14 @@ impl App {
 
             Event::Connected(results) => {
                 self.busy = false;
+                // The event carries the complete answer for the *current*
+                // platform selection, so anything remembered from an earlier
+                // connect is discarded first. Keeping old entries around let a
+                // successful Twitch from a previous attempt advance the form
+                // after the user had deselected Twitch and this attempt wholly
+                // failed — and a later go-live then acted on the deselected
+                // platform.
+                self.accounts.clear();
                 for (platform, outcome) in results {
                     match &outcome {
                         Ok(name) => self.push_log(
@@ -1508,6 +1516,38 @@ mod tests {
             (Platform::YouTube, Ok("My Channel".into())),
         ]));
         assert_eq!(app.screen, Screen::Form);
+    }
+
+    /// A reconnect answers for the *current* selection only. A success left
+    /// over from an earlier attempt used to survive in `accounts`, advance the
+    /// form even though this attempt wholly failed, and let a later go-live
+    /// act on a platform the user had deselected.
+    #[test]
+    fn a_failed_reconnect_does_not_ride_on_an_earlier_success() {
+        let mut app = app();
+        // First attempt: Twitch connects fine.
+        app.handle_event(Event::Connected(vec![(
+            Platform::Twitch,
+            Ok("someone".into()),
+        )]));
+        assert_eq!(app.screen, Screen::Form);
+
+        // The user goes back, deselects Twitch, selects YouTube — which fails.
+        app.go_to(Screen::Platforms);
+        app.handle_event(Event::Connected(vec![(
+            Platform::YouTube,
+            Err("no credentials".into()),
+        )]));
+
+        assert_eq!(
+            app.screen,
+            Screen::Platforms,
+            "a wholly failed connect must not advance on a stale success"
+        );
+        assert!(
+            !app.accounts.contains_key(&Platform::Twitch),
+            "the deselected platform must not linger in the account list"
+        );
     }
 
     #[test]
