@@ -20,7 +20,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
 use config::Config;
-use model::{IngestEndpoint, Platform, StaleBroadcast};
+use model::{IngestEndpoint, Platform, StaleBroadcast, StreamPlan};
 
 #[derive(Parser)]
 #[command(
@@ -265,6 +265,46 @@ fn progress(json: bool, line: &str) {
     }
 }
 
+/// Save the id of a category we just had to look up, so the next run does not.
+///
+/// `twitch_category_id` in the config is documented as a cache for exactly this,
+/// but nothing on the `msm go` path ever filled it: `resolve_plan` puts the
+/// resolved category into the plan in memory and it is discarded when the
+/// process exits. Anyone scripting `msm go` against a hand-edited config
+/// therefore spent a `search/categories` request on every single run, forever.
+///
+/// Failing to write the cache is not a reason to fail the go-live, so a problem
+/// here is reported and otherwise ignored — the run continues with the id it
+/// already has in memory.
+fn remember_resolved_category(config: &Config, plan: &StreamPlan, json: bool) {
+    let Some(category) = &plan.twitch_category else {
+        return;
+    };
+    if config.preset.twitch_category_id == category.id
+        && config.preset.twitch_category == category.name
+    {
+        return;
+    }
+
+    let mut updated = config.clone();
+    updated.preset.twitch_category = category.name.clone();
+    updated.preset.twitch_category_id = category.id.clone();
+
+    match updated.save() {
+        Ok(()) => progress(
+            json,
+            &format!(
+                "remembered the Twitch category id for {:?}, so the next run needs no lookup",
+                category.name
+            ),
+        ),
+        Err(err) => tracing::warn!(
+            error = %format!("{err:#}"),
+            "could not save the resolved Twitch category id"
+        ),
+    }
+}
+
 async fn cmd_go(
     config: &Config,
     platforms: Option<String>,
@@ -315,6 +355,7 @@ async fn cmd_go(
     engine
         .resolve_plan(&mut plan, &config.preset.twitch_category)
         .await?;
+    remember_resolved_category(config, &plan, json);
 
     let issues = plan.validate(&platforms);
     for issue in &issues {
@@ -1024,5 +1065,48 @@ mod tests {
             STARTER_CONFIG.matches(&expected).count() >= 2,
             "the documented redirect URI must match `oauth_port`"
         );
+    }
+
+    /// `twitch_category_id` is documented as a cache that spares a repeat run an
+    /// API call, but nothing on the `msm go` path ever wrote it, so a scripted
+    /// run re-resolved the same category on every invocation forever.
+    #[test]
+    fn a_resolved_category_is_written_back_to_the_config() {
+        use crate::model::Category;
+
+        let dir = std::env::temp_dir().join(format!("msm-remember-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[preset]\n# typed from memory, no id\ntwitch_category = \"Just Chatting\"\n",
+        )
+        .unwrap();
+
+        let config = Config::load_from(&path).unwrap();
+        assert!(config.preset.twitch_category_id.is_empty());
+
+        let mut plan = config.preset.to_plan();
+        plan.twitch_category = Some(Category {
+            id: "509658".into(),
+            name: "Just Chatting".into(),
+        });
+
+        remember_resolved_category(&config, &plan, true);
+
+        let saved = Config::load_from(&path).unwrap();
+        assert_eq!(saved.preset.twitch_category_id, "509658");
+        assert_eq!(saved.preset.twitch_category, "Just Chatting");
+        // Writing the cache must not cost the file its comments.
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("# typed from memory"));
+
+        // A second run has nothing to write, so the file is left exactly alone.
+        let before = std::fs::read_to_string(&path).unwrap();
+        remember_resolved_category(&saved, &plan, true);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
