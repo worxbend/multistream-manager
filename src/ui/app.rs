@@ -94,6 +94,10 @@ pub struct App {
     /// Incremented on every keystroke that triggers a search, so that a slow
     /// reply to an earlier keystroke can be recognised as stale and dropped.
     pub search_generation: u64,
+    /// Bumped on every go-live submission; the worker echoes it back in
+    /// [`Event::WentLive`], so an answer to a superseded submission can be
+    /// recognised as stale and dropped.
+    pub go_generation: u64,
 
     pub log: VecDeque<LogLine>,
     /// Account names resolved during connection, per platform.
@@ -161,6 +165,7 @@ impl App {
             auto_stop: plan.youtube_auto_stop,
             popup: None,
             search_generation: 0,
+            go_generation: 0,
             log: VecDeque::new(),
             accounts: BTreeMap::new(),
             results: Vec::new(),
@@ -389,7 +394,16 @@ impl App {
                 }
             }
 
-            Event::WentLive(results) => {
+            Event::WentLive {
+                results,
+                generation,
+            } => {
+                // An answer to a submission that has since been superseded:
+                // acting on it would navigate the user away from whatever they
+                // are doing now and overwrite the newer submission's results.
+                if generation != self.go_generation {
+                    return;
+                }
                 self.busy = false;
                 let any_ok = results.iter().any(|r| r.succeeded());
                 self.results = results;
@@ -841,7 +855,16 @@ impl App {
         }
 
         self.busy = true;
-        vec![Command::GoLive(Box::new(plan))]
+        self.go_generation += 1;
+        // The statistics on hand belong to the previous broadcast. Shown on
+        // the new dashboard they would report the old stream's live status,
+        // viewers and uptime for a broadcast that has not started, until the
+        // next poll overwrote them.
+        self.stats.clear();
+        vec![Command::GoLive {
+            plan: Box::new(plan),
+            generation: self.go_generation,
+        }]
     }
 
     /// Write the current form values back to `config.toml` as the new defaults.
@@ -973,6 +996,16 @@ mod tests {
 
     fn app() -> App {
         App::new(Config::default())
+    }
+
+    /// Deliver a go-live answer stamped with the app's current submission
+    /// generation, the way the worker answers the latest real submission.
+    fn deliver_went_live(app: &mut App, results: Vec<PlatformResult>) {
+        let generation = app.go_generation;
+        app.handle_event(Event::WentLive {
+            results,
+            generation,
+        });
     }
 
     /// Drive the app to the form screen without going through the worker.
@@ -1429,7 +1462,7 @@ mod tests {
             .set("A good title");
 
         let commands = app.submit();
-        assert!(matches!(commands.as_slice(), [Command::GoLive(_)]));
+        assert!(matches!(commands.as_slice(), [Command::GoLive { .. }]));
         assert!(app.busy);
     }
 
@@ -1446,15 +1479,90 @@ mod tests {
         assert!(app.submit().is_empty(), "the second submit must be ignored");
     }
 
+    /// An answer to a superseded submission must not act on the UI: it would
+    /// navigate the user away from what they are doing and overwrite the
+    /// current submission's results with older ones.
+    #[test]
+    fn a_stale_go_live_answer_is_discarded() {
+        let mut app = app_on_form();
+        app.selected = vec![Platform::YouTube];
+        app.inputs.get_mut(&Field::Title).unwrap().set("A title");
+        assert_eq!(app.submit().len(), 1);
+
+        // A slow answer to some earlier submission arrives after the fact.
+        app.handle_event(Event::WentLive {
+            results: vec![PlatformResult {
+                platform: Platform::Twitch,
+                outcome: Ok(GoLiveOutcome::default()),
+            }],
+            generation: app.go_generation - 1,
+        });
+
+        assert_eq!(app.screen, Screen::Form, "a stale answer must not navigate");
+        assert!(app.busy, "the current submission is still in flight");
+        assert!(app.results.is_empty());
+
+        // The genuine answer still lands normally.
+        deliver_went_live(
+            &mut app,
+            vec![PlatformResult {
+                platform: Platform::Twitch,
+                outcome: Ok(GoLiveOutcome::default()),
+            }],
+        );
+        assert_eq!(app.screen, Screen::Dashboard);
+    }
+
+    /// Statistics on hand always describe the previous broadcast. Left in
+    /// place across a resubmit, the new dashboard opened showing the old
+    /// stream as live with its viewers and uptime, for a broadcast that had
+    /// not started.
+    #[test]
+    fn resubmitting_clears_the_previous_broadcast_statistics() {
+        let mut app = app_on_form();
+        app.selected = vec![Platform::YouTube];
+        app.inputs.get_mut(&Field::Title).unwrap().set("A title");
+        app.submit();
+        deliver_went_live(
+            &mut app,
+            vec![PlatformResult {
+                platform: Platform::Twitch,
+                outcome: Ok(GoLiveOutcome::default()),
+            }],
+        );
+        app.handle_event(Event::Stats(vec![(
+            Platform::Twitch,
+            PlatformStats {
+                live: true,
+                viewers: Some(12),
+                ..Default::default()
+            },
+        )]));
+        assert!(app.stats_for(Platform::Twitch).is_some());
+
+        // Edit and go live again.
+        app.handle_key(key(KeyCode::Char('e')));
+        assert_eq!(app.screen, Screen::Form);
+        app.submit();
+
+        assert!(
+            app.stats_for(Platform::Twitch).is_none(),
+            "the old broadcast's numbers must not describe the new one"
+        );
+    }
+
     #[test]
     fn a_successful_go_live_moves_to_the_dashboard() {
         let mut app = app_on_form();
         app.busy = true;
 
-        app.handle_event(Event::WentLive(vec![PlatformResult {
-            platform: Platform::Twitch,
-            outcome: Ok(GoLiveOutcome::default()),
-        }]));
+        deliver_went_live(
+            &mut app,
+            vec![PlatformResult {
+                platform: Platform::Twitch,
+                outcome: Ok(GoLiveOutcome::default()),
+            }],
+        );
 
         assert_eq!(app.screen, Screen::Dashboard);
         assert!(!app.busy);
@@ -1465,10 +1573,13 @@ mod tests {
         let mut app = app_on_form();
         app.busy = true;
 
-        app.handle_event(Event::WentLive(vec![PlatformResult {
-            platform: Platform::Twitch,
-            outcome: Err("nope".into()),
-        }]));
+        deliver_went_live(
+            &mut app,
+            vec![PlatformResult {
+                platform: Platform::Twitch,
+                outcome: Err("nope".into()),
+            }],
+        );
 
         assert_eq!(
             app.screen,
@@ -1481,16 +1592,19 @@ mod tests {
     #[test]
     fn a_partial_failure_still_shows_the_dashboard() {
         let mut app = app_on_form();
-        app.handle_event(Event::WentLive(vec![
-            PlatformResult {
-                platform: Platform::Twitch,
-                outcome: Ok(GoLiveOutcome::default()),
-            },
-            PlatformResult {
-                platform: Platform::YouTube,
-                outcome: Err("out of quota".into()),
-            },
-        ]));
+        deliver_went_live(
+            &mut app,
+            vec![
+                PlatformResult {
+                    platform: Platform::Twitch,
+                    outcome: Ok(GoLiveOutcome::default()),
+                },
+                PlatformResult {
+                    platform: Platform::YouTube,
+                    outcome: Err("out of quota".into()),
+                },
+            ],
+        );
 
         // Twitch works, so its URL and key are worth showing.
         assert_eq!(app.screen, Screen::Dashboard);
@@ -1568,10 +1682,13 @@ mod tests {
         app.submit();
         assert!(app.popup.is_none(), "submitting must close the popup");
 
-        app.handle_event(Event::WentLive(vec![PlatformResult {
-            platform: Platform::YouTube,
-            outcome: Ok(GoLiveOutcome::default()),
-        }]));
+        deliver_went_live(
+            &mut app,
+            vec![PlatformResult {
+                platform: Platform::YouTube,
+                outcome: Ok(GoLiveOutcome::default()),
+            }],
+        );
         assert!(app.popup.is_none());
 
         // Back to the form to edit and resubmit.

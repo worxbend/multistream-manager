@@ -31,8 +31,13 @@ pub enum Command {
         query: String,
         generation: u64,
     },
-    /// Apply the plan to every connected platform.
-    GoLive(Box<StreamPlan>),
+    /// Apply the plan to every connected platform. `generation` is echoed
+    /// back in [`Event::WentLive`] so the UI can discard a result that
+    /// belongs to an earlier, superseded submission.
+    GoLive {
+        plan: Box<StreamPlan>,
+        generation: u64,
+    },
     /// Refresh the statistics.
     PollStats,
     /// Hand a URL to the system browser.
@@ -54,8 +59,12 @@ pub enum Event {
         results: Vec<Category>,
         generation: u64,
     },
-    /// Going live finished, successfully or otherwise, per platform.
-    WentLive(Vec<PlatformResult>),
+    /// Going live finished, successfully or otherwise, per platform. Carries
+    /// the generation of the submission it answers.
+    WentLive {
+        results: Vec<PlatformResult>,
+        generation: u64,
+    },
     /// A fresh statistics snapshot.
     Stats(Vec<(Platform, PlatformStats)>),
     /// Something to append to the on-screen activity log.
@@ -186,7 +195,7 @@ pub async fn run(
                 }
             }
 
-            Command::GoLive(plan) => {
+            Command::GoLive { plan, generation } => {
                 let Some(engine) = engine.as_mut() else {
                     let _ = events.send(Event::Log {
                         level: LogLevel::Error,
@@ -230,7 +239,10 @@ pub async fn run(
                     }
                 }
 
-                let _ = events.send(Event::WentLive(results));
+                let _ = events.send(Event::WentLive {
+                    results,
+                    generation,
+                });
             }
 
             Command::PollStats => {
@@ -304,7 +316,10 @@ mod tests {
         let handle = tokio::spawn(run(Config::default(), command_rx, event_tx));
 
         command_tx
-            .send(Command::GoLive(Box::default()))
+            .send(Command::GoLive {
+                plan: Box::default(),
+                generation: 1,
+            })
             .await
             .unwrap();
 
