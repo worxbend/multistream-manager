@@ -40,16 +40,29 @@ fn credentials(config: &Config, platform: Platform) -> (String, String) {
 /// `twitch:<login>` / `youtube:<channel-id>`, for the Chat tab's multi-account
 /// support. Returns the token-store key the login landed under.
 pub async fn login(config: &Config, platform: Platform, add: bool) -> Result<String> {
+    login_with(config, platform, add, &|message| println!("{message}")).await
+}
+
+/// The same login, with the progress messages routed somewhere other than
+/// standard output — which is what the terminal interface needs, since it owns
+/// the screen and cannot have anything printed underneath it.
+pub async fn login_with(
+    config: &Config,
+    platform: Platform,
+    add: bool,
+    notice: oauth::Notice<'_>,
+) -> Result<String> {
     config.check_credentials(&[platform])?;
     let (client_id, client_secret) = credentials(config, platform);
     let spec = spec_for(platform);
 
-    let mut tokens = oauth::interactive_login(
+    let mut tokens = oauth::interactive_login_with(
         &spec,
         &client_id,
         &client_secret,
         &config.redirect_uri(),
         config.general.oauth_port,
+        notice,
     )
     .await?;
 

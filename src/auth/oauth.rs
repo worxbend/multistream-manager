@@ -238,16 +238,26 @@ struct TokenResponse {
     scope: Option<serde_json::Value>,
 }
 
+/// Where the login's progress messages go.
+///
+/// On the command line they are printed. Inside the terminal interface they
+/// must not be: standard output belongs to the drawing code there, so a stray
+/// `println!` would punch a hole in the frame. The caller passes a function
+/// that puts each message wherever it belongs — the activity log, in the
+/// interface's case.
+pub type Notice<'a> = &'a (dyn Fn(String) + Send + Sync);
+
 /// Run the whole interactive login and return the resulting tokens.
 ///
 /// This blocks until you finish (or abandon) the login in your browser, with a
 /// five minute ceiling so a forgotten tab cannot wedge the program forever.
-pub async fn interactive_login(
+pub async fn interactive_login_with(
     spec: &ProviderSpec,
     client_id: &str,
     client_secret: &str,
     redirect_uri: &str,
     port: u16,
+    notice: Notice<'_>,
 ) -> Result<TokenSet> {
     let state = random_state();
     let pkce = spec.use_pkce.then(Pkce::generate);
@@ -266,11 +276,11 @@ pub async fn interactive_login(
 
     let auth_url = build_auth_url(spec, client_id, redirect_uri, &state, pkce.as_ref());
 
-    println!("Opening your browser to authorise {}…", spec.name);
-    println!();
-    println!("If nothing opens, paste this URL in yourself:");
-    println!("{auth_url}");
-    println!();
+    notice(format!("Opening your browser to authorise {}…", spec.name));
+    notice(String::new());
+    notice("If nothing opens, paste this URL in yourself:".to_string());
+    notice(auth_url.clone());
+    notice(String::new());
 
     // A failure to launch a browser is not fatal — the URL was just printed.
     if let Err(err) = open::that_detached(&auth_url) {
@@ -299,7 +309,7 @@ pub async fn interactive_login(
     )
     .await?;
 
-    println!("{} authorised successfully.", spec.name);
+    notice(format!("{} authorised successfully.", spec.name));
     Ok(tokens)
 }
 

@@ -385,10 +385,13 @@ impl QuotaLedger {
         if self.limit == 0 {
             return None;
         }
+        // No override is offered here on purpose. ctrl+r only clears the
+        // reserve, so once nothing is left this pause would come straight
+        // back — after another resolve-and-poll had already spent quota.
         if self.remaining() == 0 {
             return Some(
                 "estimated daily API quota exhausted; polling stopped until the \
-                 Pacific-midnight reset. Press ctrl+r to override"
+                 Pacific-midnight reset"
                     .to_string(),
             );
         }
@@ -1352,13 +1355,20 @@ fn classify(status: u16, reason: &str) -> Failure {
             404 => FailKind::ChatGone,
             400 => FailKind::Rejected,
             500.. => FailKind::Transient,
-            _ => FailKind::Auth,
+            // Anything unlisted (402, 405, 408, 409, a stray 3xx) is not
+            // evidence the saved login is wrong. Calling it Auth parks the
+            // poller for good and tells the user to re-run `msm login
+            // youtube`, which fixes nothing; Transient at least retries.
+            _ => FailKind::Transient,
         },
     };
     let detail = match kind {
-        FailKind::Quota => "daily API quota exhausted; polling stopped until the Pacific-midnight \
-             reset. Press ctrl+r to override"
-            .to_string(),
+        // As with the ledger's own exhaustion pause: the override cannot buy
+        // back a quota YouTube itself says is spent, so it is not advertised.
+        FailKind::Quota => {
+            "daily API quota exhausted; polling stopped until the Pacific-midnight reset"
+                .to_string()
+        }
         FailKind::RateLimited => "YouTube asked us to slow down; backing off".to_string(),
         FailKind::ChatGone => match reason_lc.as_str() {
             "livechatdisabled" => "this broadcast has chat turned off".to_string(),
@@ -2070,6 +2080,13 @@ impl Poller {
     /// are: the ban event may never come back through the poll stream.
     async fn handle_ban(&mut self, channel_id: String, timeout_secs: Option<u64>) {
         if channel_id.is_empty() {
+            return;
+        }
+        // The request body carries `liveChatId`, which stays empty until the
+        // chat resolves. Sending it anyway costs 50 quota units for a reply
+        // that can only be a 400, so refuse before charging anything.
+        if self.live_chat_id.is_empty() {
+            self.emit_local_notice("cannot send yet: the chat is still connecting");
             return;
         }
         let token = match self.access_token().await {
@@ -2955,6 +2972,99 @@ mod tests {
         assert!(unlimited.pause_reason(10).is_none());
     }
 
+    #[test]
+    fn only_the_reserve_pause_offers_the_ctrl_r_override() {
+        // The override clears the reserve and nothing else. When the whole
+        // day's quota is gone the pause returns no matter what, so advertising
+        // ctrl+r sent the user round a loop: each press re-resolved and polled
+        // (spending real units) and then parked again immediately.
+        let mut reserve_hit = QuotaLedger::new(10_000);
+        reserve_hit.charge(9_000);
+        let reserve = reserve_hit.pause_reason(10).expect("the reserve trips");
+        assert!(reserve.contains("ctrl+r"), "reserve pause: {reserve}");
+
+        let mut spent = QuotaLedger::new(10_000);
+        spent.charge(10_000);
+        let exhausted = spent.pause_reason(10).expect("exhaustion always pauses");
+        assert!(
+            !exhausted.contains("ctrl+r"),
+            "exhaustion must not promise an override: {exhausted}"
+        );
+        // And with the reserve already overridden, the message is the same.
+        assert!(!spent
+            .pause_reason(0)
+            .expect("still paused")
+            .contains("ctrl+r"));
+    }
+
+    // -- moderation before the chat resolves ---------------------------------
+
+    #[tokio::test]
+    async fn banning_before_the_chat_resolves_costs_no_quota_and_says_why() {
+        // A ban issued in the seconds before the chat id arrives used to send
+        // `liveChatId: ""` — a guaranteed HTTP 400 — after already charging
+        // 50 units, and the moderator saw only YouTube's opaque rejection.
+        let quota = QuotaStore::new(10_000, None);
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let mut poller = Poller::new(SpawnParams {
+            key: ChatKey {
+                platform: Platform::YouTube,
+                account: "youtube".into(),
+                target: "CgABCDEFGHIJKLMNOPQRSTUVWXYZ".into(),
+            },
+            poll_floor_ms: 1,
+            poll_ceiling_ms: 0,
+            quota: quota.clone(),
+            quota_reserve_percent: 10,
+            token: Arc::new(|| Box::pin(async { Ok("test-token".to_string()) })),
+            events: events_tx,
+            client: reqwest::Client::new(),
+            // Unreachable on purpose: a correct guard never reaches the network.
+            base: Some("http://127.0.0.1:1/youtube/v3".to_string()),
+        });
+        poller.live_chat_id.clear();
+
+        poller.handle_ban("UCsomeone".to_string(), None).await;
+
+        assert_eq!(quota.remaining(), 10_000, "a refused ban must cost nothing");
+        match events_rx
+            .try_recv()
+            .expect("the moderator must be told why")
+        {
+            (_, ChatEvent::Message(message)) => assert!(
+                message.text.contains("still connecting"),
+                "unhelpful notice: {}",
+                message.text
+            ),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    // -- error classification ------------------------------------------------
+
+    #[test]
+    fn unlisted_http_statuses_are_transient_rather_than_auth_failures() {
+        // These statuses say nothing about the saved login. Treating them as
+        // auth failures parked the poller permanently and told the user to run
+        // `msm login youtube`, which could never fix the real problem.
+        for status in [402_u16, 405, 408, 409, 302] {
+            let failure = classify(status, "");
+            assert_eq!(
+                failure.kind,
+                FailKind::Transient,
+                "HTTP {status} must be retried, not treated as a bad login"
+            );
+            assert!(!failure.detail.contains("msm login"));
+        }
+
+        // A genuine 401, and Google's explicit auth reasons, still park.
+        assert_eq!(classify(401, "").kind, FailKind::Auth);
+        assert_eq!(
+            classify(403, "insufficientPermissions").kind,
+            FailKind::Auth
+        );
+    }
+
     // -- grapheme cap -------------------------------------------------------
 
     #[test]
@@ -3099,9 +3209,12 @@ mod tests {
             .iter()
             .any(|(s, _)| *s == ConnectionStatus::Connected));
         let (_, pause_detail) = statuses.last().expect("at least the pause");
+        // A quota YouTube itself reports as spent cannot be overridden, so the
+        // pause must not invite an override that would only re-poll and
+        // re-park.
         assert!(
-            pause_detail.contains("ctrl+r"),
-            "the pause must name the override: {pause_detail}"
+            !pause_detail.contains("ctrl+r"),
+            "hard exhaustion must not promise an override: {pause_detail}"
         );
 
         // The primed row is historical; the streamed row is not; the

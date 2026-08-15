@@ -1477,10 +1477,9 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: 
         opts.continues_group = (0..index)
             .rev()
             .find(|older| {
-                chat.state
-                    .messages
-                    .get(*older)
-                    .is_some_and(|m| filters.matches(m, &self_login) || Some(*older) == selected_index)
+                chat.state.messages.get(*older).is_some_and(|m| {
+                    filters.matches(m, &self_login) || Some(*older) == selected_index
+                })
             })
             .and_then(|prev| chat.state.messages.get(prev))
             .is_some_and(|prev| {

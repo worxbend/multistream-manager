@@ -50,9 +50,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
             super::chat_tab::draw(frame, areas[2], &app.chat, &app.config);
         }
         super::app::Tab::StreamInfo => match app.screen {
-            Screen::Platforms if stream_info_unconfigured(app) => {
-                draw_stream_info_empty(frame, areas[2], app)
-            }
+            Screen::Setup => draw_setup(frame, areas[2], app),
+            Screen::Login => draw_login(frame, areas[2], app),
             Screen::Platforms => draw_platforms(frame, areas[2], app),
             Screen::Form => draw_form(frame, areas[2], app),
             Screen::Dashboard => draw_dashboard(frame, areas[2], app),
@@ -89,46 +88,164 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// True when nothing is set up at all: no API credentials for either
-/// platform. The platform picker would only offer choices that cannot work,
-/// so an explanation with the exact setup commands replaces it.
-fn stream_info_unconfigured(app: &App) -> bool {
-    Platform::ALL
-        .iter()
-        .all(|&platform| app.config.check_credentials(&[platform]).is_err())
-}
+/// The first-run credential form.
+///
+/// Both platforms need an "application" registered in their developer console
+/// before anything else can happen; this asks for the two values that console
+/// gives you, so a fresh install never has to be fixed by hand-editing a file.
+fn draw_setup(frame: &mut Frame, area: Rect, app: &App) {
+    use super::app::SetupField;
 
-/// The Stream Info empty state: what is missing and how to fix it, using the
-/// commands this program actually ships.
-fn draw_stream_info_empty(frame: &mut Frame, area: Rect, _app: &App) {
-    let lines = vec![
-        Line::from(""),
+    let areas = Layout::vertical([Constraint::Length(9), Constraint::Min(0)])
+        .horizontal_margin(2)
+        .split(area);
+
+    let mut lines = vec![
         Line::from(Span::styled(
-            "No streaming accounts are connected yet.",
-            Style::default().add_modifier(Modifier::BOLD),
+            "Set up API access",
+            Style::new().fg(theme::TEXT).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from("This tab configures your Twitch and YouTube broadcasts, but it"),
-        Line::from("needs API credentials and a login for each platform first:"),
-        Line::from(""),
-        Line::from("  1. Quit (q) and run `msm init` to write a starter config file."),
-        Line::from("  2. Fill in the [twitch] and [youtube] credential sections —"),
-        Line::from("     the file explains where each value comes from, and"),
-        Line::from("     `msm paths` prints where the file lives."),
-        Line::from("  3. Run `msm login twitch` and `msm login youtube` to authorise"),
-        Line::from("     your accounts in the browser."),
-        Line::from("  4. Start `msm` again — this tab then offers both platforms."),
-        Line::from(""),
         Line::from(Span::styled(
-            "Chat accounts are separate: add them with `msm login <platform> --add`",
-            Style::default().fg(Color::DarkGray),
+            "Each platform needs an application registered in its developer console.",
+            Style::new().fg(theme::DIM),
         )),
         Line::from(Span::styled(
-            "and they appear on the Chat tab (alt+2).",
-            Style::default().fg(Color::DarkGray),
+            "Twitch:  https://dev.twitch.tv/console/apps  (OAuth redirect URL below)",
+            Style::new().fg(theme::DIM),
+        )),
+        Line::from(Span::styled(
+            "YouTube: https://console.cloud.google.com/apis/credentials  (Desktop app)",
+            Style::new().fg(theme::DIM),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Redirect URL to register: ", Style::new().fg(theme::DIM)),
+            Span::styled(app.config.redirect_uri(), Style::new().fg(theme::TEXT)),
+        ]),
+        Line::from(Span::styled(
+            "Fill in one platform or both — an empty pair is simply skipped.",
+            Style::new().fg(theme::DIM),
         )),
     ];
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    lines.push(Line::from(""));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), areas[0]);
+
+    let rows = Layout::vertical(
+        SetupField::ORDER
+            .iter()
+            .map(|_| Constraint::Length(3))
+            .chain(std::iter::once(Constraint::Min(0)))
+            .collect::<Vec<_>>(),
+    )
+    .split(areas[1]);
+
+    for (index, field) in SetupField::ORDER.iter().enumerate() {
+        let focused = index == app.setup_cursor;
+        let value = app
+            .setup_inputs
+            .get(field)
+            .map(|input| input.value().to_string())
+            .unwrap_or_default();
+        // A secret is drawn as dots even while it is being typed: this window
+        // is frequently shared, and a client secret is a credential.
+        let shown = if field.is_secret() {
+            "•".repeat(value.chars().count())
+        } else {
+            value
+        };
+
+        let border = if focused {
+            platform_color(field.platform())
+        } else {
+            theme::BORDER
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(border))
+            .title(format!(" {} ", field.label()))
+            .padding(ratatui::widgets::Padding::horizontal(1));
+
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                shown,
+                Style::new().fg(theme::TEXT),
+            )))
+            .block(block),
+            rows[index],
+        );
+    }
+}
+
+/// The login screen: which platforms to authorise in the browser.
+fn draw_login(frame: &mut Frame, area: Rect, app: &App) {
+    let areas = Layout::vertical([Constraint::Length(6), Constraint::Min(0)])
+        .horizontal_margin(2)
+        .split(area);
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                "Authorise your accounts",
+                Style::new().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Tick the platforms you want to stream to and press Enter. Your browser",
+                Style::new().fg(theme::DIM),
+            )),
+            Line::from(Span::styled(
+                "opens for each one in turn; approve the access and come back here.",
+                Style::new().fg(theme::DIM),
+            )),
+        ])
+        .wrap(Wrap { trim: false }),
+        areas[0],
+    );
+
+    let items: Vec<ListItem> = Platform::ALL
+        .iter()
+        .enumerate()
+        .map(|(index, platform)| {
+            let ticked = app.login_selection.contains(platform);
+            let focused = index == app.login_cursor;
+            let configured = app.config.check_credentials(&[*platform]).is_ok();
+            let authorised = app.logged_in.get(platform).copied().unwrap_or(false);
+
+            let state = if !configured {
+                " — no credentials yet (press c)"
+            } else if authorised {
+                " — already authorised, logging in again replaces it"
+            } else {
+                ""
+            };
+
+            let style = if focused {
+                Style::new()
+                    .fg(platform_color(*platform))
+                    .add_modifier(Modifier::BOLD)
+            } else if configured {
+                Style::new().fg(theme::TEXT)
+            } else {
+                Style::new().fg(theme::DIM)
+            };
+
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!(
+                        "{} {} ",
+                        if ticked { "[x]" } else { "[ ]" },
+                        platform.label()
+                    ),
+                    style,
+                ),
+                Span::styled(state.to_string(), Style::new().fg(theme::DIM)),
+            ]))
+        })
+        .collect();
+
+    frame.render_widget(List::new(items), areas[1]);
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -236,6 +353,10 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let hints = match app.screen {
+        Screen::Setup => "Tab/↑↓ field   Enter save & continue   Esc back   Ctrl+C quit",
+        Screen::Login => {
+            "↑↓ move   Space tick   Enter log in   c edit credentials   s skip   q quit"
+        }
         Screen::Platforms => "↑↓ move   Space toggle   a all   Enter connect   q quit",
         Screen::Dashboard => {
             "r refresh   o open watch page   y copy Twitch key   Y copy YouTube key   \
@@ -888,7 +1009,16 @@ mod tests {
         config.twitch.client_secret = "secret".into();
         config.youtube.client_id = "id".into();
         config.youtube.client_secret = "secret".into();
-        App::new(config)
+        // A scratch config directory keeps `App::new` from reading whatever
+        // logins happen to exist on the machine running the tests, which would
+        // otherwise decide which screen opens.
+        // `App::new` picks its opening screen from the saved logins, which
+        // differ per machine. Tests that care about the opening screen build
+        // their own App under a scratch config directory; this helper is for
+        // everything else, so it just lands on the platform picker.
+        let mut app = App::new(config);
+        app.screen = Screen::Platforms;
+        app
     }
 
     #[test]
@@ -903,14 +1033,53 @@ mod tests {
     /// offer choices that cannot work — the empty state with the real setup
     /// commands replaces it.
     #[test]
-    fn an_unconfigured_app_shows_the_setup_instructions_instead() {
+    fn an_unconfigured_app_opens_the_credential_form() {
+        // A scratch config directory keeps the test off the developer's own
+        // saved logins, which would otherwise decide the opening screen.
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("draw-setup");
         let app = App::new(Config::default());
         let screen = render(&app, 100, 30);
-        assert!(screen.contains("No streaming accounts are connected yet"));
-        assert!(screen.contains("msm init"));
-        assert!(screen.contains("msm login twitch"));
-        assert!(screen.contains("msm login youtube"));
-        assert!(!screen.contains("Where are you streaming?"));
+
+        assert!(screen.contains("Set up API access"));
+        assert!(screen.contains("Twitch client id"));
+        assert!(screen.contains("YouTube client secret"));
+        assert!(
+            !screen.contains("Where are you streaming?"),
+            "the platform picker is useless without credentials"
+        );
+    }
+
+    /// A typed client secret is dots on screen from the first keystroke.
+    #[test]
+    fn the_setup_form_never_draws_a_secret() {
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("draw-setup-secret");
+        let mut app = App::new(Config::default());
+        app.setup_cursor = 1; // the Twitch client secret
+        for c in "hunter2secret".chars() {
+            app.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(c),
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+
+        let screen = render(&app, 100, 30);
+        assert!(!screen.contains("hunter2secret"));
+        assert!(screen.contains('\u{2022}'));
+    }
+
+    /// With credentials but nothing authorised, the login screen comes first.
+    #[test]
+    fn a_configured_app_with_no_login_opens_the_login_screen() {
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("draw-login");
+        let mut config = Config::default();
+        config.twitch.client_id = "id".into();
+        config.twitch.client_secret = "secret".into();
+        let app = App::new(config);
+        let screen = render(&app, 100, 30);
+
+        assert!(screen.contains("Authorise your accounts"));
+        assert!(screen.contains("Twitch"));
+        assert!(screen.contains("YouTube"));
     }
 
     /// The Chat tab always shows both panes; without accounts each pane

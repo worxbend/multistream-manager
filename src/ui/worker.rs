@@ -40,6 +40,12 @@ pub enum Command {
     },
     /// Refresh the statistics.
     PollStats,
+    /// Run the browser login for these platforms, one after another, and save
+    /// the resulting tokens. Sent by the login screen.
+    Login(Vec<Platform>),
+    /// Adopt a config the interface has just saved (API credentials entered on
+    /// the setup screen), and forget any engine built from the old one.
+    ReloadConfig(Box<Config>),
     /// Fetch this platform's stream key and put it on the system clipboard.
     ///
     /// The key never travels to the UI half at all: it goes from the API
@@ -72,6 +78,12 @@ pub enum Event {
         results: Vec<PlatformResult>,
         generation: u64,
     },
+    /// One platform's browser login finished. `Ok` carries the token-store key
+    /// it was saved under.
+    LoggedIn {
+        platform: Platform,
+        result: Result<String, String>,
+    },
     /// A fresh statistics snapshot.
     Stats(Vec<(Platform, PlatformStats)>),
     /// Something to append to the on-screen activity log.
@@ -96,6 +108,7 @@ pub async fn run(
     mut commands: mpsc::Receiver<Command>,
     events: mpsc::UnboundedSender<Event>,
 ) {
+    let mut config = config;
     let mut engine: Option<Engine> = None;
 
     while let Some(command) = commands.recv().await {
@@ -258,6 +271,43 @@ pub async fn run(
                 };
                 let stats = engine.poll_stats().await;
                 let _ = events.send(Event::Stats(stats));
+            }
+
+            Command::ReloadConfig(fresh) => {
+                config = *fresh;
+                // Any engine was built from the previous credentials, so it can
+                // no longer be trusted to belong to this configuration.
+                engine = None;
+            }
+
+            Command::Login(platforms) => {
+                for platform in platforms {
+                    let _ = events.send(Event::Log {
+                        level: LogLevel::Info,
+                        message: format!("Starting the {} login…", platform.label()),
+                    });
+
+                    // The login prints nothing: the interface owns the screen,
+                    // so every progress line (including the URL to paste if no
+                    // browser opens) goes to the activity log instead.
+                    let sink = events.clone();
+                    let notice = move |message: String| {
+                        let _ = sink.send(Event::Log {
+                            level: LogLevel::Info,
+                            message,
+                        });
+                    };
+
+                    let result = crate::auth::login_with(&config, platform, false, &notice)
+                        .await
+                        .map_err(|err| format!("{err:#}"));
+                    if result.is_ok() {
+                        // The saved token has changed, so a previously built
+                        // engine is holding a stale one.
+                        engine = None;
+                    }
+                    let _ = events.send(Event::LoggedIn { platform, result });
+                }
             }
 
             Command::CopyStreamKey(platform) => {

@@ -775,7 +775,10 @@ mod tests {
             AudienceProbe::Refused,
         );
         assert_eq!(followers, Some(501));
-        assert_eq!(subs, None, "a refusal must clear the stale subscriber total");
+        assert_eq!(
+            subs, None,
+            "a refusal must clear the stale subscriber total"
+        );
         assert!(settled);
     }
 

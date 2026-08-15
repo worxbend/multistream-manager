@@ -19,6 +19,20 @@ use crate::model::{
 };
 use crate::youtube;
 
+/// Which platforms already have a saved login, read once at start-up.
+///
+/// Reading the token store is a single small file read, and it happens before
+/// the interface starts drawing, so it does not belong on the worker. A store
+/// that cannot be read at all is reported as "nothing is logged in", which is
+/// the state the login screen is there to fix anyway.
+fn saved_logins() -> BTreeMap<Platform, bool> {
+    let store = crate::auth::store::TokenStore::load().unwrap_or_default();
+    Platform::ALL
+        .iter()
+        .map(|platform| (*platform, store.get(*platform).is_some()))
+        .collect()
+}
+
 /// Whether a key press should be treated as typed text in a modal input.
 ///
 /// A bare character is text; a character carrying Ctrl or Alt is a command.
@@ -33,12 +47,62 @@ fn is_typed_text(key: &KeyEvent) -> bool {
 /// Which screen is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
+    /// First run: type in the API credentials, because nothing works without
+    /// them and quitting to hand-edit a file is a poor welcome.
+    Setup,
+    /// Authorise Twitch, YouTube or both in the browser.
+    Login,
     /// Pick Twitch, YouTube, or both.
     Platforms,
     /// Fill in the title, tags, category and everything else.
     Form,
     /// After a successful go-live: URLs, stream keys and live statistics.
     Dashboard,
+}
+
+/// One box on the credential setup screen.
+///
+/// "Client id" and "client secret" are what each platform's developer console
+/// calls the two halves of an application's identity: the id names the
+/// application, the secret proves the request really comes from it. They are
+/// per-application, not per-account — logging in comes afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SetupField {
+    TwitchId,
+    TwitchSecret,
+    YouTubeId,
+    YouTubeSecret,
+}
+
+impl SetupField {
+    pub const ORDER: [SetupField; 4] = [
+        SetupField::TwitchId,
+        SetupField::TwitchSecret,
+        SetupField::YouTubeId,
+        SetupField::YouTubeSecret,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SetupField::TwitchId => "Twitch client id",
+            SetupField::TwitchSecret => "Twitch client secret",
+            SetupField::YouTubeId => "YouTube client id",
+            SetupField::YouTubeSecret => "YouTube client secret",
+        }
+    }
+
+    /// Whether the value must be drawn as dots. A secret on screen is a secret
+    /// on any recording of that screen.
+    pub fn is_secret(self) -> bool {
+        matches!(self, SetupField::TwitchSecret | SetupField::YouTubeSecret)
+    }
+
+    pub fn platform(self) -> Platform {
+        match self {
+            SetupField::TwitchId | SetupField::TwitchSecret => Platform::Twitch,
+            SetupField::YouTubeId | SetupField::YouTubeSecret => Platform::YouTube,
+        }
+    }
 }
 
 /// One line in the activity log.
@@ -94,6 +158,15 @@ pub struct App {
     pub tab: Tab,
     /// State for the Chat tab (pane focus, account sub-tabs, split width).
     pub chat: super::chat_tab::ChatTabState,
+
+    /// The credential boxes on the setup screen, and which one has focus.
+    pub setup_inputs: BTreeMap<SetupField, TextInput>,
+    pub setup_cursor: usize,
+    /// Which platforms the login screen has ticked, and which platforms
+    /// already have a saved login.
+    pub login_selection: Vec<Platform>,
+    pub login_cursor: usize,
+    pub logged_in: BTreeMap<Platform, bool>,
 
     /// Which platforms are ticked on the first screen.
     pub selected: Vec<Platform>,
@@ -171,11 +244,43 @@ impl App {
             preset.platforms.clone()
         };
 
+        // Where the interface opens depends on how far setup has got. With no
+        // API credentials nothing can work, so the credential form comes
+        // first; with credentials but no authorised account, the login screen;
+        // otherwise straight into the streaming flow.
+        let credentials_missing = Platform::ALL
+            .iter()
+            .all(|platform| config.check_credentials(&[*platform]).is_err());
+        let logged_in = saved_logins();
+        let screen = if credentials_missing {
+            Screen::Setup
+        } else if !logged_in.values().any(|yes| *yes) {
+            Screen::Login
+        } else {
+            Screen::Platforms
+        };
+
+        let mut setup_inputs = BTreeMap::new();
+        for field in SetupField::ORDER {
+            let existing = match field {
+                SetupField::TwitchId => config.twitch.client_id.clone(),
+                SetupField::TwitchSecret => config.twitch.client_secret.clone(),
+                SetupField::YouTubeId => config.youtube.client_id.clone(),
+                SetupField::YouTubeSecret => config.youtube.client_secret.clone(),
+            };
+            setup_inputs.insert(field, TextInput::new(existing));
+        }
+
         Self {
             tab: Tab::StreamInfo,
             chat: super::chat_tab::ChatTabState::new(&config),
-            screen: Screen::Platforms,
+            screen,
             config,
+            setup_inputs,
+            setup_cursor: 0,
+            login_selection: Platform::ALL.to_vec(),
+            login_cursor: 0,
+            logged_in,
             selected,
             platform_cursor: 0,
             field_cursor: 0,
@@ -338,8 +443,10 @@ impl App {
         }
     }
 
-    /// Fold a message from the worker into the state.
-    pub fn handle_event(&mut self, event: Event) {
+    /// Fold a message from the worker into the state, returning any follow-up
+    /// work. Finishing a login, for instance, immediately connects — the point
+    /// of logging in was to get to the main view.
+    pub fn handle_event(&mut self, event: Event) -> Vec<Command> {
         match event {
             Event::Log { level, message } => self.push_log(level, message),
 
@@ -366,12 +473,18 @@ impl App {
                     }
                     self.accounts.insert(platform, outcome);
                 }
-                // Move on to the form only if at least one platform worked.
+                // With at least one platform connected, open the main view: it
+                // shows each channel's current state (live or not, viewers,
+                // audience) alongside the stream info that would be applied,
+                // and `e` from there opens the form to edit it. The form used
+                // to open directly, which meant the state of the channel you
+                // were about to overwrite was never shown.
                 if self.accounts.values().any(|r| r.is_ok()) {
-                    self.go_to(Screen::Form);
-                    // The set of connected platforms decides which fields exist,
-                    // so make sure the cursor is not left on a hidden one.
+                    // The set of connected platforms decides which form fields
+                    // exist, so make sure the cursor is not left on a hidden
+                    // one before the form is ever opened.
                     self.ensure_field_visible();
+                    self.go_to(Screen::Dashboard);
                 }
             }
 
@@ -383,7 +496,7 @@ impl App {
                 // Discard an answer to a keystroke that has since been
                 // superseded, otherwise the list flickers back to stale matches.
                 if generation != self.search_generation {
-                    return;
+                    return vec![];
                 }
                 let field = match platform {
                     Platform::Twitch => Field::TwitchCategory,
@@ -424,7 +537,7 @@ impl App {
                 // acting on it would navigate the user away from whatever they
                 // are doing now and overwrite the newer submission's results.
                 if generation != self.go_generation {
-                    return;
+                    return vec![];
                 }
                 self.busy = false;
                 let any_ok = results.iter().any(|r| r.succeeded());
@@ -439,10 +552,46 @@ impl App {
                 }
             }
 
+            Event::LoggedIn { platform, result } => {
+                self.busy = false;
+                match result {
+                    Ok(_) => {
+                        self.logged_in.insert(platform, true);
+                        self.push_log(
+                            LogLevel::Success,
+                            format!("{} authorised.", platform.label()),
+                        );
+                    }
+                    Err(err) => {
+                        self.push_log(
+                            LogLevel::Error,
+                            format!("{} login failed: {err}", platform.label()),
+                        );
+                    }
+                }
+
+                // Once something is authorised, go straight to the main view
+                // rather than making the user re-pick platforms: connecting is
+                // what shows the channel's current state.
+                if self.screen == Screen::Login && self.logged_in.values().any(|yes| *yes) {
+                    let connected: Vec<Platform> = Platform::ALL
+                        .iter()
+                        .copied()
+                        .filter(|p| self.logged_in.get(p).copied().unwrap_or(false))
+                        .collect();
+                    self.selected = connected.clone();
+                    self.ensure_field_visible();
+                    self.go_to(Screen::Platforms);
+                    self.busy = true;
+                    return vec![Command::Connect(connected)];
+                }
+            }
+
             Event::Stats(stats) => {
                 self.stats = stats.into_iter().collect();
             }
         }
+        vec![]
     }
 
     /// Handle a key press, returning any work for the worker to do.
@@ -489,6 +638,8 @@ impl App {
         }
 
         match self.screen {
+            Screen::Setup => self.key_setup(key),
+            Screen::Login => self.key_login(key),
             Screen::Platforms => self.key_platforms(key),
             Screen::Form => self.key_form(key),
             Screen::Dashboard => self.key_dashboard(key),
@@ -754,6 +905,200 @@ impl App {
     /// Fold one event from a chat task into the right chat's state.
     pub fn handle_chat_event(&mut self, key: crate::chat::ChatKey, event: crate::chat::ChatEvent) {
         self.chat.handle_event(key, event);
+    }
+
+    // -- Screen 0a: typing in the API credentials ---------------------------
+
+    /// The focused credential box.
+    pub fn setup_field(&self) -> SetupField {
+        SetupField::ORDER[self.setup_cursor.min(SetupField::ORDER.len() - 1)]
+    }
+
+    /// Whether enough has been typed in for at least one platform to work.
+    ///
+    /// A platform needs *both* halves; one on its own is not a usable
+    /// configuration, so the form does not accept it as one.
+    pub fn setup_is_complete(&self) -> bool {
+        Platform::ALL.iter().any(|platform| {
+            SetupField::ORDER
+                .iter()
+                .filter(|field| field.platform() == *platform)
+                .all(|field| {
+                    self.setup_inputs
+                        .get(field)
+                        .is_some_and(|input| !input.value().trim().is_empty())
+                })
+        })
+    }
+
+    fn key_setup(&mut self, key: KeyEvent) -> Vec<Command> {
+        match key.code {
+            KeyCode::Tab | KeyCode::Down => {
+                self.setup_cursor = (self.setup_cursor + 1) % SetupField::ORDER.len();
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                self.setup_cursor =
+                    (self.setup_cursor + SetupField::ORDER.len() - 1) % SetupField::ORDER.len();
+            }
+            KeyCode::Enter => return self.save_credentials(),
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return self.save_credentials()
+            }
+            KeyCode::Esc => {
+                // Leaving without saving is only allowed when there is
+                // somewhere to go: on a first run there is no configured state
+                // to return to, so Esc quits rather than stranding the user on
+                // an empty picker.
+                if self.config.check_credentials(&[Platform::Twitch]).is_ok()
+                    || self.config.check_credentials(&[Platform::YouTube]).is_ok()
+                {
+                    self.go_to(Screen::Login);
+                } else {
+                    self.should_quit = true;
+                }
+            }
+            KeyCode::Backspace => {
+                let field = self.setup_field();
+                if let Some(input) = self.setup_inputs.get_mut(&field) {
+                    input.backspace();
+                }
+            }
+            KeyCode::Left => {
+                let field = self.setup_field();
+                if let Some(input) = self.setup_inputs.get_mut(&field) {
+                    input.left();
+                }
+            }
+            KeyCode::Right => {
+                let field = self.setup_field();
+                if let Some(input) = self.setup_inputs.get_mut(&field) {
+                    input.right();
+                }
+            }
+            KeyCode::Char(c) if is_typed_text(&key) => {
+                let field = self.setup_field();
+                if let Some(input) = self.setup_inputs.get_mut(&field) {
+                    input.insert(c);
+                }
+            }
+            _ => {}
+        }
+        vec![]
+    }
+
+    /// Copy the typed credentials into the config, save it, and move on.
+    ///
+    /// The saved file keeps its comments (the setup guidance `msm init`
+    /// writes) because saving goes through the same comment-preserving path
+    /// the form's "save defaults" uses. Nothing here ever logs a secret.
+    fn save_credentials(&mut self) -> Vec<Command> {
+        if !self.setup_is_complete() {
+            self.toast = Some(
+                "Fill in both the client id and the client secret for at least one platform."
+                    .to_string(),
+            );
+            return vec![];
+        }
+
+        for field in SetupField::ORDER {
+            let value = self
+                .setup_inputs
+                .get(&field)
+                .map(|input| input.value().trim().to_string())
+                .unwrap_or_default();
+            match field {
+                SetupField::TwitchId => self.config.twitch.client_id = value,
+                SetupField::TwitchSecret => self.config.twitch.client_secret = value,
+                SetupField::YouTubeId => self.config.youtube.client_id = value,
+                SetupField::YouTubeSecret => self.config.youtube.client_secret = value,
+            }
+        }
+
+        match self.config.save() {
+            Ok(()) => {
+                self.push_log(LogLevel::Success, "API credentials saved to config.toml.");
+                self.go_to(Screen::Login);
+                // The worker holds its own copy of the config and would
+                // otherwise keep building backends from the old credentials.
+                vec![Command::ReloadConfig(Box::new(self.config.clone()))]
+            }
+            Err(err) => {
+                self.push_log(
+                    LogLevel::Error,
+                    format!("Could not save the credentials: {err:#}"),
+                );
+                vec![]
+            }
+        }
+    }
+
+    // -- Screen 0b: logging in ----------------------------------------------
+
+    /// The platforms the login screen would authorise right now: the ticked
+    /// ones that actually have credentials configured.
+    pub fn login_targets(&self) -> Vec<Platform> {
+        self.login_selection
+            .iter()
+            .copied()
+            .filter(|platform| self.config.check_credentials(&[*platform]).is_ok())
+            .collect()
+    }
+
+    fn key_login(&mut self, key: KeyEvent) -> Vec<Command> {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.login_cursor = self.login_cursor.saturating_sub(1)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.login_cursor = (self.login_cursor + 1).min(Platform::ALL.len() - 1)
+            }
+            KeyCode::Char(' ') => {
+                let platform = Platform::ALL[self.login_cursor];
+                if let Some(index) = self.login_selection.iter().position(|p| *p == platform) {
+                    self.login_selection.remove(index);
+                } else {
+                    self.login_selection.push(platform);
+                    self.login_selection.sort();
+                }
+            }
+            KeyCode::Char('c') => {
+                // Back to the credential form to correct a typo in an id or
+                // secret without quitting.
+                self.go_to(Screen::Setup);
+            }
+            KeyCode::Char('s') => {
+                // Skip: carry on with whatever logins already exist.
+                if self.logged_in.values().any(|yes| *yes) {
+                    self.go_to(Screen::Platforms);
+                } else {
+                    self.toast =
+                        Some("Nothing is authorised yet, so there is nothing to skip to.".into());
+                }
+            }
+            KeyCode::Enter => {
+                if self.busy {
+                    return vec![];
+                }
+                let targets = self.login_targets();
+                if targets.is_empty() {
+                    self.toast = Some(
+                        "Tick a platform whose credentials are configured (Space), or press c to \
+                         enter credentials."
+                            .to_string(),
+                    );
+                    return vec![];
+                }
+                self.busy = true;
+                self.push_log(
+                    LogLevel::Info,
+                    "Your browser will open — approve the access there, then come back.",
+                );
+                return vec![Command::Login(targets)];
+            }
+            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            _ => {}
+        }
+        vec![]
     }
 
     // -- Screen 1: choosing platforms ---------------------------------------
@@ -1324,7 +1669,12 @@ mod tests {
     }
 
     fn app() -> App {
-        App::new(Config::default())
+        // `App::new` opens on the setup or login screen when nothing is
+        // configured, which is not what most of these tests are about; they
+        // drive the streaming flow, so they start at the platform picker.
+        let mut app = App::new(Config::default());
+        app.screen = Screen::Platforms;
+        app
     }
 
     /// Deliver a go-live answer stamped with the app's current submission
@@ -1958,7 +2308,7 @@ mod tests {
             (Platform::Twitch, Err("expired".into())),
             (Platform::YouTube, Ok("My Channel".into())),
         ]));
-        assert_eq!(app.screen, Screen::Form);
+        assert_eq!(app.screen, Screen::Dashboard);
     }
 
     /// A reconnect answers for the *current* selection only. A success left
@@ -1973,7 +2323,7 @@ mod tests {
             Platform::Twitch,
             Ok("someone".into()),
         )]));
-        assert_eq!(app.screen, Screen::Form);
+        assert_eq!(app.screen, Screen::Dashboard);
 
         // The user goes back, deselects Twitch, selects YouTube — which fails.
         app.go_to(Screen::Platforms);
@@ -2087,6 +2437,108 @@ mod tests {
             }
             other => panic!("the join prompt should still be open, got {other:?}"),
         }
+    }
+
+    /// A fresh install opens on the credential form rather than on a picker
+    /// whose choices cannot work, and typing both halves of one platform is
+    /// enough to save and move on to the login screen.
+    #[test]
+    fn setup_saves_credentials_and_moves_to_the_login_screen() {
+        let scratch = crate::paths::test_support::ScratchConfigDir::new("app-setup-save");
+        let mut app = App::new(Config::default());
+        assert_eq!(app.screen, Screen::Setup);
+
+        // Enter is refused until at least one platform is complete.
+        for c in "abc".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        let commands = app.handle_key(key(KeyCode::Enter));
+        assert!(commands.is_empty());
+        assert_eq!(app.screen, Screen::Setup, "half a platform is not enough");
+
+        app.handle_key(key(KeyCode::Tab));
+        for c in "shh".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        let commands = app.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(app.screen, Screen::Login);
+        assert_eq!(app.config.twitch.client_id, "abc");
+        assert!(
+            matches!(commands.as_slice(), [Command::ReloadConfig(_)],),
+            "the worker must be told about the new credentials"
+        );
+        let saved = std::fs::read_to_string(scratch.path().join("config.toml")).unwrap();
+        assert!(saved.contains("abc"), "the credentials reached the file");
+    }
+
+    /// The login screen only offers platforms whose credentials exist, and
+    /// Enter asks the worker to run the browser flow for them.
+    #[test]
+    fn the_login_screen_authorises_the_configured_platforms() {
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("app-login");
+        let mut config = Config::default();
+        config.twitch.client_id = "id".into();
+        config.twitch.client_secret = "secret".into();
+        let mut app = App::new(config);
+        assert_eq!(app.screen, Screen::Login);
+
+        let commands = app.handle_key(key(KeyCode::Enter));
+
+        // YouTube is ticked by default but has no credentials, so it is left
+        // out rather than sent on a login that could only fail.
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::Login(platforms)] if platforms == &[Platform::Twitch]
+        ));
+        assert!(app.busy);
+    }
+
+    /// Finishing a login goes straight to the main view — which is what the
+    /// login was for — rather than back to a picker.
+    #[test]
+    fn a_finished_login_connects_immediately() {
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("app-login-done");
+        let mut config = Config::default();
+        config.twitch.client_id = "id".into();
+        config.twitch.client_secret = "secret".into();
+        let mut app = App::new(config);
+
+        let commands = app.handle_event(Event::LoggedIn {
+            platform: Platform::Twitch,
+            result: Ok("twitch".into()),
+        });
+
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::Connect(platforms)] if platforms == &[Platform::Twitch]
+        ));
+        assert_eq!(app.selected, vec![Platform::Twitch]);
+    }
+
+    /// A login that fails leaves the user on the login screen with the reason
+    /// in the log, not stuck on a spinner.
+    #[test]
+    fn a_failed_login_stays_put_and_explains() {
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("app-login-fail");
+        let mut config = Config::default();
+        config.twitch.client_id = "id".into();
+        config.twitch.client_secret = "secret".into();
+        let mut app = App::new(config);
+        app.busy = true;
+
+        let commands = app.handle_event(Event::LoggedIn {
+            platform: Platform::Twitch,
+            result: Err("the browser window was closed".into()),
+        });
+
+        assert!(commands.is_empty());
+        assert!(!app.busy);
+        assert_eq!(app.screen, Screen::Login);
+        assert!(app
+            .log
+            .iter()
+            .any(|line| line.message.contains("the browser window was closed")));
     }
 
     /// A stream key can only ever be copied, never shown: this window is

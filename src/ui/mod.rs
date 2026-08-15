@@ -53,6 +53,37 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Hand commands to the worker without ever blocking the interface.
+///
+/// `try_send`, never `send().await`: this loop is the only thing that draws
+/// the screen and reads the keyboard. An awaited send on a full channel would
+/// park it — no redraw, no Ctrl+C — until the single-threaded worker frees a
+/// slot, which behind a stalled network call can take minutes. A full queue
+/// already means the worker is far behind, so dropping the command and saying
+/// so beats freezing the whole interface.
+fn dispatch(
+    app: &mut App,
+    command_tx: &mpsc::Sender<worker::Command>,
+    commands: Vec<worker::Command>,
+) {
+    use tokio::sync::mpsc::error::TrySendError;
+    for command in commands {
+        match command_tx.try_send(command) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                app.push_log(
+                    worker::LogLevel::Error,
+                    "Still busy with earlier requests — that request was ignored, try again in a moment.",
+                );
+            }
+            Err(TrySendError::Closed(_)) => {
+                // The worker has gone; nothing more can happen.
+                app.should_quit = true;
+            }
+        }
+    }
+}
+
 /// Run the interactive application until the user quits.
 pub async fn run(config: Config) -> Result<()> {
     // Channels between the UI and the worker. Commands are bounded because a
@@ -111,31 +142,8 @@ pub async fn run(config: Config) -> Result<()> {
                         // Windows reports both press and release; acting on both
                         // would make every keystroke register twice.
                         if key.kind != KeyEventKind::Release {
-                            for command in app.handle_key(key) {
-                                // `try_send`, never `send().await`: this loop is
-                                // the only thing that draws the screen and reads
-                                // the keyboard. An awaited send on a full channel
-                                // would park it — no redraw, no Ctrl+C — until
-                                // the single-threaded worker frees a slot, which
-                                // behind a stalled network call can take minutes.
-                                // A full queue already means the worker is far
-                                // behind, so dropping the command and saying so
-                                // beats freezing the whole interface.
-                                use tokio::sync::mpsc::error::TrySendError;
-                                match command_tx.try_send(command) {
-                                    Ok(()) => {}
-                                    Err(TrySendError::Full(_)) => {
-                                        app.push_log(
-                                            worker::LogLevel::Error,
-                                            "Still busy with earlier requests — that key press was ignored, try again in a moment.",
-                                        );
-                                    }
-                                    Err(TrySendError::Closed(_)) => {
-                                        // The worker has gone; nothing more can happen.
-                                        app.should_quit = true;
-                                    }
-                                }
-                            }
+                            let commands = app.handle_key(key);
+                            dispatch(&mut app, &command_tx, commands);
                         }
                     }
                     Ok(TermEvent::Resize(_, _)) => {
@@ -152,7 +160,8 @@ pub async fn run(config: Config) -> Result<()> {
 
             // Results coming back from the worker.
             Some(event) = event_rx.recv() => {
-                app.handle_event(event);
+                let commands = app.handle_event(event);
+                dispatch(&mut app, &command_tx, commands);
             }
 
             // Messages and state changes from the chat tasks. After the
