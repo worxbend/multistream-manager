@@ -89,8 +89,9 @@ pub enum ChatFocus {
     /// esc clears it.
     Search(String),
     /// The emoji picker (`ctrl+e`): typing filters the built-in catalog,
-    /// enter inserts the top match into the composer, esc cancels.
-    EmojiPicker(String),
+    /// enter inserts the top match into the composer, esc returns to
+    /// wherever the picker was opened from.
+    EmojiPicker { query: String, from_compose: bool },
     /// A timeout duration prompt (`t` on a selected message): the buffer
     /// holds text like `5m`; enter performs the timeout, esc cancels.
     TimeoutPrompt(String),
@@ -472,23 +473,86 @@ impl ChatTabState {
         self.open.get_mut(&key)
     }
 
-    /// Scroll the focused chat by `delta` messages (positive = further back).
+    /// Scroll the focused chat by `delta` *visible* messages (positive =
+    /// further back). View scrolling drops the selection (and any armed
+    /// confirmation): a selection the view has scrolled away from would let
+    /// moderation act on a message the user cannot see. With filters active
+    /// the walk skips hidden rows, so paging can never strand the view in a
+    /// span with nothing to draw.
     pub fn scroll_by(&mut self, delta: i64) {
+        self.pending_mod = None;
+        let login = self
+            .selected_account(self.focus)
+            .and_then(|account| account.own_target.clone())
+            .unwrap_or_default();
         if let Some(chat) = self.active_chat_mut() {
-            let max = chat.state.messages.len().saturating_sub(1);
-            let next = chat.state.scroll as i64 + delta;
-            chat.state.scroll = next.clamp(0, max as i64) as usize;
+            chat.state.cursor = None;
+            let len = chat.state.messages.len();
+            if len == 0 {
+                return;
+            }
+            let filters = chat.state.filters;
+            let step: i64 = if delta > 0 { 1 } else { -1 };
+            let mut offset = chat.state.scroll as i64;
+            for _ in 0..delta.abs() {
+                let mut next = offset;
+                loop {
+                    next += step;
+                    if next < 0 || next as usize >= len {
+                        next = offset;
+                        break;
+                    }
+                    let index = len - 1 - next as usize;
+                    let visible = chat
+                        .state
+                        .messages
+                        .get(index)
+                        .is_some_and(|msg| filters.matches(msg, &login));
+                    if visible {
+                        break;
+                    }
+                }
+                if next == offset {
+                    break;
+                }
+                offset = next;
+            }
+            chat.state.scroll = offset.clamp(0, (len - 1) as i64) as usize;
         }
     }
 
-    /// Jump to the oldest (`g`) or newest (`G`) message.
+    /// Jump to the oldest (`g`) or newest (`G`) *visible* message.
     pub fn scroll_to_end(&mut self, oldest: bool) {
+        self.pending_mod = None;
+        let login = self
+            .selected_account(self.focus)
+            .and_then(|account| account.own_target.clone())
+            .unwrap_or_default();
         if let Some(chat) = self.active_chat_mut() {
-            chat.state.scroll = if oldest {
-                chat.state.messages.len().saturating_sub(1)
+            chat.state.cursor = None;
+            let len = chat.state.messages.len();
+            if len == 0 {
+                return;
+            }
+            let filters = chat.state.filters;
+            let offsets: Vec<usize> = if oldest {
+                (0..len).rev().collect()
             } else {
-                0
+                (0..len).collect()
             };
+            for offset in offsets {
+                let index = len - 1 - offset;
+                let visible = chat
+                    .state
+                    .messages
+                    .get(index)
+                    .is_some_and(|msg| filters.matches(msg, &login));
+                if visible {
+                    chat.state.scroll = offset;
+                    return;
+                }
+            }
+            chat.state.scroll = 0;
         }
     }
 
@@ -636,11 +700,13 @@ impl ChatTabState {
             }
             return;
         }
-        if let Some(rest) = text
-            .strip_prefix("/chats")
-            .or_else(|| text.strip_prefix("/channels"))
-            .or_else(|| text.strip_prefix("/channel"))
-        {
+        // The command must be the whole word: "/chatstats" is a message, not
+        // a request to join the channel "tats".
+        let command_rest = ["/chats", "/channels", "/channel"]
+            .iter()
+            .find_map(|command| text.strip_prefix(command))
+            .filter(|rest| rest.is_empty() || rest.starts_with(' '));
+        if let Some(rest) = command_rest {
             let target = rest.trim().to_string();
             chat.state.draft.clear();
             if target.is_empty() {
@@ -759,15 +825,22 @@ impl ChatTabState {
             return;
         }
         let needle = query.to_lowercase();
+        let login = self
+            .selected_account(self.focus)
+            .and_then(|account| account.own_target.clone())
+            .unwrap_or_default();
         if let Some(chat) = self.active_chat_mut() {
             let len = chat.state.messages.len();
+            let filters = chat.state.filters;
             for offset in 0..len {
                 let msg = chat
                     .state
                     .messages
                     .get(len - 1 - offset)
                     .expect("offset < len by construction");
-                if search_matches(msg, &needle) {
+                // A filtered-out message must not become the selection: the
+                // jump would land on an invisible row.
+                if search_matches(msg, &needle) && filters.matches(msg, &login) {
                     chat.state.cursor = Some(offset);
                     chat.state.scroll = offset;
                     return;
@@ -789,8 +862,13 @@ impl ChatTabState {
             return;
         }
         let needle = query.to_lowercase();
+        let login = self
+            .selected_account(self.focus)
+            .and_then(|account| account.own_target.clone())
+            .unwrap_or_default();
         if let Some(chat) = self.active_chat_mut() {
             let len = chat.state.messages.len();
+            let filters = chat.state.filters;
             let current = chat.state.cursor.unwrap_or(0);
             let mut offset = current;
             loop {
@@ -810,7 +888,7 @@ impl ChatTabState {
                     .messages
                     .get(len - 1 - offset)
                     .expect("offset < len by loop guard");
-                if search_matches(msg, &needle) {
+                if search_matches(msg, &needle) && filters.matches(msg, &login) {
                     chat.state.cursor = Some(offset);
                     chat.state.scroll = offset;
                     return;
@@ -1414,7 +1492,7 @@ fn draw_composer(
                 Span::raw(buffer.clone()),
                 Span::styled("▏", Style::default().fg(Color::Cyan)),
             ]),
-            ChatFocus::EmojiPicker(buffer) => {
+            ChatFocus::EmojiPicker { query: buffer, .. } => {
                 let mut spans = vec![
                     Span::styled("emoji: ", Style::default().fg(Color::Cyan)),
                     Span::raw(buffer.clone()),
@@ -1979,6 +2057,86 @@ mod tests {
         assert!(!state.render.highlight_emotes);
         state.toggle_full_username();
         assert!(state.render.full_username);
+    }
+
+    /// A command must be the whole word: "/chatstats" is a message.
+    #[tokio::test]
+    async fn a_slash_word_that_merely_starts_with_a_command_is_not_hijacked() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+        let (tx, mut rx) = mpsc::channel(8);
+        state.open.get_mut(&key).unwrap().handle.commands = tx;
+
+        for ch in "/chatstats".chars() {
+            state.compose_push(ch);
+        }
+        state.compose_send();
+        match rx.try_recv().expect("the text must be sent, not hijacked") {
+            ChatCommand::Send { text, .. } => assert_eq!(text, "/chatstats"),
+            other => panic!("expected a send, got {other:?}"),
+        }
+        assert_eq!(state.open.len(), 1, "no bogus channel was joined");
+    }
+
+    /// View scrolling drops the selection so moderation can never act on an
+    /// off-screen row; the armed confirmation goes with it.
+    #[tokio::test]
+    async fn view_scrolling_clears_the_selection_and_armed_confirmation() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+        for i in 0..10 {
+            let mut m = local_notice("x");
+            m.id = format!("m{i}");
+            state.handle_event(key.clone(), ChatEvent::Message(Box::new(m)));
+        }
+        state.select_move(1);
+        state.moderate(ModAction::Delete);
+        assert!(state.pending_mod.is_some());
+
+        state.scroll_by(5);
+        assert!(state.open[&key].state.cursor.is_none(), "selection dropped");
+        assert!(state.pending_mod.is_none(), "confirmation disarmed");
+    }
+
+    /// With a filter active, g jumps to the oldest *visible* message and
+    /// search never selects a hidden row.
+    #[tokio::test]
+    async fn filtered_scrolling_and_search_land_on_visible_rows() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+        // Oldest message is plain chat; only the middle one is a notice.
+        for (i, kind) in [MessageKind::Chat, MessageKind::Notice, MessageKind::Chat]
+            .into_iter()
+            .enumerate()
+        {
+            let mut m = local_notice(&format!("row {i} cake"));
+            m.id = format!("m{i}");
+            m.kind = kind;
+            state.handle_event(key.clone(), ChatEvent::Message(Box::new(m)));
+        }
+        state.toggle_filter('4'); // notices only
+
+        state.scroll_to_end(true);
+        assert_eq!(
+            state.open[&key].state.scroll, 1,
+            "g lands on the oldest visible (the notice), not the hidden oldest"
+        );
+
+        state.search_jump_newest("cake");
+        assert_eq!(
+            state.open[&key].state.cursor,
+            Some(1),
+            "search must not select a filtered-out match"
+        );
     }
 
     /// Scrolling clamps at both ends and g/G jump to them.

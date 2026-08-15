@@ -512,7 +512,10 @@ impl App {
                     // Tab completes a trailing @mention from the roster.
                     KeyCode::Tab => self.chat.complete_mention(),
                     KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.chat.mode = ChatFocus::EmojiPicker(String::new());
+                        self.chat.mode = ChatFocus::EmojiPicker {
+                            query: String::new(),
+                            from_compose: true,
+                        };
                     }
                     KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                         self.chat.compose_push(c)
@@ -591,24 +594,43 @@ impl App {
                 }
                 return vec![];
             }
-            ChatFocus::EmojiPicker(mut buffer) => {
+            ChatFocus::EmojiPicker {
+                query: mut buffer,
+                from_compose,
+            } => {
                 match key.code {
-                    KeyCode::Esc => self.chat.mode = ChatFocus::Compose,
+                    // Esc goes back where the picker came from — a Normal-mode
+                    // user must not land in the composer uninvited.
+                    KeyCode::Esc => {
+                        self.chat.mode = if from_compose {
+                            ChatFocus::Compose
+                        } else {
+                            ChatFocus::Normal
+                        };
+                    }
                     KeyCode::Enter | KeyCode::Tab => {
                         if let Some(entry) =
                             crate::chat::emoji::search(&buffer, 1).into_iter().next()
                         {
                             self.chat.insert_emoji(entry.emoji);
                         }
+                        // Inserting is a composing act: the draft now holds
+                        // the emoji, so the composer is where it can be seen.
                         self.chat.mode = ChatFocus::Compose;
                     }
                     KeyCode::Backspace => {
                         buffer.pop();
-                        self.chat.mode = ChatFocus::EmojiPicker(buffer);
+                        self.chat.mode = ChatFocus::EmojiPicker {
+                            query: buffer,
+                            from_compose,
+                        };
                     }
                     KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                         buffer.push(c);
-                        self.chat.mode = ChatFocus::EmojiPicker(buffer);
+                        self.chat.mode = ChatFocus::EmojiPicker {
+                            query: buffer,
+                            from_compose,
+                        };
                     }
                     _ => {}
                 }
@@ -637,7 +659,14 @@ impl App {
                 KeyCode::Char('b') => self.chat.cycle_badges(),
                 KeyCode::Char('y') => self.chat.toggle_highlight(),
                 KeyCode::Char('n') => self.chat.toggle_full_username(),
-                KeyCode::Char('e') => self.chat.mode = ChatFocus::EmojiPicker(String::new()),
+                // Same guard as entering the composer: with no chat open
+                // there is no draft an emoji could land in.
+                KeyCode::Char('e') if self.chat.active_key(self.chat.focus).is_some() => {
+                    self.chat.mode = ChatFocus::EmojiPicker {
+                        query: String::new(),
+                        from_compose: false,
+                    };
+                }
                 _ => {}
             }
             return vec![];
@@ -691,6 +720,9 @@ impl App {
             // double-press timeout; the prompt itself is the deliberate step.
             KeyCode::Char('t') => {
                 if self.chat.selected_message().is_some() {
+                    // A confirmation armed before the prompt must not survive
+                    // the modal round-trip and fire on one later keypress.
+                    self.chat.pending_mod = None;
                     self.chat.mode = ChatFocus::TimeoutPrompt("5m".into());
                 }
             }
