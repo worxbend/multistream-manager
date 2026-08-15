@@ -157,75 +157,29 @@ impl TaskState {
         });
     }
 
-    /// `/clip` (twi: internal/app/clip.go): Helix Create Clip on the
-    /// authenticated user's *own* stream — the API clips a broadcaster, and
-    /// the token can only clip channels it may; twi clips self, so do we.
-    /// Needs the `clips:edit` scope; logins predating it get told to
-    /// re-login. A 404 means "you are not live", per twi.
-    async fn handle_clip(&self) {
-        if self.account_user_id.is_empty() {
-            self.emit_notice(
-                "clipping needs to know your user id; re-run `msm login twitch` \
-                 to refresh the saved account identity",
-            );
-            return;
-        }
-        let token = match (self.tokens)().await {
-            Ok(token) => token,
-            Err(err) => {
-                self.emit_notice(format!(
-                    "could not get a Twitch token for the clip: {err:#}"
-                ));
-                return;
-            }
-        };
-        let url = format!(
-            "https://api.twitch.tv/helix/clips?broadcaster_id={}",
-            urlencoding::encode(&self.account_user_id)
-        );
-        let sent = self
-            .http
-            .post(&url)
-            .header("Client-Id", &self.client_id)
-            .bearer_auth(&token)
-            .send()
-            .await;
-        let response = match sent {
-            Ok(response) => response,
-            Err(_) => {
-                self.emit_notice("could not reach Twitch to create the clip");
-                return;
-            }
-        };
-        match response.status().as_u16() {
-            200..=299 => {
-                #[derive(serde::Deserialize, Default)]
-                struct ClipData {
-                    #[serde(default)]
-                    data: Vec<ClipEntry>,
-                }
-                #[derive(serde::Deserialize, Default)]
-                struct ClipEntry {
-                    #[serde(default)]
-                    edit_url: String,
-                }
-                let body = response.json::<ClipData>().await.unwrap_or_default();
-                match body.data.first() {
-                    Some(entry) if !entry.edit_url.is_empty() => self.emit_notice(format!(
-                        "clip created — trim and publish it at {}",
-                        entry.edit_url
-                    )),
-                    _ => self.emit_notice("clip created"),
-                }
-            }
-            401 | 403 => self.emit_notice(
-                "your Twitch login is missing the clips:edit permission; \
-                 run `msm login twitch` again to grant it",
-            ),
-            404 => self.emit_notice("clips aren't available: you are not currently live"),
-            status => self.emit_notice(format!("clip failed (HTTP {status})")),
-        }
+    /// `/clip` runs as its own task: the Helix request can take the full
+    /// HTTP timeout, and awaiting it inline would stall the select loop that
+    /// answers PINGs, drains commands and forwards incoming messages — a slow
+    /// clip must not freeze the chat.
+    fn start_clip(&self) {
+        let account_user_id = self.account_user_id.clone();
+        let client_id = self.client_id.clone();
+        let http = self.http.clone();
+        let tokens = self.tokens.clone();
+        let events = self.events.clone();
+        let key = self.key.clone();
+        tokio::spawn(run_clip(
+            account_user_id,
+            client_id,
+            http,
+            tokens,
+            events,
+            key,
+        ));
     }
+
+    // (handle_clip moved to the free fn run_clip below so it can run as its
+    // own task.)
 
     fn emit_notice(&self, text: impl Into<String>) {
         self.emit(ChatEvent::Message(Box::new(notice_row(
@@ -256,7 +210,7 @@ async fn park(commands: &mut mpsc::Receiver<ChatCommand>, state: &TaskState) -> 
                      use the Twitch mod tools for this channel",
                 );
             }
-            Some(ChatCommand::Clip) => state.handle_clip().await,
+            Some(ChatCommand::Clip) => state.start_clip(),
             Some(ChatCommand::Send { .. }) => {
                 state.emit_notice("not connected to Twitch chat; press ctrl+r to reconnect");
             }
@@ -322,7 +276,7 @@ async fn run(mut state: TaskState, mut commands: mpsc::Receiver<ChatCommand>) {
                                  use the Twitch mod tools for this channel",
                             );
                         }
-                        Some(ChatCommand::Clip) => state.handle_clip().await,
+                        Some(ChatCommand::Clip) => state.start_clip(),
                     }
                 }
             }
@@ -399,7 +353,7 @@ async fn run(mut state: TaskState, mut commands: mpsc::Receiver<ChatCommand>) {
                              use the Twitch mod tools for this channel",
                         );
                     }
-                    Some(ChatCommand::Clip) => state.handle_clip().await,
+                    Some(ChatCommand::Clip) => state.start_clip(),
                 },
                 msg = incoming.recv() => match msg {
                     None => {
@@ -604,6 +558,90 @@ pub(crate) fn reconnect_delay(attempt: u32) -> Option<Duration> {
     // any attempt count; the min() below applies the actual 60s ceiling.
     let doubled = RECONNECT_INITIAL * 2u32.pow(attempt.min(6) - 1);
     Some(doubled.min(RECONNECT_MAX_DELAY))
+}
+
+/// `/clip` (twi: internal/app/clip.go): Helix Create Clip on the
+/// authenticated user's *own* stream — the API clips a broadcaster, and the
+/// token can only clip channels it may; twi clips self, so do we. Needs the
+/// `clips:edit` scope; logins predating it get told to re-login. A 404 means
+/// "you are not live", per twi. Runs as its own task (see `start_clip`).
+async fn run_clip(
+    account_user_id: String,
+    client_id: String,
+    http: reqwest::Client,
+    tokens: TokenProvider,
+    events: EventSender,
+    key: ChatKey,
+) {
+    let notice = |text: String| {
+        let _ = events.send((
+            key.clone(),
+            ChatEvent::Message(Box::new(notice_row(String::new(), text, Some(Utc::now())))),
+        ));
+    };
+    if account_user_id.is_empty() {
+        notice(
+            "clipping needs to know your user id; re-run `msm login twitch` \
+             to refresh the saved account identity"
+                .into(),
+        );
+        return;
+    }
+    let token = match tokens().await {
+        Ok(token) => token,
+        Err(err) => {
+            notice(format!(
+                "could not get a Twitch token for the clip: {err:#}"
+            ));
+            return;
+        }
+    };
+    let url = format!(
+        "https://api.twitch.tv/helix/clips?broadcaster_id={}",
+        urlencoding::encode(&account_user_id)
+    );
+    let sent = http
+        .post(&url)
+        .header("Client-Id", &client_id)
+        .bearer_auth(&token)
+        .send()
+        .await;
+    let response = match sent {
+        Ok(response) => response,
+        Err(_) => {
+            notice("could not reach Twitch to create the clip".into());
+            return;
+        }
+    };
+    match response.status().as_u16() {
+        200..=299 => {
+            #[derive(serde::Deserialize, Default)]
+            struct ClipData {
+                #[serde(default)]
+                data: Vec<ClipEntry>,
+            }
+            #[derive(serde::Deserialize, Default)]
+            struct ClipEntry {
+                #[serde(default)]
+                edit_url: String,
+            }
+            let body = response.json::<ClipData>().await.unwrap_or_default();
+            match body.data.first() {
+                Some(entry) if !entry.edit_url.is_empty() => notice(format!(
+                    "clip created — trim and publish it at {}",
+                    entry.edit_url
+                )),
+                _ => notice("clip created".into()),
+            }
+        }
+        401 | 403 => notice(
+            "your Twitch login is missing the clips:edit permission; \
+             run `msm login twitch` again to grant it"
+                .into(),
+        ),
+        404 => notice("clips aren't available: you are not currently live".into()),
+        status => notice(format!("clip failed (HTTP {status})")),
+    }
 }
 
 /// Make text safe to put on the wire as a single IRC message
