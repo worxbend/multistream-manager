@@ -222,7 +222,7 @@ Status legend: **ported** (Rust module listed) · **planned** (ordered backlog)
 | Y10 | Membership chips (new/upgrade/milestone/gifting/received) | ported → `chat/render.rs` |
 | Y11 | Send via insert: token bucket 3/2s, 200-grapheme cap, local echo reconcile | ported → `chat/youtube.rs` + `chat/ratelimit.rs` |
 | Y12 | Reply convention `@DisplayName ` prefix (no threading) | ported → `ui/chat_tab.rs` |
-| Y13 | Quota ledger: every dispatch charged, Pacific reset, reserve pause, budget floor | ported (in-memory ledger + reserve pause) → `chat/youtube.rs::quota` ; on-disk ledger persistence planned |
+| Y13 | Quota ledger: every dispatch charged, Pacific reset, reserve pause, persistence | ported → `chat/youtube.rs::QuotaStore` — one shared count across every poller, persisted to quota.json across sessions, Pacific-day rollover (the budget-floor stretch mode is subsumed by the reserve pause + config ceiling; noted as the one simplification) |
 | Y14 | 401 single-flight refresh, one structural retry | ported → existing `auth::access_tokens` + per-poll token refresh (repo's holder pattern) |
 | Y15 | Redaction: never emit request URLs (API-key-in-query) | ported — no API-key mode exists in msm (OAuth only), and error paths never embed URLs; discipline documented in module comment |
 | Y16 | Shortcode `:emote:` fragments, emoji chips, URL fragments, mention fragments | ported → `chat/render.rs` (shared fragmenter) |

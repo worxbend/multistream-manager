@@ -407,6 +407,83 @@ impl QuotaLedger {
     }
 }
 
+/// The shared, persisted quota estimate.
+///
+/// Every open YouTube chat spends from the *same* project allowance, so the
+/// pollers must share one count — per-poller ledgers would each grant the
+/// full daily budget. And the allowance is daily while sessions are not:
+/// yc persists its ledger across restarts (internal/youtube/quota_store.go),
+/// and so does this — a tiny JSON `{day, used}` file, written after every
+/// charge (polls are seconds apart; the write is trivial) and reloaded on
+/// startup, rolling over with the Pacific day like the in-memory count.
+#[derive(Clone)]
+pub struct QuotaStore {
+    inner: std::sync::Arc<std::sync::Mutex<QuotaLedger>>,
+    path: Option<std::path::PathBuf>,
+}
+
+#[derive(serde::Serialize, Deserialize)]
+struct PersistedQuota {
+    day: i64,
+    used: u64,
+}
+
+impl QuotaStore {
+    /// A store counting against `limit`, persisted at `path` when given.
+    /// A saved count from an earlier session today is resumed; one from a
+    /// previous Pacific day starts fresh.
+    pub fn new(limit: u64, path: Option<std::path::PathBuf>) -> Self {
+        let mut ledger = QuotaLedger::new(limit);
+        if let Some(path) = &path {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                if let Ok(saved) = serde_json::from_str::<PersistedQuota>(&text) {
+                    if saved.day == ledger.day {
+                        ledger.used = saved.used;
+                    }
+                }
+            }
+        }
+        Self {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(ledger)),
+            path,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, QuotaLedger> {
+        // A poisoned mutex means another poller panicked mid-charge; the
+        // count itself is a plain integer and still usable.
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn charge(&self, units: u64) {
+        let snapshot = {
+            let mut ledger = self.lock();
+            ledger.charge(units);
+            PersistedQuota {
+                day: ledger.day,
+                used: ledger.used,
+            }
+        };
+        if let Some(path) = &self.path {
+            // Best-effort: a full disk must not cost the chat session, and
+            // the in-memory count still protects this run.
+            if let Ok(text) = serde_json::to_string(&snapshot) {
+                let _ = std::fs::write(path, text);
+            }
+        }
+    }
+
+    fn remaining(&self) -> u64 {
+        self.lock().remaining()
+    }
+
+    fn pause_reason(&self, reserve_percent: u8) -> Option<String> {
+        self.lock().pause_reason(reserve_percent)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The dedupe ring (yc: poll.go dedupeRing)
 // ---------------------------------------------------------------------------
@@ -1313,9 +1390,8 @@ pub struct SpawnParams {
     pub poll_floor_ms: u64,
     /// Optional ceiling in milliseconds; 0 means none (`poll_interval_ceiling_ms`).
     pub poll_ceiling_ms: u64,
-    /// The project's daily unit allowance (`daily_quota_units`); 0 disables
-    /// the local ledger.
-    pub daily_quota_units: u64,
+    /// The shared quota estimate every YouTube poller charges against.
+    pub quota: QuotaStore,
     /// Stop polling below this remaining percentage so sends keep working
     /// (`quota_reserve_percent`).
     pub quota_reserve_percent: u8,
@@ -1360,7 +1436,7 @@ struct Poller {
     events: EventSender,
     client: reqwest::Client,
     base: String,
-    ledger: QuotaLedger,
+    ledger: QuotaStore,
     seen: DedupeRing,
     bucket: TokenBucket,
     jitter: Lcg,
@@ -1399,7 +1475,7 @@ impl Poller {
             }),
             ceiling: Duration::from_millis(params.poll_ceiling_ms),
             reserve_percent: params.quota_reserve_percent,
-            ledger: QuotaLedger::new(params.daily_quota_units),
+            ledger: params.quota.clone(),
             seen: DedupeRing::new(DEDUPE_RING_SIZE),
             bucket: TokenBucket::youtube(now),
             jitter: Lcg::new(seed),
@@ -2183,6 +2259,33 @@ fn cap_graphemes(value: &str, limit: usize) -> String {
 mod tests {
     use super::*;
 
+    /// The shared store persists across sessions within one Pacific day and
+    /// starts fresh on the next; two clones spend from the same count.
+    #[test]
+    fn the_quota_store_is_shared_and_persisted() {
+        let scratch = crate::paths::test_support::ScratchConfigDir::new("quota-store");
+        let path = scratch.path().join("quota.json");
+
+        let store = QuotaStore::new(100, Some(path.clone()));
+        let clone = store.clone();
+        store.charge(30);
+        clone.charge(20);
+        assert_eq!(store.remaining(), 50, "clones spend from one count");
+
+        // A new store (a new session) resumes today's count from disk.
+        let resumed = QuotaStore::new(100, Some(path.clone()));
+        assert_eq!(resumed.remaining(), 50);
+
+        // A saved count from yesterday is discarded on load.
+        let stale = PersistedQuota {
+            day: pacific_day(Utc::now()) - 1,
+            used: 90,
+        };
+        std::fs::write(&path, serde_json::to_string(&stale).unwrap()).unwrap();
+        let fresh = QuotaStore::new(100, Some(path));
+        assert_eq!(fresh.remaining(), 100, "yesterday's spend is not today's");
+    }
+
     /// The daily budget refills at the Pacific midnight; the ledger must
     /// start over then instead of parking the session forever.
     #[test]
@@ -2227,7 +2330,7 @@ mod tests {
             },
             poll_floor_ms: 0,
             poll_ceiling_ms: 0,
-            daily_quota_units: 0,
+            quota: QuotaStore::new(0, None),
             quota_reserve_percent: 0,
             token: std::sync::Arc::new(|| Box::pin(async { Ok(String::new()) })),
             events: tokio::sync::mpsc::unbounded_channel().0,
@@ -2944,7 +3047,7 @@ mod tests {
             key: key.clone(),
             poll_floor_ms: 1,
             poll_ceiling_ms: 0,
-            daily_quota_units: 10_000,
+            quota: QuotaStore::new(10_000, None),
             quota_reserve_percent: 10,
             token: Arc::new(|| Box::pin(async { Ok("test-token".to_string()) })),
             events: events_tx,

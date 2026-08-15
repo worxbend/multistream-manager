@@ -133,6 +133,9 @@ pub struct ChatTabState {
     pub events_rx: Option<mpsc::UnboundedReceiver<(ChatKey, ChatEvent)>>,
     /// One HTTP client shared by every YouTube poller, for connection reuse.
     http: reqwest::Client,
+    /// The one quota estimate every YouTube poller charges against, persisted
+    /// across sessions (quota.json beside the config).
+    quota: crate::chat::youtube::QuotaStore,
     /// A copy of the config, so composer commands (`/chats <x>`) can open
     /// chats without threading `&Config` through every key path.
     config: Config,
@@ -188,6 +191,12 @@ impl ChatTabState {
             active_chat: BTreeMap::new(),
             events_tx,
             events_rx: Some(events_rx),
+            quota: crate::chat::youtube::QuotaStore::new(
+                config.chat.daily_quota_units,
+                crate::paths::config_dir()
+                    .ok()
+                    .map(|dir| dir.join("quota.json")),
+            ),
             render: RenderOpts::default(),
             notifier: Notifier::new(config.chat.notifications),
             logger: build_logger(config),
@@ -310,7 +319,7 @@ impl ChatTabState {
                 key: key.clone(),
                 poll_floor_ms: config.chat.poll_interval_floor_ms,
                 poll_ceiling_ms: config.chat.poll_interval_ceiling_ms,
-                daily_quota_units: config.chat.daily_quota_units,
+                quota: self.quota.clone(),
                 quota_reserve_percent: config.chat.quota_reserve_percent,
                 token: tokens,
                 events: self.events_tx.clone(),
@@ -1547,6 +1556,7 @@ mod tests {
             events_tx: mpsc::unbounded_channel().0,
             events_rx: None,
             http: reqwest::Client::new(),
+            quota: crate::chat::youtube::QuotaStore::new(0, None),
             config: Config::default(),
             render: RenderOpts::default(),
             notifier: Notifier::new(false),
