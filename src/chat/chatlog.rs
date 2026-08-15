@@ -290,6 +290,20 @@ impl ChatLogger {
             return;
         }
         for path in &owned[..owned.len() - self.max_files] {
+            // Two msm processes can share a log directory, and the other one
+            // may still be appending to its session file. A recently modified
+            // file is presumed live and skipped this round — it becomes
+            // prunable once its writer has been quiet for a while. Retention
+            // running one file over for an hour beats deleting a log someone
+            // is writing.
+            let recently_written = fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age < std::time::Duration::from_secs(3600));
+            if recently_written {
+                continue;
+            }
             let _ = fs::remove_file(path);
         }
     }
@@ -586,14 +600,46 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// A file another live process is still appending to must never be
+    /// pruned: recent modification is treated as a live writer.
+    #[test]
+    fn prune_spares_a_recently_written_file() {
+        let dir = temp_dir("prune-live");
+        let log_dir = dir.join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+        // Three fresh files (as if written moments ago by other processes).
+        for ts in [100, 200, 300] {
+            fs::write(log_dir.join(format!("chat-{ts}.jsonl")), "{}\n").unwrap();
+        }
+        let mut logger = ChatLogger::new(&log_dir, 1024 * 1024, 1);
+        logger.append("c", &chat_message("m1", "hi"));
+        assert_eq!(
+            list_log_files(&log_dir).len(),
+            4,
+            "over-retention is tolerated rather than deleting live files"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn prunes_only_owned_files_down_to_max_files() {
         let dir = temp_dir("prune");
         let log_dir = dir.join("logs");
         fs::create_dir_all(&log_dir).unwrap();
         // Pre-existing owned files (old sessions) and a stranger's file.
+        // Their mtimes are pushed into the past: prune presumes a recently
+        // written file has a live writer and spares it, and these are
+        // supposed to look like long-finished sessions.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
         for ts in [100, 200, 300] {
-            fs::write(log_dir.join(format!("chat-{ts}.jsonl")), "{}\n").unwrap();
+            let path = log_dir.join(format!("chat-{ts}.jsonl"));
+            fs::write(&path, "{}\n").unwrap();
+            fs::File::options()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
         }
         fs::write(log_dir.join("notes.jsonl"), "keep me\n").unwrap();
         fs::write(log_dir.join("chat-precious.txt"), "keep me too\n").unwrap();
