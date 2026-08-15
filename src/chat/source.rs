@@ -35,6 +35,17 @@ pub enum ChatCommand {
     /// Tear the connection down and reconnect now (the user pressed the
     /// reconnect key, or wants to override a quota pause).
     Reconnect,
+    /// Remove one message (YouTube `liveChatMessages.delete`). Twitch chats
+    /// answer with a notice: the reference implementation performs no
+    /// client-side moderation, because Twitch removed moderation commands
+    /// from IRC in 2023.
+    Delete { message_id: String },
+    /// Ban an author permanently (`timeout_secs: None`) or time them out
+    /// (YouTube `liveChatBans.insert`). Same Twitch caveat as `Delete`.
+    Ban {
+        channel_id: String,
+        timeout_secs: Option<u64>,
+    },
 }
 
 /// One running chat: its identity, its command channel, and its task.

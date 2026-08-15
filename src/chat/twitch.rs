@@ -153,6 +153,12 @@ async fn park(commands: &mut mpsc::Receiver<ChatCommand>, state: &TaskState) -> 
         match commands.recv().await {
             None => return ParkOutcome::Shutdown,
             Some(ChatCommand::Reconnect) => return ParkOutcome::Reconnect,
+            Some(ChatCommand::Delete { .. }) | Some(ChatCommand::Ban { .. }) => {
+                state.emit_notice(
+                    "moderation from here works for YouTube chats only; \
+                     use the Twitch mod tools for this channel",
+                );
+            }
             Some(ChatCommand::Send { .. }) => {
                 state.emit_notice("not connected to Twitch chat; press ctrl+r to reconnect");
             }
@@ -210,6 +216,12 @@ async fn run(mut state: TaskState, mut commands: mpsc::Receiver<ChatCommand>) {
                         Some(ChatCommand::Send { .. }) => {
                             state.emit_notice(
                                 "not connected to Twitch chat; reconnecting — try again shortly",
+                            );
+                        }
+                        Some(ChatCommand::Delete { .. }) | Some(ChatCommand::Ban { .. }) => {
+                            state.emit_notice(
+                                "moderation from here works for YouTube chats only; \
+                                 use the Twitch mod tools for this channel",
                             );
                         }
                     }
@@ -277,6 +289,16 @@ async fn run(mut state: TaskState, mut commands: mpsc::Receiver<ChatCommand>) {
                     }
                     Some(ChatCommand::Send { text, reply_to }) => {
                         state.handle_send(&client, connected, text, reply_to).await;
+                    }
+                    Some(ChatCommand::Delete { .. }) | Some(ChatCommand::Ban { .. }) => {
+                        // Deliberate parity with twi, which performs no
+                        // client-side moderation: Twitch removed moderation
+                        // commands from IRC in 2023, and the Helix moderation
+                        // endpoints are outside this chat transport's scope.
+                        state.emit_notice(
+                            "moderation from here works for YouTube chats only; \
+                             use the Twitch mod tools for this channel",
+                        );
                     }
                 },
                 msg = incoming.recv() => match msg {

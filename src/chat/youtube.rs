@@ -73,6 +73,9 @@ const MAX_RESULTS_PER_POLL: u32 = 2000;
 /// channels.list are officially 1 unit each.
 const COST_LIST: u64 = 5;
 const COST_INSERT: u64 = 50;
+/// Estimated cost of `liveChatMessages.delete` / `liveChatBans.insert`.
+/// Unpublished, like the insert cost; the yc reference budgets 50 for each.
+const COST_MODERATE: u64 = 50;
 const COST_VIDEOS_LIST: u64 = 1;
 const COST_CHANNELS_LIST: u64 = 1;
 
@@ -1688,6 +1691,13 @@ impl Poller {
                     None => return Wake::Shutdown,
                     Some(ChatCommand::Reconnect) => return Wake::Reconnect,
                     Some(ChatCommand::Send { text, .. }) => self.handle_send(text).await,
+                    Some(ChatCommand::Delete { message_id }) => {
+                        self.handle_delete(message_id).await
+                    }
+                    Some(ChatCommand::Ban {
+                        channel_id,
+                        timeout_secs,
+                    }) => self.handle_ban(channel_id, timeout_secs).await,
                 },
             }
         }
@@ -1702,6 +1712,11 @@ impl Poller {
                 None => return Wake::Shutdown,
                 Some(ChatCommand::Reconnect) => return Wake::Reconnect,
                 Some(ChatCommand::Send { text, .. }) => self.handle_send(text).await,
+                Some(ChatCommand::Delete { message_id }) => self.handle_delete(message_id).await,
+                Some(ChatCommand::Ban {
+                    channel_id,
+                    timeout_secs,
+                }) => self.handle_ban(channel_id, timeout_secs).await,
             }
         }
     }
@@ -1875,6 +1890,99 @@ impl Poller {
             title: channel.snippet.title.clone(),
             ..ChatTarget::default()
         })
+    }
+
+    /// Remove one message through `liveChatMessages.delete`.
+    ///
+    /// A success is echoed locally as a deletion event — the API does not
+    /// reliably report deletions back through the poll stream (yc invariant:
+    /// the tombstone may never arrive, so the moderator must see the effect
+    /// immediately).
+    async fn handle_delete(&mut self, message_id: String) {
+        if message_id.is_empty() {
+            return;
+        }
+        let token = match self.access_token().await {
+            Ok(token) => token,
+            Err(failure) => {
+                self.emit_local_notice(&failure.detail);
+                return;
+            }
+        };
+        self.ledger.charge(COST_MODERATE);
+
+        let base = &self.base;
+        let url = format!(
+            "{base}/liveChat/messages?id={}",
+            urlencoding::encode(&message_id)
+        );
+        match self.client.delete(&url).bearer_auth(&token).send().await {
+            Err(_) => {
+                self.emit_local_notice("could not reach YouTube to delete; check your connection")
+            }
+            Ok(response) if !response.status().is_success() => {
+                let failure = classify_response(response).await;
+                self.emit_local_notice(&format!("delete failed: {}", failure.detail));
+            }
+            Ok(_) => self.emit(ChatEvent::MessageDeleted { message_id }),
+        }
+    }
+
+    /// Ban an author permanently, or time them out, through
+    /// `liveChatBans.insert`.
+    ///
+    /// A success is echoed locally as a purge for the same reason deletions
+    /// are: the ban event may never come back through the poll stream.
+    async fn handle_ban(&mut self, channel_id: String, timeout_secs: Option<u64>) {
+        if channel_id.is_empty() {
+            return;
+        }
+        let token = match self.access_token().await {
+            Ok(token) => token,
+            Err(failure) => {
+                self.emit_local_notice(&failure.detail);
+                return;
+            }
+        };
+        self.ledger.charge(COST_MODERATE);
+
+        // The API wants the duration as a string, and refuses zero: a
+        // sub-minute timeout is floored to one second, matching yc.
+        let snippet = match timeout_secs {
+            None => serde_json::json!({
+                "liveChatId": self.live_chat_id,
+                "type": "permanent",
+                "bannedUserDetails": { "channelId": channel_id },
+            }),
+            Some(secs) => serde_json::json!({
+                "liveChatId": self.live_chat_id,
+                "type": "temporary",
+                "banDurationSeconds": secs.max(1).to_string(),
+                "bannedUserDetails": { "channelId": channel_id },
+            }),
+        };
+        let base = &self.base;
+        let url = format!("{base}/liveChat/bans?part=snippet");
+        let sent = self
+            .client
+            .post(&url)
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "snippet": snippet }))
+            .send()
+            .await;
+        match sent {
+            Err(_) => {
+                self.emit_local_notice("could not reach YouTube to ban; check your connection")
+            }
+            Ok(response) if !response.status().is_success() => {
+                let failure = classify_response(response).await;
+                self.emit_local_notice(&format!("ban failed: {}", failure.detail));
+            }
+            Ok(_) => self.emit(ChatEvent::UserPurged {
+                author_login: channel_id,
+                timeout_secs,
+            }),
+        }
     }
 
     /// Send one chat message through `liveChatMessages.insert`.

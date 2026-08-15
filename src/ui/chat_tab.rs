@@ -48,6 +48,25 @@ pub struct OpenChat {
     pub title: String,
 }
 
+/// A moderation action awaiting its confirming second key press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModAction {
+    Delete,
+    /// Ten-minute timeout — the same house default a second press confirms.
+    Timeout,
+    Ban,
+}
+
+impl ModAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Delete => "delete this message",
+            Self::Timeout => "time the author out for 10 minutes",
+            Self::Ban => "permanently ban the author",
+        }
+    }
+}
+
 /// What keyboard input currently means inside the Chat tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatFocus {
@@ -67,6 +86,9 @@ pub struct ChatTabState {
     pub mode: ChatFocus,
     /// `space` was pressed and the next key completes the chord.
     pub pending_space: bool,
+    /// A moderation key was pressed once; the same key again confirms, any
+    /// other key cancels. Destructive actions never fire on one keystroke.
+    pub pending_mod: Option<ModAction>,
     /// The accounts available per platform, discovered from the token store
     /// once at startup (primary first, extras after).
     pub accounts: BTreeMap<Platform, Vec<AccountTab>>,
@@ -119,6 +141,7 @@ impl ChatTabState {
             focus: Platform::Twitch,
             mode: ChatFocus::Normal,
             pending_space: false,
+            pending_mod: None,
             accounts,
             selected: BTreeMap::new(),
             split_percent: SPLIT_DEFAULT,
@@ -387,6 +410,96 @@ impl ChatTabState {
             } else {
                 0
             };
+        }
+    }
+
+    /// Move the selection cursor by `delta` messages (positive = older).
+    /// Starting a selection picks the newest visible message; the view
+    /// follows the cursor so it can never leave the screen.
+    pub fn select_move(&mut self, delta: i64) {
+        if let Some(chat) = self.active_chat_mut() {
+            let len = chat.state.messages.len();
+            if len == 0 {
+                return;
+            }
+            let max = (len - 1) as i64;
+            let current = chat.state.cursor.map(|c| c as i64).unwrap_or(-1);
+            let next = (current + delta).clamp(0, max) as usize;
+            chat.state.cursor = Some(next);
+            // The view follows the selection: anchoring the selected row at
+            // the bottom of the pane keeps it on screen at every pane height
+            // without the state layer having to know the height.
+            chat.state.scroll = next;
+        }
+    }
+
+    /// Drop the selection (and any pending moderation confirmation).
+    pub fn clear_selection(&mut self) {
+        self.pending_mod = None;
+        if let Some(chat) = self.active_chat_mut() {
+            chat.state.cursor = None;
+        }
+    }
+
+    /// The selected message of the focused chat, if any.
+    pub fn selected_message(&self) -> Option<&ChatMessage> {
+        let key = self.active_key(self.focus)?;
+        let chat = self.open.get(key)?;
+        let cursor = chat.state.cursor?;
+        let len = chat.state.messages.len();
+        chat.state.messages.get(len.checked_sub(1 + cursor)?)
+    }
+
+    /// Arm a reply to the selected message. The composer opens with the
+    /// context; Twitch threads by id, YouTube gets an `@Name ` prefix at send
+    /// time (its API has no reply field — the prefix IS the convention).
+    pub fn reply_to_selected(&mut self) -> bool {
+        let Some(msg) = self.selected_message() else {
+            return false;
+        };
+        let context = (msg.id.clone(), msg.author.display_name.clone());
+        if context.0.is_empty() {
+            return false;
+        }
+        if let Some(chat) = self.active_chat_mut() {
+            chat.state.reply_to = Some(context);
+            return true;
+        }
+        false
+    }
+
+    /// First press arms a moderation action against the selected message;
+    /// the same key again performs it. Returns the armed action for the
+    /// status line.
+    pub fn moderate(&mut self, action: ModAction) {
+        if self.pending_mod != Some(action) {
+            // Arming (or switching to a different action) never acts.
+            self.pending_mod = self.selected_message().map(|_| action);
+            return;
+        }
+        self.pending_mod = None;
+        let Some(msg) = self.selected_message() else {
+            return;
+        };
+        let command = match action {
+            ModAction::Delete => ChatCommand::Delete {
+                message_id: msg.id.clone(),
+            },
+            ModAction::Timeout => ChatCommand::Ban {
+                channel_id: msg.author.id.clone(),
+                timeout_secs: Some(600),
+            },
+            ModAction::Ban => ChatCommand::Ban {
+                channel_id: msg.author.id.clone(),
+                timeout_secs: None,
+            },
+        };
+        if let Some(chat) = self.active_chat_mut() {
+            if chat.handle.commands.try_send(command).is_err() {
+                chat.state.apply(ChatEvent::Message(Box::new(local_notice(
+                    "the chat task is busy — press the key again to retry",
+                ))));
+            }
         }
     }
 
@@ -692,6 +805,10 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: 
     // wrapping) until the pane is full, then flip the order — the cheap way
     // to keep the newest rows glued to the bottom whatever each message's
     // wrapped height is.
+    let selected_index = chat
+        .state
+        .cursor
+        .and_then(|cursor| len.checked_sub(1 + cursor));
     let mut lines: Vec<Line> = Vec::new();
     for index in (0..newest_visible).rev() {
         if lines.len() >= height {
@@ -701,6 +818,13 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: 
             break;
         };
         let mut rendered = render_message(msg, area.width, &opts);
+        if Some(index) == selected_index {
+            // The selection is a background wash over the whole message so
+            // reply/moderation targets are unmistakable.
+            for line in &mut rendered {
+                line.style = line.style.bg(Color::Rgb(45, 55, 75));
+            }
+        }
         rendered.reverse();
         lines.extend(rendered);
     }
@@ -725,21 +849,38 @@ fn draw_composer(
                 Span::styled("▏", Style::default().fg(Color::Cyan)),
             ]),
             ChatFocus::Compose => {
-                let draft = state
+                let chat = state
                     .active_key(platform)
-                    .and_then(|key| state.open.get(key))
-                    .map(|chat| chat.state.draft.clone())
-                    .unwrap_or_default();
-                Line::from(vec![
-                    Span::styled("> ", Style::default().fg(Color::Cyan)),
-                    Span::raw(draft),
-                    Span::styled("▏", Style::default().fg(Color::Cyan)),
-                ])
+                    .and_then(|key| state.open.get(key));
+                let draft = chat.map(|c| c.state.draft.clone()).unwrap_or_default();
+                let mut spans = Vec::new();
+                if let Some((_, name)) = chat.and_then(|c| c.state.reply_to.as_ref()) {
+                    spans.push(Span::styled(
+                        format!("↳ {name} "),
+                        Style::default().fg(Color::Magenta),
+                    ));
+                }
+                spans.push(Span::styled("> ", Style::default().fg(Color::Cyan)));
+                spans.push(Span::raw(draft));
+                spans.push(Span::styled("▏", Style::default().fg(Color::Cyan)));
+                Line::from(spans)
             }
-            ChatFocus::Normal => Line::from(Span::styled(
-                "i compose · j/k scroll · [ ] chats · { } accounts · space-c join · space-x close · ctrl+r reconnect",
-                Style::default().fg(Color::DarkGray),
-            )),
+            ChatFocus::Normal => {
+                if let Some(action) = state.pending_mod {
+                    Line::from(Span::styled(
+                        format!(
+                            "press the same key again to {} — any other key cancels",
+                            action.label()
+                        ),
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ))
+                } else {
+                    Line::from(Span::styled(
+                        "i compose · j/k select · r reply · d/t/b moderate · [ ] chats · { } accounts · space-c join · ctrl+r reconnect",
+                        Style::default().fg(Color::DarkGray),
+                    ))
+                }
+            }
         }
     } else {
         Line::from(Span::styled(
@@ -801,6 +942,7 @@ mod tests {
             focus: Platform::Twitch,
             mode: ChatFocus::Normal,
             pending_space: false,
+            pending_mod: None,
             accounts: BTreeMap::new(),
             selected: BTreeMap::new(),
             split_percent: SPLIT_DEFAULT,
@@ -965,6 +1107,92 @@ mod tests {
             state.open[&key].state.connection.0,
             ConnectionStatus::Connected
         );
+    }
+
+    /// Selection follows vim keys, the view follows the selection, and
+    /// reply picks up the selected message's id and author.
+    #[tokio::test]
+    async fn selection_moves_and_arms_replies() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+        for i in 0..3 {
+            let mut m = local_notice("hello");
+            m.id = format!("m{i}");
+            m.author.display_name = format!("author{i}");
+            state.handle_event(key.clone(), ChatEvent::Message(Box::new(m)));
+        }
+
+        state.select_move(1); // newest first
+        state.select_move(1); // one older
+        assert_eq!(state.open[&key].state.cursor, Some(1));
+        assert_eq!(state.open[&key].state.scroll, 1, "the view follows");
+        assert_eq!(state.selected_message().unwrap().id, "m1");
+
+        assert!(state.reply_to_selected());
+        assert_eq!(
+            state.open[&key].state.reply_to.as_ref().unwrap().1,
+            "author1"
+        );
+
+        state.clear_selection();
+        assert!(state.open[&key].state.cursor.is_none());
+    }
+
+    /// Moderation never fires on one keystroke: the first press arms, the
+    /// same key confirms, and the confirmed command carries the selected
+    /// message's identifiers.
+    #[tokio::test]
+    async fn moderation_requires_a_confirming_second_press() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+
+        // Swap the spawned task's channel for a captive one so the test can
+        // see exactly which commands leave the UI.
+        let (tx, mut rx) = mpsc::channel(8);
+        state.open.get_mut(&key).unwrap().handle.commands = tx;
+
+        let mut m = local_notice("bad message");
+        m.id = "target".into();
+        m.author.id = "UCbad".into();
+        state.handle_event(key.clone(), ChatEvent::Message(Box::new(m)));
+        state.select_move(1);
+
+        state.moderate(ModAction::Delete);
+        assert_eq!(
+            state.pending_mod,
+            Some(ModAction::Delete),
+            "armed, not fired"
+        );
+        assert!(rx.try_recv().is_err(), "nothing sent on the first press");
+
+        state.moderate(ModAction::Delete);
+        assert!(state.pending_mod.is_none());
+        match rx.try_recv().expect("the confirmed action must be sent") {
+            ChatCommand::Delete { message_id } => assert_eq!(message_id, "target"),
+            other => panic!("expected a delete, got {other:?}"),
+        }
+
+        // A timeout carries the author's channel id and the 10-minute house
+        // default.
+        state.select_move(1);
+        state.moderate(ModAction::Timeout);
+        state.moderate(ModAction::Timeout);
+        match rx.try_recv().expect("the timeout must be sent") {
+            ChatCommand::Ban {
+                channel_id,
+                timeout_secs,
+            } => {
+                assert_eq!(channel_id, "UCbad");
+                assert_eq!(timeout_secs, Some(600));
+            }
+            other => panic!("expected a ban, got {other:?}"),
+        }
     }
 
     /// Scrolling clamps at both ends and g/G jump to them.

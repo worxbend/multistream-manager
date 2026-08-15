@@ -39,6 +39,10 @@ pub struct ChatState {
     /// The message being replied to: (platform message id, author display
     /// name). Twitch threads by id; YouTube prefixes `@Name ` in the UI.
     pub reply_to: Option<(String, String)>,
+    /// The selected message, as an offset from the bottom (like `scroll`).
+    /// `None` = nothing selected. Selection is what reply and moderation act
+    /// on.
+    pub cursor: Option<usize>,
     /// Whether this chat is currently on screen. While it is, nothing counts
     /// as unread.
     viewed: bool,
@@ -53,6 +57,7 @@ impl ChatState {
             connection: (ConnectionStatus::Connecting, String::new()),
             draft: String::new(),
             reply_to: None,
+            cursor: None,
             viewed: false,
         }
     }

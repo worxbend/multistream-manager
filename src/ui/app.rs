@@ -551,6 +551,14 @@ impl App {
             return vec![];
         }
 
+        // An armed moderation confirmation survives only its own key: any
+        // other key cancels it instead of acting while a destructive prompt
+        // is on screen.
+        if self.chat.pending_mod.is_some() && !matches!(key.code, KeyCode::Char('d' | 't' | 'b')) {
+            self.chat.pending_mod = None;
+            return vec![];
+        }
+
         match key.code {
             KeyCode::Char(' ') => self.chat.pending_space = true,
             KeyCode::Char('h')
@@ -563,13 +571,25 @@ impl App {
                     self.chat.mode = ChatFocus::Compose;
                 }
             }
-            // k moves back in history (bigger offset from the bottom), j back
-            // toward the tail — the vim direction sense over a bottom-anchored
-            // log.
-            KeyCode::Char('k') | KeyCode::Up => self.chat.scroll_by(1),
-            KeyCode::Char('j') | KeyCode::Down => self.chat.scroll_by(-1),
+            // k moves the selection back in history (bigger offset from the
+            // bottom), j toward the tail — the vim direction sense over a
+            // bottom-anchored log. The view follows the selection.
+            KeyCode::Char('k') | KeyCode::Up => self.chat.select_move(1),
+            KeyCode::Char('j') | KeyCode::Down => self.chat.select_move(-1),
             KeyCode::PageUp => self.chat.scroll_by(10),
             KeyCode::PageDown => self.chat.scroll_by(-10),
+            KeyCode::Esc => self.chat.clear_selection(),
+            KeyCode::Char('r') => {
+                if self.chat.reply_to_selected() {
+                    self.chat.mode = ChatFocus::Compose;
+                }
+            }
+            // Moderation: first press arms, the same key confirms, anything
+            // else cancels (handled by moderate() itself). YouTube only —
+            // Twitch chats answer with an explanatory notice from the task.
+            KeyCode::Char('d') => self.chat.moderate(super::chat_tab::ModAction::Delete),
+            KeyCode::Char('t') => self.chat.moderate(super::chat_tab::ModAction::Timeout),
+            KeyCode::Char('b') => self.chat.moderate(super::chat_tab::ModAction::Ban),
             KeyCode::Char('g') => self.chat.scroll_to_end(true),
             KeyCode::Char('G') => self.chat.scroll_to_end(false),
             KeyCode::Char(']') => self.chat.cycle_chat(true),
