@@ -170,6 +170,67 @@ impl std::fmt::Display for QuotaExceeded {
 
 impl std::error::Error for QuotaExceeded {}
 
+/// What the API said when it refused a request: the HTTP status code and
+/// Google's own machine-readable `reason` string (an empty string when the
+/// reply carried none).
+///
+/// It is attached to every error [`check`] produces so callers can react to
+/// *why* a call failed without matching on the human-facing message text,
+/// which is written for people and may change at any time.
+#[derive(Debug)]
+struct ApiError {
+    status: u16,
+    reason: String,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP {} ({})", self.status, self.reason)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+/// Does this failure mean the stream we tried to bind can never be bound to
+/// this broadcast, no matter how often we retry?
+///
+/// Only then is it right to abandon the stream key the user is reusing and
+/// mint a fresh one. A timeout, a rate limit, an expired login or a YouTube
+/// server error are all temporary: the pinned key is still perfectly good, and
+/// silently replacing it would change the key in the user's OBS setup for no
+/// reason at all.
+fn means_stream_cannot_be_bound(status: u16, reason: &str) -> bool {
+    // Reasons Google returns when the stream object itself is the problem.
+    const UNBINDABLE_REASONS: &[&str] = &[
+        "liveStreamNotFound",
+        "invalidStreamId",
+        "streamNotReusable",
+        "errorStreamNotReusable",
+        "incompatibleStream",
+        "invalidStream",
+    ];
+    if UNBINDABLE_REASONS.contains(&reason) {
+        return true;
+    }
+    // Quota exhaustion arrives as a 403 and must never rotate the key.
+    if matches!(reason, "quotaExceeded" | "dailyLimitExceeded") {
+        return false;
+    }
+    // With no recognised reason, only "the stream is gone" (404) and "this
+    // request can never be accepted as written" (400) are permanent. 401, 403,
+    // 429 and every 5xx can succeed on a later attempt.
+    matches!(status, 400 | 404)
+}
+
+/// Reads the classification above straight off an error produced by [`check`].
+///
+/// An error with no [`ApiError`] in its chain never reached the API at all —
+/// a DNS failure or a dropped connection, say — which is transient by nature.
+fn is_unbindable_stream_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<ApiError>()
+        .is_some_and(|api| means_stream_cannot_be_bound(api.status, &api.reason))
+}
+
 impl YouTubeBackend {
     pub fn new(
         http: reqwest::Client,
@@ -615,12 +676,24 @@ impl Backend for YouTubeBackend {
 
             // 3. Join them.
             //
-            // If the reused stream cannot be bound — the usual reason is that it
-            // belongs to a single past broadcast and is not reusable — fall back
-            // to a fresh one rather than failing the go-live outright. The user
-            // is told, because a new key is something they must act on.
+            // If the reused stream can never be bound — the usual reason is that
+            // it belongs to a single past broadcast and is not reusable — fall
+            // back to a fresh one rather than failing the go-live outright. The
+            // user is told, because a new key is something they must act on.
+            //
+            // A transient failure (timeout, rate limit, YouTube 5xx) is a
+            // different thing entirely and is reported as-is: minting a new key
+            // there would abandon the key the user pinned in their config and
+            // silently break their OBS setup for a problem that fixes itself.
             let stream = match self.bind(&broadcast.id, &stream.id).await {
                 Ok(()) => stream,
+                Err(err) if !is_unbindable_stream_error(&err) => {
+                    return Err(err.context(
+                        "the broadcast was created but could not be joined to your existing \
+                         stream key. Your stream key was left untouched — try going live \
+                         again in a moment.",
+                    ));
+                }
                 Err(err) => {
                     tracing::warn!(?err, "could not bind the reused stream; creating a new one");
                     notes.pop();
@@ -982,7 +1055,11 @@ async fn check(response: reqwest::Response, action: &str) -> Result<reqwest::Res
     if matches!(reason.as_str(), "quotaExceeded" | "dailyLimitExceeded") {
         return Err(anyhow::Error::new(QuotaExceeded).context(full_message));
     }
-    bail!("{full_message}")
+    Err(anyhow::Error::new(ApiError {
+        status: status.as_u16(),
+        reason,
+    })
+    .context(full_message))
 }
 
 // ---------------------------------------------------------------------------
@@ -1736,6 +1813,88 @@ mod tests {
             backend.quota.next_pause,
             QUOTA_PAUSE_INITIAL * 4,
             "the pause is not escalating, so polling would hammer the API forever"
+        );
+    }
+
+    /// A transient bind failure used to fall through to `create_stream`, which
+    /// minted a brand new stream key and silently abandoned the one the user
+    /// had pinned with `stream_id` — breaking their OBS setup because YouTube
+    /// happened to answer one request with a 500 or a rate limit.
+    #[test]
+    fn transient_bind_failures_do_not_count_as_an_unbindable_stream() {
+        for (status, reason) in [
+            (500, ""),
+            (503, ""),
+            (429, "rateLimitExceeded"),
+            (401, "authError"),
+            (403, "quotaExceeded"),
+        ] {
+            assert!(
+                !means_stream_cannot_be_bound(status, reason),
+                "HTTP {status}/{reason:?} must not rotate the user's stream key"
+            );
+        }
+    }
+
+    /// The case the fallback exists for: YouTube says this stream object itself
+    /// cannot be bound, so retrying with the same key can never work.
+    #[test]
+    fn a_permanently_unbindable_stream_still_falls_back_to_a_new_key() {
+        for (status, reason) in [
+            (404, "liveStreamNotFound"),
+            (400, "invalidStreamId"),
+            (403, "errorStreamNotReusable"),
+            (400, ""),
+            (404, ""),
+        ] {
+            assert!(
+                means_stream_cannot_be_bound(status, reason),
+                "HTTP {status}/{reason:?} means the stream can never be bound"
+            );
+        }
+    }
+
+    /// A failure that never reached YouTube (DNS, dropped connection) carries
+    /// no API classification at all, and must be treated as temporary.
+    #[test]
+    fn an_error_that_never_reached_the_api_is_transient() {
+        assert!(!is_unbindable_stream_error(&anyhow::anyhow!(
+            "connection reset by peer"
+        )));
+    }
+
+    /// End to end through `check`: a 503 from the real bind call must arrive at
+    /// `go_live` still recognisable as temporary, which only works if `check`
+    /// attaches the classification to the error it returns.
+    #[tokio::test]
+    async fn a_bind_that_answers_503_produces_a_transient_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buffer = [0u8; 2048];
+                let _ = socket.read(&mut buffer).await;
+                let body = r#"{"error":{"message":"backend error"}}"#;
+                let response = format!(
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+
+        let mut backend =
+            YouTubeBackend::new(reqwest::Client::new(), "token".into(), true, String::new());
+        backend.base = base;
+
+        let err = backend
+            .bind("broadcast", "pinned-stream")
+            .await
+            .expect_err("a 503 is an error");
+        assert!(
+            !is_unbindable_stream_error(&err),
+            "a 503 must leave the pinned stream key alone"
         );
     }
 }

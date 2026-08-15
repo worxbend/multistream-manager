@@ -38,7 +38,10 @@ pub struct TwitchBackend {
     /// Both are re-read only every [`AUDIENCE_REFRESH`]; see that constant for
     /// why. `None` inside the tuple means the platform declined to answer — a
     /// non-affiliate channel gets a 403 for subscriptions — and that is cached
-    /// too, so polls stop re-asking a question already refused.
+    /// too, so polls stop re-asking a question already refused. A request that
+    /// merely failed (timeout, 429, expired token) is never written here, so
+    /// the next poll tries again instead of showing a blank row for the whole
+    /// refresh window.
     audience_cache: Option<(Instant, Option<u64>, Option<u64>)>,
 }
 
@@ -153,31 +156,25 @@ impl TwitchBackend {
     }
 
     /// Total follower count. Best-effort, same reasoning as the stream key.
-    async fn follower_count(&self) -> Option<u64> {
-        let id = self.broadcaster_id().ok()?;
+    async fn follower_count(&self) -> AudienceProbe {
+        let Ok(id) = self.broadcaster_id() else {
+            return AudienceProbe::Refused;
+        };
         // `first=1` because we only want the `total` field, not the actual list.
         let base = &self.base;
         let url = format!("{base}/channels/followers?broadcaster_id={id}&first=1");
-        let response = self.request(reqwest::Method::GET, &url).send().await.ok()?;
-        if !response.status().is_success() {
-            return None;
-        }
-        let body: TotalList = response.json().await.ok()?;
-        body.total
+        probe(self.request(reqwest::Method::GET, &url).send().await).await
     }
 
     /// Total subscriber count. Non-affiliate channels get a 403 here, which is
     /// expected and simply means the row is omitted from the stats panel.
-    async fn subscriber_count(&self) -> Option<u64> {
-        let id = self.broadcaster_id().ok()?;
+    async fn subscriber_count(&self) -> AudienceProbe {
+        let Ok(id) = self.broadcaster_id() else {
+            return AudienceProbe::Refused;
+        };
         let base = &self.base;
         let url = format!("{base}/subscriptions?broadcaster_id={id}&first=1");
-        let response = self.request(reqwest::Method::GET, &url).send().await.ok()?;
-        if !response.status().is_success() {
-            return None;
-        }
-        let body: TotalList = response.json().await.ok()?;
-        body.total
+        probe(self.request(reqwest::Method::GET, &url).send().await).await
     }
 
     /// Apply the plan to the channel.
@@ -309,7 +306,14 @@ impl Backend for TwitchBackend {
                 None => {
                     let (body, followers, subs) =
                         tokio::join!(live, self.follower_count(), self.subscriber_count());
-                    self.audience_cache = Some((Instant::now(), followers, subs));
+                    let previous = self
+                        .audience_cache
+                        .as_ref()
+                        .map(|(_, followers, subs)| (*followers, *subs));
+                    let (followers, subs, settled) = resolve_audience(previous, followers, subs);
+                    if settled {
+                        self.audience_cache = Some((Instant::now(), followers, subs));
+                    }
                     (body, (followers, subs))
                 }
             };
@@ -359,6 +363,81 @@ impl Backend for TwitchBackend {
     fn stream_key(&mut self) -> BoxFuture<'_, Result<Option<String>>> {
         Box::pin(async move { Ok(self.fetch_stream_key().await) })
     }
+}
+
+/// What one follower/subscriber lookup came back with.
+///
+/// The distinction matters because the answer is cached for a while: a refusal
+/// is worth remembering ("stop asking"), a temporary failure is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudienceProbe {
+    /// Twitch answered with a number.
+    Count(u64),
+    /// Twitch answered, and the answer is "you may not have this" — a
+    /// non-affiliate channel asking for its subscriber total gets a 403. That
+    /// will not change between two polls, so it is safe to cache as "no row".
+    Refused,
+    /// The question never got a usable answer: a timeout, a dropped
+    /// connection, a 429 rate limit, an expired token or a Twitch 5xx. Nothing
+    /// was learned, so nothing should be written to the cache.
+    Unavailable,
+}
+
+/// Classify one lookup's outcome, reading the body only when it is worth it.
+async fn probe(sent: reqwest::Result<reqwest::Response>) -> AudienceProbe {
+    let Ok(response) = sent else {
+        return AudienceProbe::Unavailable;
+    };
+    let status = response.status();
+    if !status.is_success() {
+        // 401 means the token needs refreshing, 429 means slow down, 5xx means
+        // Twitch is having a moment — all of them succeed again later. Only a
+        // deliberate "no" (403, and 404 for a channel Twitch will not describe)
+        // is a settled answer.
+        return match status.as_u16() {
+            403 | 404 => AudienceProbe::Refused,
+            _ => AudienceProbe::Unavailable,
+        };
+    }
+    match response.json::<TotalList>().await {
+        Ok(body) => match body.total {
+            Some(total) => AudienceProbe::Count(total),
+            // A 200 with no `total` is Twitch saying there is nothing to show.
+            None => AudienceProbe::Refused,
+        },
+        Err(_) => AudienceProbe::Unavailable,
+    }
+}
+
+/// Work out what to display and whether the result may be cached.
+///
+/// `previous` is whatever the cache already held (the values only — its age no
+/// longer matters, since we are past the refresh window). The returned flag is
+/// true only when both lookups produced a settled answer; if either was merely
+/// unavailable the caller must leave the cache alone so the next poll retries
+/// instead of showing a blank row for the whole refresh window.
+fn resolve_audience(
+    previous: Option<(Option<u64>, Option<u64>)>,
+    followers: AudienceProbe,
+    subs: AudienceProbe,
+) -> (Option<u64>, Option<u64>, bool) {
+    fn value(probe: AudienceProbe, previous: Option<u64>) -> Option<u64> {
+        match probe {
+            AudienceProbe::Count(n) => Some(n),
+            AudienceProbe::Refused => None,
+            // Keep showing the last known number rather than blanking the row
+            // over one failed request.
+            AudienceProbe::Unavailable => previous,
+        }
+    }
+
+    let settled = !matches!(followers, AudienceProbe::Unavailable)
+        && !matches!(subs, AudienceProbe::Unavailable);
+    (
+        value(followers, previous.and_then(|(f, _)| f)),
+        value(subs, previous.and_then(|(_, s)| s)),
+        settled,
+    )
 }
 
 /// Turn a non-2xx response into an error carrying Twitch's own explanation.
@@ -658,5 +737,94 @@ mod tests {
         // The live/viewer status is genuinely time-sensitive and is still asked
         // for on every poll.
         assert_eq!(paths.iter().filter(|p| p.ends_with("/streams")).count(), 5);
+    }
+
+    /// Only a deliberate refusal deserves to be remembered. A timeout, a 429 or
+    /// an expired token used to be cached as "no followers, no subscribers" for
+    /// the entire refresh window, so one unlucky request blanked both rows for
+    /// minutes even though the very next call would have worked.
+    #[test]
+    fn a_transient_lookup_failure_is_not_cached() {
+        let (followers, subs, settled) = resolve_audience(
+            Some((Some(500), Some(20))),
+            AudienceProbe::Unavailable,
+            AudienceProbe::Count(21),
+        );
+        assert_eq!(followers, Some(500), "the last known total must survive");
+        assert_eq!(subs, Some(21));
+        assert!(!settled, "an unavailable lookup must not refresh the cache");
+    }
+
+    /// With nothing cached yet there is no previous value to fall back on, but
+    /// the failure still must not be written down as an answer.
+    #[test]
+    fn a_transient_failure_with_no_previous_value_leaves_the_cache_empty() {
+        let (followers, subs, settled) =
+            resolve_audience(None, AudienceProbe::Unavailable, AudienceProbe::Unavailable);
+        assert_eq!((followers, subs), (None, None));
+        assert!(!settled);
+    }
+
+    /// The case the negative cache exists for: a non-affiliate channel is told
+    /// "no" for subscriptions, and asking again in 15 seconds cannot change it.
+    #[test]
+    fn a_deliberate_refusal_is_cached_as_no_answer() {
+        let (followers, subs, settled) = resolve_audience(
+            Some((Some(500), Some(20))),
+            AudienceProbe::Count(501),
+            AudienceProbe::Refused,
+        );
+        assert_eq!(followers, Some(501));
+        assert_eq!(subs, None, "a refusal must clear the stale subscriber total");
+        assert!(settled);
+    }
+
+    /// The status code decides which of the two kinds of failure this is.
+    #[tokio::test]
+    async fn status_codes_are_split_into_refusals_and_temporary_failures() {
+        for status in [403u16, 404] {
+            let backend = backend_for(helix_answering(status, "{}").await);
+            assert_eq!(
+                backend.follower_count().await,
+                AudienceProbe::Refused,
+                "HTTP {status} is a settled no"
+            );
+        }
+        for status in [401u16, 429, 500, 503] {
+            let backend = backend_for(helix_answering(status, "{}").await);
+            assert_eq!(
+                backend.follower_count().await,
+                AudienceProbe::Unavailable,
+                "HTTP {status} can succeed on the next poll"
+            );
+        }
+        let backend = backend_for(helix_answering(200, r#"{"data":[],"total":9}"#).await);
+        assert_eq!(backend.follower_count().await, AudienceProbe::Count(9));
+    }
+
+    /// A Helix stand-in that answers every request with one fixed status and
+    /// body, for exercising the failure classification.
+    async fn helix_answering(status: u16, body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 2048];
+                    let _ = socket.read(&mut buffer).await;
+                    let response = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+        base
     }
 }
