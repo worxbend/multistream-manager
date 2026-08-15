@@ -62,6 +62,18 @@ rand = "0.8"
 # Percent-encoding for building OAuth URLs and API query strings safely.
 urlencoding = "2"
 
+# Twitch IRC chat transport for the Chat tab. Handles the TLS connection,
+# capability negotiation, IRCv3 tag parsing, reconnection and join/send rate
+# limiting — the same division of labor as the reference implementation
+# (`twi`), which sits on go-twitch-irc. rustls to match reqwest.
+twitch-irc = { version = "6", default-features = false, features = ["transport-tcp-rustls-webpki-roots"] }
+
+# Grapheme-cluster segmentation and terminal cell widths, for chat text.
+# Truncating a message by bytes or chars can split an emoji in half; both
+# reference implementations cut on grapheme boundaries and so does this port.
+unicode-segmentation = "1"
+unicode-width = "0.2"
+
 # Cross-process advisory file locking, used to serialise read-modify-write
 # cycles on tokens.json so two concurrent msm processes cannot erase each
 # other's freshly saved logins. (std gained File::lock in Rust 1.89, one

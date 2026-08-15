@@ -94,7 +94,11 @@ pub async fn login(config: &Config, platform: Platform, add: bool) -> Result<Str
         }
         _ => key,
     };
-    store.set_keyed(final_key.clone(), tokens);
+    if final_key == platform.slug() {
+        store.set(platform, tokens);
+    } else {
+        store.set_keyed(final_key.clone(), tokens);
+    }
     save_store(store).await?;
     Ok(final_key)
 }
@@ -287,6 +291,28 @@ pub async fn access_tokens(
     results
 }
 
+/// A usable access token for one stored account key, renewing it if needed.
+///
+/// Account keys are `twitch` / `youtube` for the primary logins and
+/// `twitch:<login>` / `youtube:<channel-id>` for extra chat accounts. This is
+/// what the chat adapters call; the engine's batch path stays on
+/// [`access_tokens`].
+pub async fn access_token_for_key(config: &Config, key: &str) -> Result<String> {
+    let slug = key.split(':').next().unwrap_or(key);
+    let platform: Platform = slug
+        .parse()
+        .map_err(|err: String| anyhow::anyhow!(err))
+        .with_context(|| format!("account key {key:?} does not name a platform"))?;
+
+    let _lock = lock_store().await?;
+    let mut store = load_store().await?;
+    let (token, renewed) = keyed_token_from(config, platform, key, &mut store).await?;
+    if renewed {
+        save_store(store).await?;
+    }
+    Ok(token)
+}
+
 /// The token for one platform, renewing it in `store` if it has aged out.
 ///
 /// Returns the token and whether `store` was changed and so needs writing back.
@@ -295,10 +321,28 @@ async fn token_from(
     platform: Platform,
     store: &mut TokenStore,
 ) -> Result<(String, bool)> {
-    let Some(tokens) = store.get(platform).cloned() else {
+    keyed_token_from(config, platform, platform.slug(), store).await
+}
+
+/// [`token_from`] generalised over the token-store key, so extra chat
+/// accounts refresh through the same door as the primaries.
+async fn keyed_token_from(
+    config: &Config,
+    platform: Platform,
+    key: &str,
+    store: &mut TokenStore,
+) -> Result<(String, bool)> {
+    let Some(tokens) = store.get_keyed(key).cloned() else {
+        if key == platform.slug() {
+            bail!(
+                "not logged in to {}. Run `msm login {}` first.",
+                platform.label(),
+                platform.slug()
+            );
+        }
         bail!(
-            "not logged in to {}. Run `msm login {}` first.",
-            platform.label(),
+            "no saved login for the chat account `{key}`. Run `msm login {} --add` \
+             and authorise that account in the browser.",
             platform.slug()
         );
     };
@@ -335,7 +379,11 @@ async fn token_from(
         })?;
 
     let access = refreshed.access_token.clone();
-    store.set(platform, refreshed);
+    // The refresh drops the cached identity if we are not careful — carry it
+    // over, since who the account is does not change when its token does.
+    let mut refreshed = refreshed;
+    refreshed.identity = tokens.identity.clone();
+    store.set_keyed(key.to_string(), refreshed);
     Ok((access, true))
 }
 
