@@ -324,21 +324,11 @@ async fn wait_for_callback(listener: &Loopback, expected_state: &str) -> Result<
             .await
             .context("accepting the OAuth redirect connection")?;
 
-        let mut buffer = vec![0u8; 8192];
-        let read = match socket.read(&mut buffer).await {
-            Ok(0) => continue,
-            Ok(n) => n,
-            Err(err) => {
-                tracing::warn!(?err, "failed reading a connection on the callback port");
-                continue;
-            }
-        };
-
-        let request = String::from_utf8_lossy(&buffer[..read]);
-        // The first line looks like: GET /callback?code=abc&state=xyz HTTP/1.1
-        let Some(request_line) = request.lines().next() else {
+        let Some(request_line) = read_request_line(&mut socket).await else {
             continue;
         };
+
+        // The line looks like: GET /callback?code=abc&state=xyz HTTP/1.1
         let Some(path) = request_line.split_whitespace().nth(1) else {
             continue;
         };
@@ -412,6 +402,58 @@ async fn wait_for_callback(listener: &Loopback, expected_state: &str) -> Result<
         .await;
 
         return Ok(code);
+    }
+}
+
+/// How long to wait for one connection to send its request line before giving up
+/// on it and going back to waiting for the real redirect.
+const REQUEST_LINE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The longest request line accepted, in bytes. A redirect URL is a few hundred
+/// bytes; anything past this is not a browser sending us a callback, and the cap
+/// stops a connection that never sends a newline from growing the buffer without
+/// limit.
+const MAX_REQUEST_LINE: usize = 8192;
+
+/// Read the first line of an HTTP request, however many packets it arrives in.
+///
+/// TCP is a stream of bytes, not a stream of messages: one `read` returns
+/// whatever has arrived so far, which may be only part of the line. Assuming a
+/// single read holds the whole request line meant that a redirect split across
+/// two packets — `GET /callb` in one, the rest a moment later — was seen as a
+/// request for the path `/callb`, answered with 404 and dropped. The user had
+/// authorised correctly but saw a 404 page while the login sat there until it
+/// timed out. So this keeps reading until the terminating newline arrives.
+///
+/// Returns `None` if the connection closes, stalls, or sends an implausibly long
+/// line; the caller then goes back to waiting for another connection.
+async fn read_request_line<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Option<String> {
+    let mut collected: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 1024];
+
+    loop {
+        let read = match tokio::time::timeout(REQUEST_LINE_TIMEOUT, reader.read(&mut chunk)).await {
+            // Timed out: the peer opened a connection and said nothing useful.
+            Err(_) => return None,
+            // Clean close before a complete line arrived.
+            Ok(Ok(0)) => return None,
+            Ok(Ok(n)) => n,
+            Ok(Err(err)) => {
+                tracing::warn!(?err, "failed reading a connection on the callback port");
+                return None;
+            }
+        };
+        collected.extend_from_slice(&chunk[..read]);
+
+        if let Some(end) = collected.iter().position(|&b| b == b'\n') {
+            let line = String::from_utf8_lossy(&collected[..end]);
+            return Some(line.trim_end_matches('\r').to_string());
+        }
+
+        if collected.len() > MAX_REQUEST_LINE {
+            tracing::warn!("a connection on the callback port sent no request line");
+            return None;
+        }
     }
 }
 
@@ -764,5 +806,34 @@ mod tests {
         assert_eq!(escape_html("The user denied you access"), "The user denied you access");
         assert_eq!(escape_html("a & b"), "a &amp; b");
         assert_eq!(escape_html("\"quoted\""), "&quot;quoted&quot;");
+    }
+
+    /// A request line arriving in two pieces used to be misread as the path of
+    /// the first piece alone, so a genuine redirect was answered with 404 and
+    /// the login hung until it timed out.
+    #[tokio::test]
+    async fn a_request_line_split_across_packets_is_read_whole() {
+        let (mut client, mut server) = tokio::io::duplex(64);
+
+        let reader = tokio::spawn(async move { read_request_line(&mut server).await });
+
+        client.write_all(b"GET /callb").await.unwrap();
+        tokio::task::yield_now().await;
+        client
+            .write_all(b"ack?code=THECODE&state=st HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let line = reader.await.unwrap().expect("the line should be read");
+        assert_eq!(line, "GET /callback?code=THECODE&state=st HTTP/1.1");
+        let path = line.split_whitespace().nth(1).unwrap();
+        assert_eq!(parse_query(path).get("code").map(String::as_str), Some("THECODE"));
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_closes_without_a_request_line_is_skipped() {
+        let (client, mut server) = tokio::io::duplex(64);
+        drop(client);
+        assert!(read_request_line(&mut server).await.is_none());
     }
 }
