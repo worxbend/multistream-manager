@@ -143,17 +143,38 @@ struct Loopback {
 impl Loopback {
     /// Bind both loopback families on `port`.
     ///
-    /// IPv4 is required — if that fails the port is genuinely unusable. IPv6 is
-    /// best-effort, since a host without it is perfectly functional.
-    async fn bind(port: u16) -> std::io::Result<Self> {
+    /// IPv4 is required — if that fails the port is genuinely unusable.
+    ///
+    /// IPv6 is best-effort in one direction only. A machine with no IPv6
+    /// loopback at all is perfectly functional, so that failure is ignored. But
+    /// "the address is already in use" means some *other* program on this
+    /// machine already holds `[::1]:port` — and since the redirect URI says
+    /// `localhost`, which most Linux systems resolve to `::1` before
+    /// `127.0.0.1`, that program would receive the browser's redirect (and with
+    /// it the authorization code and state) instead of us. PKCE keeps the code
+    /// useless to them, but the login would hang with no explanation. Refusing
+    /// to start is the only safe answer.
+    async fn bind(port: u16) -> Result<Self> {
         let v4 = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
-        let v6 = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port))
-            .await
-            .map_err(|err| {
+        let v6 = match TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port)).await {
+            Ok(listener) => Some(listener),
+            Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+                bail!(
+                    "another program on this machine is already listening on \
+                     [::1]:{port} (IPv6 loopback).\n\
+                     The login redirect goes to `localhost`, which usually \
+                     resolves to ::1 first, so that program — not this one — \
+                     would receive your login.\n\
+                     Stop it, or set a different `redirect_port` in config.toml \
+                     (and update the redirect URI in the provider's developer \
+                     console to match)."
+                );
+            }
+            Err(err) => {
                 tracing::debug!(?err, "no IPv6 loopback available; IPv4 only");
-                err
-            })
-            .ok();
+                None
+            }
+        };
         Ok(Self { v4, v6 })
     }
 
@@ -945,6 +966,27 @@ mod tests {
         let (client, mut server) = tokio::io::duplex(64);
         drop(client);
         assert!(read_request_line(&mut server).await.is_none());
+    }
+
+    /// If another local program already holds `[::1]:port`, the browser's
+    /// redirect to `localhost` lands in *its* lap, not ours, and the login hangs
+    /// forever with no clue why. Binding used to swallow that failure and carry
+    /// on with IPv4 only, so this asserts we now refuse to start and name the
+    /// port in the message.
+    #[tokio::test]
+    async fn an_ipv6_loopback_port_held_by_someone_else_fails_the_login() {
+        let squatter = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0))
+            .await
+            .expect("this test needs an IPv6 loopback");
+        let port = squatter.local_addr().unwrap().port();
+
+        let err = match Loopback::bind(port).await {
+            Err(err) => err,
+            Ok(_) => panic!("binding must fail while the port is taken"),
+        };
+        let message = format!("{err:#}");
+        assert!(message.contains(&port.to_string()), "got {message:?}");
+        assert!(message.contains("redirect_port"), "got {message:?}");
     }
 
     /// A request that fails the `state` check must be answered and ignored, not
