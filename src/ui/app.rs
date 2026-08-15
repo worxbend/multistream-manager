@@ -19,6 +19,17 @@ use crate::model::{
 };
 use crate::youtube;
 
+/// Whether a key press should be treated as typed text in a modal input.
+///
+/// A bare character is text; a character carrying Ctrl or Alt is a command.
+/// Alt matters here because the tab switcher above only consumes the alt+digit
+/// combinations it knows about — without this guard, any other alt combination
+/// (alt+3, or a habit from another terminal program) fell through and typed
+/// its bare letter into whatever chat input was open.
+fn is_typed_text(key: &KeyEvent) -> bool {
+    !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT)
+}
+
 /// Which screen is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -517,7 +528,7 @@ impl App {
                             from_compose: true,
                         };
                     }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Char(c) if is_typed_text(&key) => {
                         self.chat.compose_push(c)
                     }
                     _ => {}
@@ -535,7 +546,7 @@ impl App {
                         buffer.pop();
                         self.chat.mode = ChatFocus::Join(buffer);
                     }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Char(c) if is_typed_text(&key) => {
                         buffer.push(c);
                         self.chat.mode = ChatFocus::Join(buffer);
                     }
@@ -559,7 +570,7 @@ impl App {
                         self.chat.search_jump_newest(&buffer.clone());
                         self.chat.mode = ChatFocus::Search(buffer);
                     }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Char(c) if is_typed_text(&key) => {
                         buffer.push(c);
                         // Incremental: every edit jumps to the newest match.
                         self.chat.search_jump_newest(&buffer.clone());
@@ -586,7 +597,7 @@ impl App {
                         buffer.pop();
                         self.chat.mode = ChatFocus::TimeoutPrompt(buffer);
                     }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Char(c) if is_typed_text(&key) => {
                         buffer.push(c);
                         self.chat.mode = ChatFocus::TimeoutPrompt(buffer);
                     }
@@ -625,7 +636,7 @@ impl App {
                             from_compose,
                         };
                     }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Char(c) if is_typed_text(&key) => {
                         buffer.push(c);
                         self.chat.mode = ChatFocus::EmojiPicker {
                             query: buffer,
@@ -2049,6 +2060,25 @@ mod tests {
         });
 
         assert!(!app.popup.as_ref().unwrap().loading);
+    }
+
+    /// Only alt+1 and alt+2 are consumed by the tab switcher; every other alt
+    /// combination used to fall through and type its bare character into the
+    /// open chat input, so a stray "3" landed in the message being written.
+    #[test]
+    fn alt_modified_keys_are_not_typed_into_a_chat_input() {
+        let mut app = App::new(Config::default());
+        app.tab = Tab::Chat;
+        app.chat.mode = super::super::chat_tab::ChatFocus::Join(String::new());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::ALT));
+
+        match &app.chat.mode {
+            super::super::chat_tab::ChatFocus::Join(buffer) => {
+                assert!(buffer.is_empty(), "alt+3 must not type a 3: {buffer:?}");
+            }
+            other => panic!("the join prompt should still be open, got {other:?}"),
+        }
     }
 
     #[test]
