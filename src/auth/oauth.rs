@@ -345,9 +345,37 @@ async fn wait_for_callback(listener: &Loopback, expected_state: &str) -> Result<
 
         let params = parse_query(path);
 
+        // Reject anything whose state does not match what we sent out.
+        //
+        // Rejecting means ignoring *that request* and carrying on waiting — not
+        // abandoning the login. Any page the user happens to be browsing can
+        // make their browser hit this port, so treating one unmatched request as
+        // fatal handed every website a way to cancel an authorisation in
+        // progress, over and over. The genuine redirect, when it arrives, still
+        // carries the right state and is still accepted.
+        match params.get("state") {
+            Some(state) if state == expected_state => {}
+            _ => {
+                tracing::warn!("ignored a callback request whose `state` did not match");
+                respond(
+                    &mut socket,
+                    "Rejected",
+                    "The security token in that request did not match, so it was ignored. Nothing has been changed. If you are in the middle of logging in, carry on in the tab the login opened.",
+                    false,
+                )
+                .await;
+                continue;
+            }
+        }
+
         // The provider reports a refusal by redirecting with ?error=… instead
         // of ?code=…. Surfacing their description is far more useful than a
         // generic "login failed".
+        //
+        // This is checked *after* the state, because both Twitch and Google echo
+        // the state back on their error redirects too. Checking it first would
+        // mean an unauthenticated `?error=` request from any web page could
+        // still abort the login.
         if let Some(error) = params.get("error") {
             let description = params
                 .get("error_description")
@@ -361,25 +389,6 @@ async fn wait_for_callback(listener: &Loopback, expected_state: &str) -> Result<
             )
             .await;
             bail!("the provider refused authorisation: {error} ({description})");
-        }
-
-        // Reject anything whose state does not match what we sent out.
-        match params.get("state") {
-            Some(state) if state == expected_state => {}
-            _ => {
-                respond(
-                    &mut socket,
-                    "Rejected",
-                    "The security token in that request did not match. Nothing has been changed. Please start the login again.",
-                    false,
-                )
-                .await;
-                bail!(
-                    "the redirect carried the wrong `state` value, so it was rejected. \
-                     This usually means a stale browser tab from an earlier login attempt \
-                     completed late — try logging in again."
-                );
-            }
         }
 
         let Some(code) = params.get("code").cloned() else {
@@ -835,5 +844,39 @@ mod tests {
         let (client, mut server) = tokio::io::duplex(64);
         drop(client);
         assert!(read_request_line(&mut server).await.is_none());
+    }
+
+    /// A request that fails the `state` check must be answered and ignored, not
+    /// treated as fatal. Any web page can make the browser hit this port, so
+    /// aborting on one bad request let any site cancel a login in progress.
+    #[tokio::test]
+    async fn a_forged_callback_does_not_cancel_the_login() {
+        let listener = Loopback::bind(0).await.expect("binding a free port");
+        let port = listener.v4.local_addr().unwrap().port();
+
+        let waiting = tokio::spawn(async move { wait_for_callback(&listener, "the-real-state").await });
+
+        // What a hostile page can produce: a navigation to the callback with a
+        // state we never issued, and an `error=` that is not from the provider.
+        for forged in [
+            "GET /callback?state=not-ours&code=whatever HTTP/1.1\r\n\r\n",
+            "GET /callback?error=access_denied HTTP/1.1\r\n\r\n",
+        ] {
+            let mut probe = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            probe.write_all(forged.as_bytes()).await.unwrap();
+            let mut answer = String::new();
+            probe.read_to_string(&mut answer).await.unwrap();
+            assert!(answer.starts_with("HTTP/1.1 400"), "got {answer:?}");
+        }
+
+        // The genuine redirect still completes the login.
+        let mut browser = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        browser
+            .write_all(b"GET /callback?state=the-real-state&code=THECODE HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+
+        let code = waiting.await.unwrap().expect("the real redirect should be accepted");
+        assert_eq!(code, "THECODE");
     }
 }
