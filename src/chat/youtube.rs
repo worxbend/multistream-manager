@@ -458,19 +458,31 @@ impl QuotaStore {
     }
 
     fn charge(&self, units: u64) {
-        let snapshot = {
-            let mut ledger = self.lock();
-            ledger.charge(units);
-            PersistedQuota {
+        // The write happens INSIDE the lock, deliberately: two pollers
+        // charging concurrently must not interleave their writes, or the
+        // slower snapshot overwrites the newer one and the persisted count
+        // runs backwards — a restart would then resume below what Google has
+        // already charged. The file is a few dozen bytes on the config
+        // filesystem and charges arrive at most once per poll interval, so
+        // the held-lock write is bounded and cheap; correctness of the spend
+        // record wins over microseconds of contention.
+        let mut ledger = self.lock();
+        ledger.charge(units);
+        if let Some(path) = &self.path {
+            let snapshot = PersistedQuota {
                 day: ledger.day,
                 used: ledger.used,
-            }
-        };
-        if let Some(path) = &self.path {
-            // Best-effort: a full disk must not cost the chat session, and
-            // the in-memory count still protects this run.
+            };
+            // Atomic temp+rename: a crash mid-write must leave the previous
+            // complete file, never a truncated one that silently resets the
+            // budget to zero on the next start. Best-effort beyond that — a
+            // full disk must not cost the chat session, and the in-memory
+            // count still protects this run.
             if let Ok(text) = serde_json::to_string(&snapshot) {
-                let _ = std::fs::write(path, text);
+                let tmp = path.with_extension("json.tmp");
+                if std::fs::write(&tmp, text).is_ok() {
+                    let _ = std::fs::rename(&tmp, path);
+                }
             }
         }
     }
