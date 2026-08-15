@@ -73,27 +73,14 @@ async fn save_store(store: TokenStore) -> Result<()> {
         .context("saving the renewed tokens")?
 }
 
-/// Return a usable access token for `platform`, renewing it first if needed.
-///
-/// This is the function every API client calls before making a request. It
-/// hides the whole expiry/refresh dance from the rest of the program: callers
-/// just ask for a token and get one that works.
-pub async fn access_token(config: &Config, platform: Platform) -> Result<String> {
-    let mut store = load_store().await?;
-    let (token, renewed) = token_from(config, platform, &mut store).await?;
-    if renewed {
-        save_store(store).await?;
-    }
-    Ok(token)
-}
-
 /// Tokens for several platforms at once, reading and writing the file once.
 ///
-/// The engine needs one token per platform before every batch of API work. Doing
-/// that through [`access_token`] meant re-reading `tokens.json` once per
-/// platform, on every statistics poll, just to discover that nothing had
-/// expired. This reads the file once and writes it back only if something was
-/// actually renewed.
+/// This is the function the engine calls before every batch of API work; it
+/// hides the whole expiry/refresh dance from the rest of the program. Asking
+/// per platform would mean re-reading `tokens.json` once per platform, on
+/// every statistics poll, just to discover that nothing had expired. This
+/// reads the file once and writes it back only if something was actually
+/// renewed.
 ///
 /// A platform whose token cannot be produced gets its own error rather than
 /// spoiling the others: a expired YouTube login should not stop Twitch working.

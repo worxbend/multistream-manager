@@ -31,10 +31,22 @@ impl Engine {
     /// Build backends for the given platforms, authenticating each one.
     ///
     /// Tokens are refreshed here if they have expired, so by the time this
-    /// returns every backend holds a working access token.
-    pub async fn build(config: &Config, platforms: &[Platform]) -> Result<Self> {
-        config.check_credentials(platforms)?;
-
+    /// returns every working backend holds a usable access token.
+    ///
+    /// One platform's problem must not take the others down — that is the
+    /// partial-success rule this whole module is built around, and it applies
+    /// from the very first step. A platform whose credentials are missing or
+    /// whose login cannot be renewed is returned in the second half of the
+    /// tuple with the explanation, while every healthy platform still gets its
+    /// backend. (This used to be all-or-nothing: an expired YouTube login
+    /// stopped Twitch from being configured at all, and the single error was
+    /// then shown against every platform.) The `Err` case is reserved for
+    /// problems that genuinely affect everything, like failing to construct
+    /// the HTTP client.
+    pub async fn build(
+        config: &Config,
+        platforms: &[Platform],
+    ) -> Result<(Self, Vec<(Platform, String)>)> {
         // One HTTP client shared by every backend, so connections are pooled
         // rather than re-established for each call.
         let http = reqwest::Client::builder()
@@ -43,10 +55,27 @@ impl Engine {
             .build()
             .context("building the HTTP client")?;
 
-        let mut backends: HashMap<Platform, Box<dyn Backend>> = HashMap::new();
+        let mut failures: Vec<(Platform, String)> = Vec::new();
 
+        // Credentials are checked per platform, so the error a platform gets
+        // is its own rather than the first problem found anywhere.
+        let mut with_credentials = Vec::new();
         for &platform in platforms {
-            let token = auth::access_token(config, platform).await?;
+            match config.check_credentials(&[platform]) {
+                Ok(()) => with_credentials.push(platform),
+                Err(err) => failures.push((platform, format!("{err:#}"))),
+            }
+        }
+
+        let mut backends: HashMap<Platform, Box<dyn Backend>> = HashMap::new();
+        for (platform, token) in auth::access_tokens(config, &with_credentials).await {
+            let token = match token {
+                Ok(token) => token,
+                Err(err) => {
+                    failures.push((platform, format!("{err:#}")));
+                    continue;
+                }
+            };
             let backend: Box<dyn Backend> = match platform {
                 Platform::Twitch => Box::new(TwitchBackend::new(
                     http.clone(),
@@ -63,10 +92,21 @@ impl Engine {
             backends.insert(platform, backend);
         }
 
-        Ok(Self {
-            config: config.clone(),
-            backends,
-        })
+        failures.sort_by_key(|(platform, _)| *platform);
+        Ok((
+            Self {
+                config: config.clone(),
+                backends,
+            },
+            failures,
+        ))
+    }
+
+    /// Drop one platform's backend, for a caller that has decided the platform
+    /// is unusable (for example because its `connect` check failed) and does
+    /// not want later batch operations to keep retrying it.
+    pub fn disconnect(&mut self, platform: Platform) {
+        self.backends.remove(&platform);
     }
 
     /// Renew every backend's access token if it is close to expiring.
@@ -594,6 +634,26 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    /// Building must follow the partial-success rule too: each platform gets
+    /// its own explanation, and no platform's problem is fatal to the others.
+    /// (With no credentials configured at all, both fail — but separately.)
+    #[tokio::test]
+    async fn building_reports_each_platform_failure_separately() {
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("engine-build");
+
+        let (engine, failures) = Engine::build(&Config::default(), &Platform::ALL)
+            .await
+            .expect("only a global failure may abort the build");
+
+        assert!(engine.platforms().is_empty());
+        assert_eq!(failures.len(), 2, "one failure per platform: {failures:?}");
+        assert_eq!(failures[0].0, Platform::Twitch);
+        assert_eq!(failures[1].0, Platform::YouTube);
+        // Each message must be about its own platform, not a shared blur.
+        assert!(failures[0].1.to_lowercase().contains("twitch"));
+        assert!(failures[1].1.to_lowercase().contains("youtube"));
     }
 
     /// A backend that panics must be reported against *its own* platform. The

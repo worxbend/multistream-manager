@@ -338,7 +338,23 @@ async fn cmd_go(
         );
     }
 
-    let mut engine = engine::Engine::build(config, &platforms).await?;
+    let (mut engine, build_failures) = engine::Engine::build(config, &platforms).await?;
+
+    // Partial success starts here, not at go-live: a platform that cannot even
+    // be prepared (missing credentials, unrenewable login, failed connect
+    // check) is recorded as its own failed result, and the others carry on.
+    // Aborting everything instead would mean an expired YouTube login also
+    // stops Twitch from going live.
+    let mut early_failures: Vec<backend::PlatformResult> = build_failures
+        .into_iter()
+        .map(|(platform, err)| {
+            progress(json, &format!("{:<8} {err}", platform.label()));
+            backend::PlatformResult {
+                platform,
+                outcome: Err(err),
+            }
+        })
+        .collect();
 
     // Report who we are before changing anything, so a wrong account is obvious.
     for (platform, outcome) in engine.connect_all().await {
@@ -347,8 +363,32 @@ async fn cmd_go(
                 json,
                 &format!("{:<8} connected as {name}", platform.label()),
             ),
-            Err(err) => bail!("{} could not connect: {err}", platform.label()),
+            Err(err) => {
+                progress(
+                    json,
+                    &format!("{:<8} could not connect: {err}", platform.label()),
+                );
+                // Dropped from the engine so go-live does not retry a platform
+                // already known to be broken and report the failure twice.
+                engine.disconnect(platform);
+                early_failures.push(backend::PlatformResult {
+                    platform,
+                    outcome: Err(err),
+                });
+            }
         }
+    }
+
+    // With no platform left standing there is nothing to prompt about or
+    // apply; report the failures in the requested format and exit non-zero.
+    if engine.platforms().is_empty() {
+        early_failures.sort_by_key(|r| r.platform);
+        if json {
+            println!("{}", engine::render_results_json(&early_failures));
+        } else {
+            print!("{}", engine::render_results(&early_failures));
+        }
+        bail!("every platform failed");
     }
 
     // A hand-edited config names the Twitch category but has no id for it.
@@ -399,7 +439,12 @@ async fn cmd_go(
         }
     }
 
-    let results = engine.go_live(&plan).await;
+    let mut results = engine.go_live(&plan).await;
+    // The report covers every platform that was asked for, so the early
+    // failures join the go-live outcomes rather than being dropped from the
+    // JSON a wrapper script loops over.
+    results.extend(early_failures);
+    results.sort_by_key(|r| r.platform);
 
     if json {
         println!("{}", engine::render_results_json(&results));
@@ -414,6 +459,21 @@ async fn cmd_go(
     }
 
     Ok(())
+}
+
+/// Build an engine for exactly one platform, failing outright if that platform
+/// cannot be prepared.
+///
+/// `Engine::build` reports per-platform problems instead of failing, because
+/// the multi-platform commands carry on with whatever still works. A command
+/// that only ever involves one platform has nothing to carry on with, so its
+/// platform's problem becomes the command's error.
+async fn build_single(config: &Config, platform: Platform) -> Result<engine::Engine> {
+    let (engine, mut failures) = engine::Engine::build(config, &[platform]).await?;
+    if let Some((_, err)) = failures.pop() {
+        bail!("{err}");
+    }
+    Ok(engine)
 }
 
 async fn cmd_key(config: &Config, platform_arg: &str) -> Result<()> {
@@ -432,7 +492,7 @@ async fn cmd_key(config: &Config, platform_arg: &str) -> Result<()> {
         return Ok(());
     }
 
-    let mut engine = engine::Engine::build(config, &[platform]).await?;
+    let mut engine = build_single(config, platform).await?;
     for (_, outcome) in engine.connect_all().await {
         outcome.map_err(|err| anyhow::anyhow!(err))?;
     }
@@ -448,7 +508,7 @@ async fn cmd_key(config: &Config, platform_arg: &str) -> Result<()> {
 }
 
 async fn cmd_categories(config: &Config, query: &str) -> Result<()> {
-    let mut engine = engine::Engine::build(config, &[Platform::Twitch]).await?;
+    let mut engine = build_single(config, Platform::Twitch).await?;
     for (_, outcome) in engine.connect_all().await {
         outcome.map_err(|err| anyhow::anyhow!(err))?;
     }
@@ -476,7 +536,7 @@ async fn cmd_categories(config: &Config, query: &str) -> Result<()> {
 /// objects and no broadcast objects to list — and both want the same "who am I
 /// talking to" line printed before they do anything.
 async fn connect_youtube(config: &Config) -> Result<engine::Engine> {
-    let mut engine = engine::Engine::build(config, &[Platform::YouTube]).await?;
+    let mut engine = build_single(config, Platform::YouTube).await?;
 
     for (platform, outcome) in engine.connect_all().await {
         match outcome {

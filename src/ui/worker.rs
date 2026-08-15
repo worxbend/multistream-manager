@@ -106,15 +106,25 @@ pub async fn run(
                 });
 
                 match Engine::build(&config, &platforms).await {
-                    Ok(mut built) => {
-                        let results = built.connect_all().await;
+                    Ok((mut built, failures)) => {
+                        // A platform that failed to build (missing credentials,
+                        // unrenewable login) is reported alongside the ones
+                        // whose connect check actually ran, each under its own
+                        // name with its own explanation — never one platform's
+                        // error smeared over all of them.
+                        let mut results: Vec<(Platform, Result<String, String>)> = failures
+                            .into_iter()
+                            .map(|(platform, err)| (platform, Err(err)))
+                            .collect();
+                        results.extend(built.connect_all().await);
+                        results.sort_by_key(|(platform, _)| *platform);
                         engine = Some(built);
                         let _ = events.send(Event::Connected(results));
                     }
                     Err(err) => {
-                        // A build failure is almost always missing credentials
-                        // or an expired login, and the error text explains how
-                        // to fix it — so pass it through in full.
+                        // Only a genuinely global failure lands here (such as
+                        // the HTTP client not building), so showing the same
+                        // text for every platform is truthful.
                         let _ = events.send(Event::Connected(
                             platforms
                                 .into_iter()
