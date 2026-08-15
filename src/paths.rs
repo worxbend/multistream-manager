@@ -71,13 +71,22 @@ pub fn write_secret_file(path: &std::path::Path, contents: &str) -> Result<()> {
     use std::io::Write;
 
     // The temporary file must live in the same directory as the target,
-    // because rename is only atomic within a single filesystem. The process id
-    // keeps two concurrent writers from scribbling on the same temp file.
+    // because rename is only atomic within a single filesystem.
+    //
+    // Its name has to be unique per *writer*, not per process: two threads in
+    // one process sharing a temp path is the same collision as two processes
+    // sharing one. One writer's rename moves the file out from under the other,
+    // which then fails mid-write, and the failure path's cleanup can delete a
+    // temp file belonging to someone else. So the name carries the process id
+    // and a counter that no two calls anywhere in this program can share.
+    static WRITE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let ticket = WRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .with_context(|| format!("{} has no file name to write to", path.display()))?;
-    let tmp_path = path.with_file_name(format!(".{file_name}.tmp-{}", std::process::id()));
+    let tmp_path = path.with_file_name(format!(".{file_name}.tmp-{}-{ticket}", std::process::id()));
 
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
@@ -221,5 +230,44 @@ mod tests {
     fn write_secret_file_rejects_a_path_with_no_file_name() {
         let err = write_secret_file(std::path::Path::new("/"), "x").unwrap_err();
         assert!(err.to_string().contains("no file name"));
+    }
+
+    /// The temp file used to be named after the process id alone, so every
+    /// thread in one process shared it: one thread's rename pulled the file out
+    /// from under another, and roughly half of all writes failed. Sequential
+    /// token refreshes hide this today, but a second concurrent saver would
+    /// surface it as a spurious "could not renew your access token".
+    #[test]
+    fn concurrent_writers_in_one_process_do_not_clobber_each_other() {
+        let dir = ScratchDir::new("concurrent-writers");
+        let target = dir.0.join("tokens.json");
+
+        std::thread::scope(|scope| {
+            for writer in 0..4 {
+                let target = target.clone();
+                scope.spawn(move || {
+                    for round in 0..100 {
+                        write_secret_file(&target, &format!("writer {writer} round {round}"))
+                            .expect("every write must succeed");
+                    }
+                });
+            }
+        });
+
+        // Whichever write landed last, the file is one complete value — never a
+        // torn mixture — and no temp files were left behind.
+        let content = std::fs::read_to_string(&target).unwrap();
+        assert!(content.starts_with("writer "), "torn content: {content:?}");
+
+        let leftovers: Vec<_> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
     }
 }
