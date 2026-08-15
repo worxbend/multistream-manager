@@ -165,7 +165,7 @@ impl App {
 
         Self {
             tab: Tab::StreamInfo,
-            chat: super::chat_tab::ChatTabState::new(),
+            chat: super::chat_tab::ChatTabState::new(&config),
             screen: Screen::Platforms,
             config,
             selected,
@@ -535,6 +535,57 @@ impl App {
                 }
                 return vec![];
             }
+            ChatFocus::Search(mut buffer) => {
+                match key.code {
+                    KeyCode::Esc => {
+                        // Esc abandons both the input and the committed query.
+                        self.chat.commit_search(String::new());
+                        self.chat.mode = ChatFocus::Normal;
+                    }
+                    KeyCode::Enter => {
+                        self.chat.commit_search(buffer);
+                        self.chat.mode = ChatFocus::Normal;
+                    }
+                    KeyCode::Backspace => {
+                        buffer.pop();
+                        self.chat.search_jump_newest(&buffer.clone());
+                        self.chat.mode = ChatFocus::Search(buffer);
+                    }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        buffer.push(c);
+                        // Incremental: every edit jumps to the newest match.
+                        self.chat.search_jump_newest(&buffer.clone());
+                        self.chat.mode = ChatFocus::Search(buffer);
+                    }
+                    _ => {}
+                }
+                return vec![];
+            }
+            ChatFocus::TimeoutPrompt(mut buffer) => {
+                match key.code {
+                    KeyCode::Esc => self.chat.mode = ChatFocus::Normal,
+                    KeyCode::Enter => {
+                        self.chat.mode = ChatFocus::Normal;
+                        match super::chat_tab::parse_timeout(&buffer) {
+                            Some(secs) => self.chat.timeout_selected(secs),
+                            None => {
+                                // An unparseable duration cancels rather than
+                                // guessing a punishment length.
+                            }
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        buffer.pop();
+                        self.chat.mode = ChatFocus::TimeoutPrompt(buffer);
+                    }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        buffer.push(c);
+                        self.chat.mode = ChatFocus::TimeoutPrompt(buffer);
+                    }
+                    _ => {}
+                }
+                return vec![];
+            }
             ChatFocus::Normal => {}
         }
 
@@ -594,8 +645,18 @@ impl App {
             // else cancels (handled by moderate() itself). YouTube only —
             // Twitch chats answer with an explanatory notice from the task.
             KeyCode::Char('d') => self.chat.moderate(super::chat_tab::ModAction::Delete),
-            KeyCode::Char('t') => self.chat.moderate(super::chat_tab::ModAction::Timeout),
+            // t opens a duration prompt (yc's flow) instead of a fixed
+            // double-press timeout; the prompt itself is the deliberate step.
+            KeyCode::Char('t') => {
+                if self.chat.selected_message().is_some() {
+                    self.chat.mode = ChatFocus::TimeoutPrompt("5m".into());
+                }
+            }
             KeyCode::Char('b') => self.chat.moderate(super::chat_tab::ModAction::Ban),
+            KeyCode::Char('/') => self.chat.mode = ChatFocus::Search(String::new()),
+            KeyCode::Char('n') => self.chat.search_step(true),
+            KeyCode::Char('N') => self.chat.search_step(false),
+            KeyCode::Char(digit @ ('0' | '1' | '2' | '3' | '4')) => self.chat.toggle_filter(digit),
             KeyCode::Char('g') => self.chat.scroll_to_end(true),
             KeyCode::Char('G') => self.chat.scroll_to_end(false),
             KeyCode::Char(']') => self.chat.cycle_chat(true),

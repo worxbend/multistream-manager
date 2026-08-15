@@ -16,8 +16,101 @@
 //!   appearing twice.
 
 use crate::chat::ring::Ring;
-use crate::chat::{ChatEvent, ChatMessage, ConnectionStatus};
+use crate::chat::{ChatEvent, ChatMessage, ConnectionStatus, MessageKind, PlatformMeta};
 use crate::config::ChatConfig;
+
+/// The four view filters, ported from twi (internal/app/message_filter.go)
+/// and yc (internal/app/filters.go): local predicates over what is *drawn*,
+/// never over what is retained — toggling one off restores full history with
+/// no refetch. Multiple enabled filters are unioned, not intersected.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Filters {
+    /// `1` — messages mentioning the account this chat speaks as.
+    pub mentions: bool,
+    /// `2` — messages from owners/moderators/VIPs/members.
+    pub roles: bool,
+    /// `3` — paid and membership events (Super Chats, gifts, subs, cheers).
+    pub events: bool,
+    /// `4` — notices, unknown types and deleted rows.
+    pub notices: bool,
+}
+
+impl Filters {
+    pub fn any(self) -> bool {
+        self.mentions || self.roles || self.events || self.notices
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// A short status label, e.g. `filter: mentions+events`.
+    pub fn summary(self) -> String {
+        let mut parts = Vec::new();
+        if self.mentions {
+            parts.push("mentions");
+        }
+        if self.roles {
+            parts.push("roles");
+        }
+        if self.events {
+            parts.push("events");
+        }
+        if self.notices {
+            parts.push("notices");
+        }
+        parts.join("+")
+    }
+
+    /// Whether `msg` survives the enabled filters (union semantics). With no
+    /// filter enabled everything passes. `self_login` is the identity this
+    /// chat speaks as, for the mentions filter; matching is word-anchored so
+    /// `@someone_else` cannot match `@some`.
+    pub fn matches(self, msg: &ChatMessage, self_login: &str) -> bool {
+        if !self.any() {
+            return true;
+        }
+        if self.mentions && !self_login.is_empty() {
+            let needle = format!("@{}", self_login.to_lowercase());
+            let hay = msg.text.to_lowercase();
+            let mut from = 0;
+            while let Some(at) = hay[from..].find(&needle) {
+                let end = from + at + needle.len();
+                let word_continues = hay[end..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+                if !word_continues {
+                    return true;
+                }
+                from = end;
+            }
+        }
+        if self.roles {
+            let privileged = msg.author.badges.iter().any(|b| {
+                matches!(
+                    b.set.as_str(),
+                    "broadcaster" | "owner" | "moderator" | "vip" | "member" | "subscriber"
+                )
+            });
+            if privileged {
+                return true;
+            }
+        }
+        if self.events {
+            let bits = matches!(&msg.meta, Some(PlatformMeta::Twitch(meta)) if meta.bits > 0);
+            if matches!(msg.kind, MessageKind::Paid | MessageKind::Membership) || bits {
+                return true;
+            }
+        }
+        if self.notices
+            && (matches!(msg.kind, MessageKind::Notice | MessageKind::Unknown) || msg.deleted)
+        {
+            return true;
+        }
+        false
+    }
+}
 
 /// Everything the UI tracks for one open chat.
 pub struct ChatState {
@@ -43,6 +136,11 @@ pub struct ChatState {
     /// `None` = nothing selected. Selection is what reply and moderation act
     /// on.
     pub cursor: Option<usize>,
+    /// The enabled view filters (keys 1–4; 0 resets).
+    pub filters: Filters,
+    /// The committed search query (`/` to edit, n/N to walk matches). Empty
+    /// means no search.
+    pub search: String,
     /// Whether this chat is currently on screen. While it is, nothing counts
     /// as unread.
     viewed: bool,
@@ -58,6 +156,8 @@ impl ChatState {
             draft: String::new(),
             reply_to: None,
             cursor: None,
+            filters: Filters::default(),
+            search: String::new(),
             viewed: false,
         }
     }

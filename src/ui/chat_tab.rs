@@ -52,8 +52,6 @@ pub struct OpenChat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModAction {
     Delete,
-    /// Ten-minute timeout — the same house default a second press confirms.
-    Timeout,
     Ban,
 }
 
@@ -61,7 +59,6 @@ impl ModAction {
     pub fn label(self) -> &'static str {
         match self {
             Self::Delete => "delete this message",
-            Self::Timeout => "time the author out for 10 minutes",
             Self::Ban => "permanently ban the author",
         }
     }
@@ -77,6 +74,13 @@ pub enum ChatFocus {
     /// Typing goes into the join prompt (the buffer rides in the variant so
     /// `esc` discards it wholesale).
     Join(String),
+    /// Incremental message search (`/`): typing edits the query, every edit
+    /// jumps the selection to the newest match, enter commits (n/N walk),
+    /// esc clears it.
+    Search(String),
+    /// A timeout duration prompt (`t` on a selected message): the buffer
+    /// holds text like `5m`; enter performs the timeout, esc cancels.
+    TimeoutPrompt(String),
 }
 
 /// Everything the Chat tab remembers between frames.
@@ -111,6 +115,9 @@ pub struct ChatTabState {
     pub events_rx: Option<mpsc::UnboundedReceiver<(ChatKey, ChatEvent)>>,
     /// One HTTP client shared by every YouTube poller, for connection reuse.
     http: reqwest::Client,
+    /// A copy of the config, so composer commands (`/chats <x>`) can open
+    /// chats without threading `&Config` through every key path.
+    config: Config,
 }
 
 /// The default even split.
@@ -128,7 +135,7 @@ impl ChatTabState {
     /// A store that cannot be read is treated as "no accounts": the panes
     /// then show their empty-state hints, which include the commands that
     /// would also surface the underlying problem.
-    pub fn new() -> Self {
+    pub fn new(config: &Config) -> Self {
         let accounts = match TokenStore::load() {
             Ok(store) => discover_accounts(&store),
             Err(err) => {
@@ -150,6 +157,7 @@ impl ChatTabState {
             active_chat: BTreeMap::new(),
             events_tx,
             events_rx: Some(events_rx),
+            config: config.clone(),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .user_agent(concat!("multistream-manager/", env!("CARGO_PKG_VERSION")))
@@ -494,10 +502,6 @@ impl ChatTabState {
             ModAction::Delete => ChatCommand::Delete {
                 message_id: msg.id.clone(),
             },
-            ModAction::Timeout => ChatCommand::Ban {
-                channel_id: msg.author.id.clone(),
-                timeout_secs: Some(600),
-            },
             ModAction::Ban => ChatCommand::Ban {
                 channel_id: msg.author.id.clone(),
                 timeout_secs: None,
@@ -549,6 +553,25 @@ impl ChatTabState {
         if text.is_empty() {
             return;
         }
+        // Composer commands that never reach the platform (twi's /channels,
+        // yc's /chats): bare opens the join prompt, with an argument joins
+        // directly. Everything else — including other /commands — is sent
+        // verbatim; /me is handled by the Twitch adapter.
+        if let Some(rest) = text
+            .strip_prefix("/chats")
+            .or_else(|| text.strip_prefix("/channels"))
+            .or_else(|| text.strip_prefix("/channel"))
+        {
+            let target = rest.trim().to_string();
+            chat.state.draft.clear();
+            if target.is_empty() {
+                self.mode = ChatFocus::Join(String::new());
+            } else {
+                self.mode = ChatFocus::Normal;
+                self.join_target(&self.config.clone(), &target);
+            }
+            return;
+        }
         let reply_to = chat.state.reply_to.take().map(|(id, _)| id);
         match chat
             .handle
@@ -572,6 +595,116 @@ impl ChatTabState {
         }
     }
 
+    /// Toggle one numbered filter (1–4) on the focused chat; 0 resets.
+    pub fn toggle_filter(&mut self, digit: char) {
+        if let Some(chat) = self.active_chat_mut() {
+            let filters = &mut chat.state.filters;
+            match digit {
+                '1' => filters.mentions = !filters.mentions,
+                '2' => filters.roles = !filters.roles,
+                '3' => filters.events = !filters.events,
+                '4' => filters.notices = !filters.notices,
+                _ => filters.reset(),
+            }
+        }
+    }
+
+    /// Apply an in-progress or committed search: move the selection to the
+    /// newest message matching `query` (text or author, case-insensitive).
+    pub fn search_jump_newest(&mut self, query: &str) {
+        if query.is_empty() {
+            return;
+        }
+        let needle = query.to_lowercase();
+        if let Some(chat) = self.active_chat_mut() {
+            let len = chat.state.messages.len();
+            for offset in 0..len {
+                let msg = chat
+                    .state
+                    .messages
+                    .get(len - 1 - offset)
+                    .expect("offset < len by construction");
+                if search_matches(msg, &needle) {
+                    chat.state.cursor = Some(offset);
+                    chat.state.scroll = offset;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Walk the committed search to the next match, older (`n`) or newer
+    /// (`N`). Stops at the ends rather than wrapping — "how far back was
+    /// that" must stay answerable (yc's rule).
+    pub fn search_step(&mut self, older: bool) {
+        let query = self
+            .active_key(self.focus)
+            .and_then(|key| self.open.get(key))
+            .map(|chat| chat.state.search.clone())
+            .unwrap_or_default();
+        if query.is_empty() {
+            return;
+        }
+        let needle = query.to_lowercase();
+        if let Some(chat) = self.active_chat_mut() {
+            let len = chat.state.messages.len();
+            let current = chat.state.cursor.unwrap_or(0);
+            let mut offset = current;
+            loop {
+                if older {
+                    offset += 1;
+                    if offset >= len {
+                        return; // no wrap
+                    }
+                } else {
+                    if offset == 0 {
+                        return;
+                    }
+                    offset -= 1;
+                }
+                let msg = chat
+                    .state
+                    .messages
+                    .get(len - 1 - offset)
+                    .expect("offset < len by loop guard");
+                if search_matches(msg, &needle) {
+                    chat.state.cursor = Some(offset);
+                    chat.state.scroll = offset;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Store the committed query on the focused chat.
+    pub fn commit_search(&mut self, query: String) {
+        if let Some(chat) = self.active_chat_mut() {
+            chat.state.search = query;
+        }
+    }
+
+    /// Perform a timeout of the selected author for a parsed duration.
+    pub fn timeout_selected(&mut self, duration_secs: u64) {
+        let Some(msg) = self.selected_message() else {
+            return;
+        };
+        let channel_id = msg.author.id.clone();
+        if channel_id.is_empty() {
+            return;
+        }
+        if let Some(chat) = self.active_chat_mut() {
+            let command = ChatCommand::Ban {
+                channel_id,
+                timeout_secs: Some(duration_secs),
+            };
+            if chat.handle.commands.try_send(command).is_err() {
+                chat.state.apply(ChatEvent::Message(Box::new(local_notice(
+                    "the chat task is busy — try the timeout again",
+                ))));
+            }
+        }
+    }
+
     /// Open a chat on the target typed into the join prompt.
     pub fn join_target(&mut self, config: &Config, raw: &str) {
         let raw = raw.trim().to_string();
@@ -582,6 +715,37 @@ impl ChatTabState {
             self.open_chat(config, self.focus, &account, raw);
         }
     }
+}
+
+/// Whether a message matches a lowercase search needle (text or author).
+fn search_matches(msg: &ChatMessage, needle: &str) -> bool {
+    msg.text.to_lowercase().contains(needle)
+        || msg.author.display_name.to_lowercase().contains(needle)
+        || msg.author.login.to_lowercase().contains(needle)
+}
+
+/// Parse a timeout duration like `45s`, `5m` or `2h` (bare numbers are
+/// minutes). Capped at 24 hours — YouTube's own maximum for a temporary ban.
+pub fn parse_timeout(text: &str) -> Option<u64> {
+    let text = text.trim().to_lowercase();
+    if text.is_empty() {
+        return None;
+    }
+    let (number, unit) = match text.strip_suffix(['s', 'm', 'h']) {
+        Some(number) => (number, text.chars().last().expect("non-empty by strip")),
+        None => (text.as_str(), 'm'),
+    };
+    let value: u64 = number.trim().parse().ok()?;
+    let secs = match unit {
+        's' => value,
+        'm' => value.checked_mul(60)?,
+        'h' => value.checked_mul(3600)?,
+        _ => return None,
+    };
+    if secs == 0 {
+        return None;
+    }
+    Some(secs.min(24 * 3600))
 }
 
 /// A locally generated notice row (never sent anywhere).
@@ -788,6 +952,18 @@ fn draw_chat_strip(frame: &mut Frame, area: Rect, state: &ChatTabState, platform
                 Style::default().fg(Color::DarkGray),
             ));
         }
+        if chat.state.filters.any() {
+            spans.push(Span::styled(
+                format!(" · filter: {}", chat.state.filters.summary()),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        if !chat.state.search.is_empty() {
+            spans.push(Span::styled(
+                format!(" · /{}", chat.state.search),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -809,6 +985,12 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: 
     let height = area.height as usize;
     let len = chat.state.messages.len();
     let newest_visible = len.saturating_sub(chat.state.scroll);
+    // The mentions filter needs to know who "you" are in this chat.
+    let self_login = state
+        .selected_account(platform)
+        .and_then(|account| account.own_target.clone())
+        .unwrap_or_default();
+    let filters = chat.state.filters;
 
     // Walk backwards from the newest visible message, rendering (and
     // wrapping) until the pane is full, then flip the order — the cheap way
@@ -826,6 +1008,12 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: 
         let Some(msg) = chat.state.messages.get(index) else {
             break;
         };
+        // Filters decide what is drawn, never what is retained — except the
+        // selected row, which stays visible even when filtered out so
+        // reply/moderation targets cannot be invisible (twi's rule).
+        if !filters.matches(msg, &self_login) && Some(index) != selected_index {
+            continue;
+        }
         let mut rendered = render_message(msg, area.width, &opts);
         if Some(index) == selected_index {
             // The selection is a background wash over the whole message so
@@ -857,6 +1045,27 @@ fn draw_composer(
                 Span::raw(buffer.clone()),
                 Span::styled("▏", Style::default().fg(Color::Cyan)),
             ]),
+            ChatFocus::Search(buffer) => Line::from(vec![
+                Span::styled("/", Style::default().fg(Color::Yellow)),
+                Span::raw(buffer.clone()),
+                Span::styled("▏", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    "  enter keeps the query for n/N",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]),
+            ChatFocus::TimeoutPrompt(buffer) => Line::from(vec![
+                Span::styled(
+                    "timeout for: ",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(buffer.clone()),
+                Span::styled("▏", Style::default().fg(Color::Red)),
+                Span::styled(
+                    "  (45s / 5m / 2h, max 24h — enter applies, esc cancels)",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]),
             ChatFocus::Compose => {
                 let chat = state
                     .active_key(platform)
@@ -885,7 +1094,7 @@ fn draw_composer(
                     ))
                 } else {
                     Line::from(Span::styled(
-                        "i compose · j/k select · r reply · d/t/b moderate · [ ] chats · { } accounts · space-c join · ctrl+r reconnect",
+                        "i compose · j/k select · r reply · / search · 1-4 filters · d/t/b moderate · [ ] chats · space-c join",
                         Style::default().fg(Color::DarkGray),
                     ))
                 }
@@ -961,6 +1170,7 @@ mod tests {
             events_tx: mpsc::unbounded_channel().0,
             events_rx: None,
             http: reqwest::Client::new(),
+            config: Config::default(),
         };
         for (platform, count) in [(Platform::Twitch, twitch), (Platform::YouTube, youtube)] {
             if count > 0 {
@@ -1187,11 +1397,10 @@ mod tests {
             other => panic!("expected a delete, got {other:?}"),
         }
 
-        // A timeout carries the author's channel id and the 10-minute house
-        // default.
+        // A timeout goes through the duration prompt; the parsed duration
+        // reaches the wire with the author's channel id.
         state.select_move(1);
-        state.moderate(ModAction::Timeout);
-        state.moderate(ModAction::Timeout);
+        state.timeout_selected(parse_timeout("10m").unwrap());
         match rx.try_recv().expect("the timeout must be sent") {
             ChatCommand::Ban {
                 channel_id,
@@ -1260,6 +1469,75 @@ mod tests {
             Some(5),
             "selection starts at the scrolled view's edge, not the newest row"
         );
+    }
+
+    #[test]
+    fn timeout_durations_parse_with_units_and_cap() {
+        assert_eq!(parse_timeout("45s"), Some(45));
+        assert_eq!(parse_timeout("5m"), Some(300));
+        assert_eq!(parse_timeout("2h"), Some(7200));
+        assert_eq!(parse_timeout("7"), Some(420), "bare numbers are minutes");
+        assert_eq!(parse_timeout("48h"), Some(24 * 3600), "capped at a day");
+        assert_eq!(parse_timeout("0m"), None, "zero is not a punishment");
+        assert_eq!(parse_timeout("soon"), None);
+        assert_eq!(parse_timeout(""), None);
+    }
+
+    /// Search jumps to the newest match and n walks older without wrapping.
+    #[tokio::test]
+    async fn search_finds_matches_and_never_wraps() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+        for (i, text) in ["hello", "cake time", "bye", "more cake"]
+            .iter()
+            .enumerate()
+        {
+            let mut m = local_notice(text);
+            m.id = format!("m{i}");
+            state.handle_event(key.clone(), ChatEvent::Message(Box::new(m)));
+        }
+
+        state.search_jump_newest("cake");
+        assert_eq!(state.open[&key].state.cursor, Some(0), "newest match first");
+        state.commit_search("cake".into());
+
+        state.search_step(true); // n → older match
+        assert_eq!(state.open[&key].state.cursor, Some(2));
+        state.search_step(true); // no older match: stay put, never wrap
+        assert_eq!(state.open[&key].state.cursor, Some(2));
+        state.search_step(false); // N → newer again
+        assert_eq!(state.open[&key].state.cursor, Some(0));
+    }
+
+    /// Filters are view predicates with union semantics; the mentions filter
+    /// is word-anchored.
+    #[test]
+    fn filters_union_and_anchor_mentions() {
+        use crate::chat::state::Filters;
+        let mut chat = local_notice("hi @streamer!");
+        chat.kind = MessageKind::Chat;
+        let mut filters = Filters::default();
+        assert!(filters.matches(&chat, "streamer"), "no filters passes all");
+
+        filters.mentions = true;
+        assert!(filters.matches(&chat, "streamer"));
+        let longer = {
+            let mut m = local_notice("hey @streamer_two");
+            m.kind = MessageKind::Chat;
+            m
+        };
+        assert!(
+            !filters.matches(&longer, "streamer"),
+            "@streamer_two must not match @streamer"
+        );
+
+        // Union: adding the notices filter lets a notice through even though
+        // it mentions nobody.
+        filters.notices = true;
+        assert!(filters.matches(&local_notice("plain notice"), "streamer"));
     }
 
     /// Scrolling clamps at both ends and g/G jump to them.
