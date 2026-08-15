@@ -670,7 +670,14 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => self.chat.select_move(-1),
             KeyCode::PageUp => self.chat.scroll_by(10),
             KeyCode::PageDown => self.chat.scroll_by(-10),
-            KeyCode::Esc => self.chat.clear_selection(),
+            KeyCode::Esc => {
+                if self.chat.inspect {
+                    self.chat.inspect = false;
+                } else {
+                    self.chat.clear_selection();
+                }
+            }
+            KeyCode::Char('K') => self.chat.inspect = !self.chat.inspect,
             KeyCode::Char('r') => {
                 if self.chat.reply_to_selected() {
                     self.chat.mode = ChatFocus::Compose;

@@ -117,6 +117,8 @@ pub struct ChatTabState {
     /// Panes currently showing the activity view (`space a`) instead of the
     /// message list.
     pub activity: BTreeMap<Platform, bool>,
+    /// Show the inspect panel for the selected message (`K`).
+    pub inspect: bool,
 
     /// Every open chat, keyed by (platform, account, target).
     pub open: HashMap<ChatKey, OpenChat>,
@@ -180,6 +182,7 @@ impl ChatTabState {
             selected: BTreeMap::new(),
             split_percent: SPLIT_DEFAULT,
             activity: BTreeMap::new(),
+            inspect: false,
             open: HashMap::new(),
             chats: BTreeMap::new(),
             active_chat: BTreeMap::new(),
@@ -1029,7 +1032,9 @@ fn draw_pane(
 
     draw_account_strip(frame, rows[0], state, platform);
     draw_chat_strip(frame, rows[1], state, platform);
-    if state.activity.get(&platform).copied().unwrap_or(false) {
+    if state.inspect && state.focus == platform {
+        draw_inspect(frame, rows[2], state);
+    } else if state.activity.get(&platform).copied().unwrap_or(false) {
         draw_activity(frame, rows[2], state, platform);
     } else {
         draw_messages(frame, rows[2], state, platform);
@@ -1208,6 +1213,110 @@ fn draw_activity(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: 
     }
     lines.reverse();
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The inspect panel (`K`, twi inspect.go / yc's equivalent): the normalized
+/// message behind the selected row. A deleted message prints `text: removed`
+/// — the words never reappear, not even here (these terminals are often on
+/// stream).
+fn draw_inspect(frame: &mut Frame, area: Rect, state: &ChatTabState) {
+    let Some(msg) = state.selected_message() else {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Nothing selected — j/k picks a message to inspect.",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            area,
+        );
+        return;
+    };
+    let label = |text: &str| Span::styled(format!("{text:<10}"), Style::default().fg(Color::Cyan));
+    let mut lines = vec![
+        Line::from(vec![label("id"), Span::raw(msg.id.clone())]),
+        Line::from(vec![label("kind"), Span::raw(format!("{:?}", msg.kind))]),
+        Line::from(vec![
+            label("author"),
+            Span::raw(format!(
+                "{} (login {:?}, id {})",
+                msg.author.display_name, msg.author.login, msg.author.id
+            )),
+        ]),
+    ];
+    if !msg.author.badges.is_empty() {
+        let badges = msg
+            .author
+            .badges
+            .iter()
+            .map(|b| {
+                if b.info.is_empty() {
+                    format!("{}/{}", b.set, b.id)
+                } else {
+                    format!("{}/{} ({})", b.set, b.id, b.info)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(Line::from(vec![label("badges"), Span::raw(badges)]));
+    }
+    if let Some(timestamp) = msg.timestamp {
+        lines.push(Line::from(vec![
+            label("time"),
+            Span::raw(timestamp.to_rfc3339()),
+        ]));
+    }
+    match &msg.meta {
+        Some(PlatformMeta::Twitch(meta)) => {
+            if meta.bits > 0 {
+                lines.push(Line::from(vec![
+                    label("bits"),
+                    Span::raw(meta.bits.to_string()),
+                ]));
+            }
+            if !meta.system_event.is_empty() {
+                lines.push(Line::from(vec![
+                    label("event"),
+                    Span::raw(meta.system_event.clone()),
+                ]));
+            }
+            if meta.first_message {
+                lines.push(Line::from(vec![label("first"), Span::raw("yes")]));
+            }
+        }
+        Some(PlatformMeta::YouTube(meta)) => {
+            lines.push(Line::from(vec![
+                label("wire type"),
+                Span::raw(meta.raw_type.clone()),
+            ]));
+            if let Some(paid) = &meta.paid {
+                lines.push(Line::from(vec![
+                    label("amount"),
+                    Span::raw(format!(
+                        "{} ({} micros {}, tier {})",
+                        paid.display, paid.micros, paid.currency, paid.tier
+                    )),
+                ]));
+            }
+            if let Some(membership) = &meta.membership {
+                lines.push(Line::from(vec![
+                    label("member"),
+                    Span::raw(format!("{:?} {}", membership.kind, membership.level)),
+                ]));
+            }
+        }
+        None => {}
+    }
+    let text = if msg.deleted {
+        Span::styled("removed", Style::default().fg(Color::DarkGray))
+    } else {
+        Span::raw(msg.text.clone())
+    };
+    lines.push(Line::from(vec![label("text"), text]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "K or esc closes the inspector.",
+        Style::default().fg(Color::DarkGray),
+    )));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
 fn draw_messages(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: Platform) {
@@ -1431,6 +1540,7 @@ mod tests {
             selected: BTreeMap::new(),
             split_percent: SPLIT_DEFAULT,
             activity: BTreeMap::new(),
+            inspect: false,
             open: HashMap::new(),
             chats: BTreeMap::new(),
             active_chat: BTreeMap::new(),

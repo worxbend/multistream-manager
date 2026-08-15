@@ -107,8 +107,15 @@ youtube.com/youtu.be URL.
 | <kbd>PgUp</kbd> / <kbd>PgDn</kbd>, <kbd>g</kbd> / <kbd>G</kbd> | scroll / jump to oldest & newest |
 | <kbd>i</kbd> (or <kbd>o</kbd>/<kbd>a</kbd>) | compose; <kbd>Enter</kbd> sends, <kbd>Esc</kbd> keeps the draft |
 | <kbd>r</kbd> | reply to the selected message |
-| <kbd>d</kbd> / <kbd>t</kbd> / <kbd>b</kbd> | delete / 10-minute timeout / ban (YouTube; press twice to confirm) |
-| <kbd>space</kbd> <kbd>c</kbd> / <kbd>space</kbd> <kbd>x</kbd> | join a chat / close the current chat |
+| <kbd>d</kbd> / <kbd>b</kbd> | delete the message / ban its author (YouTube; press twice to confirm) |
+| <kbd>t</kbd> | time the author out — prompts for a duration (45s / 5m / 2h, max 24h) |
+| <kbd>space</kbd> <kbd>c</kbd> / <kbd>space</kbd> <kbd>x</kbd> / <kbd>space</kbd> <kbd>a</kbd> | join a chat / close it / toggle the activity view |
+| <kbd>/</kbd>, <kbd>n</kbd> / <kbd>N</kbd> | search messages incrementally; walk older/newer matches |
+| <kbd>1</kbd>–<kbd>4</kbd>, <kbd>0</kbd> | view filters (mentions / roles / paid+membership / notices); reset |
+| <kbd>K</kbd> | inspect the selected message's normalized fields |
+| <kbd>tab</kbd> (composing) | complete the trailing @mention from the chatter roster |
+| <kbd>ctrl</kbd>+<kbd>e</kbd> | emoji picker (built-in catalog, filter and insert) |
+| <kbd>ctrl</kbd>+<kbd>g</kbd> / <kbd>b</kbd> / <kbd>y</kbd> / <kbd>n</kbd> | cycle layout (inline/grouped/compact) / badges / emote highlight / full usernames |
 | <kbd>&lt;</kbd> / <kbd>&gt;</kbd> / <kbd>=</kbd> | resize the split toward/away from the focused pane / reset |
 | <kbd>ctrl</kbd>+<kbd>r</kbd> | reconnect (also overrides a YouTube quota pause) |
 
@@ -129,7 +136,15 @@ poll_interval_floor_ms = 1000  # YouTube never polls faster (server floor still 
 poll_interval_ceiling_ms = 0   # 0 = no ceiling
 daily_quota_units = 10000      # your YouTube API project quota
 quota_reserve_percent = 10     # stop polling early so sends keep working
+notifications = true           # desktop notifications for off-screen Super Chats etc.
+chat_logging = false           # append every message to rotated JSONL files
+chat_log_dir = ""              # empty = chatlog/ under the config directory
 ```
+
+Composer commands: `/me` (Twitch action), `/clip` (clip your own live Twitch
+stream — answers with the edit URL), `/chats [target]` (join prompt or direct
+join). With `chat_logging` on, `msm export superchats` turns the logs into a
+CSV of every paid event — integer-exact amounts, zero API quota.
 
 ## 🤔 Why
 

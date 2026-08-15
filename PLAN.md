@@ -190,16 +190,16 @@ Status legend: **ported** (Rust module listed) · **planned** (ordered backlog)
 | T17 | Badge glyph rendering (◉ ⚔ ◆ ★ ♦ ⚙ ✓ ↯ ♛ ◈ ♥ ✎ …, width-1 glyphs) | ported → `chat/render.rs` |
 | T18 | Timestamps HH:MM; action `*` prefix; deleted `[message deleted]` muted strikethrough; `[notice]` prefix | ported → `chat/render.rs` |
 | T19 | Mention fragments (@word), emote-name fragments, grapheme-aware wrapping | ported → `chat/render.rs` |
-| T20 | Message filters (1 mentions / 2 roles / 3 notices / 4 errors, 0 reset) | planned |
-| T21 | Chatter roster (JOIN/PART + speakers, LRU 4096) + @mention autocomplete | planned |
-| T22 | Emote picker + Helix emote index | planned |
-| T23 | Activity column (follows, cheers, events) | planned |
-| T24 | Inspect panel (raw tags, redacted) | planned |
-| T25 | Grouped/compact layouts + author meta line | planned (inline layout ported first) |
+| T20 | Message filters (1 mentions / 2 roles / 3 events / 4 notices, 0 reset) | ported → `chat/state.rs::Filters` + keys in `ui/app.rs` (the errors filter folded into notices — msm surfaces transport errors via the connection indicator instead of raw-tag scanning) |
+| T21 | Chatter roster + @mention autocomplete | ported → `chat/roster.rs` + tab-completion in the composer (speakers-only: twitch-irc v6 cannot request the membership capability — see deviations) |
+| T22 | Emote picker + Helix emote index | partially ported → `chat/emoji.rs` picker (ctrl+e) over the built-in catalog. The Helix channel-emote index is not ported: emotes render as text in this port, so the index would only autocomplete channel-emote names — deferred as low value for its two extra API surfaces |
+| T23 | Activity view (cheers, events, removals) | ported → `ui/chat_tab.rs::draw_activity` (space-a; a projection over history per yc's design; follow events are not available — the follower poll belongs to the host dashboard, see T26) |
+| T24 | Inspect panel | ported → `ui/chat_tab.rs::draw_inspect` (K; normalized fields — raw IRC tags are consumed by the twitch-irc crate and not retained, so the panel shows the normalized model, deleted text as `removed`) |
+| T25 | Grouped/compact layouts | ported → `chat/render.rs::MessageLayout` (ctrl+g; the author-meta line needs per-author follow/seen data the host does not track per chat — folded into the inspect panel instead) |
 | T26 | Helix polling: stream live/viewers (60s), followers/subs (120s) | not ported — the host Dashboard already polls exactly these via its own `twitch.rs` backend; duplicating the pollers per chat account would double API traffic for data already on screen |
-| T27 | `/clip` command (Helix Create Clip) | planned |
+| T27 | `/clip` command | ported → `chat/twitch.rs::handle_clip` + clips:edit scope |
 | T28 | `/channels` picker command | ported → join prompt (`ui/chat_tab.rs`) |
-| T29 | Desktop notifications (notify-send/osascript/PowerShell) | planned |
+| T29 | Desktop notifications | ported → `chat/notify.rs` (Windows toast omitted — documented deviation) |
 | T30 | Reveal animations, gradients, pulsing chrome | not ported — twi inventory itself lists the animation clock as tied to the standalone frame loop; the host renders on a 500ms tick and has no animation system. Deliberate drop, recorded per spec. |
 | T31 | Themes (57 presets), theme picker, OSC 11/111 | not ported — host owns its palette (both inventories list theming as a standalone trapping); identity-color + contrast helpers are ported (T16) |
 | T32 | Splash/mascot, CLI (doctor/setup/profile), Docker/snap packaging, status-bar process telemetry (cpu/mem/fps), command palette, mouse support, Stream Info + Misc tabs | not ported — standalone-app trappings per inventory §11; the host has its own CLI, config, lifecycle, and (for Stream Info) its own implementation already |
@@ -228,11 +228,11 @@ Status legend: **ported** (Rust module listed) · **planned** (ordered backlog)
 | Y16 | Shortcode `:emote:` fragments, emoji chips, URL fragments, mention fragments | ported → `chat/render.rs` (shared fragmenter) |
 | Y17 | Deleted text never reprinted anywhere | ported → `chat/state.rs` invariant + render |
 | Y18 | Moderation writes: delete message, ban, timeout | ported → `chat/youtube.rs` + d/t/b keys in `ui/chat_tab.rs` (unban has no UI in yc either — deliberately not exposed) |
-| Y19 | Search (`/`, n/N), filters 1–4 | planned |
-| Y20 | Activity column, roster, autocomplete, inspect | planned |
-| Y21 | Chat logging JSONL + `export superchats` CSV | planned |
-| Y22 | Auto-follow (re-resolve after stream end) | planned |
-| Y23 | Desktop notifications (high-signal events, burst coalescing) | planned |
+| Y19 | Search (`/`, n/N), filters 1–4 | ported → `ui/chat_tab.rs` search + `chat/state.rs::Filters` |
+| Y20 | Activity column, roster, autocomplete, inspect | ported → see T21/T23/T24 |
+| Y21 | Chat logging JSONL + `export superchats` CSV | ported → `chat/chatlog.rs` + `msm export superchats` |
+| Y22 | Auto-follow (re-resolve after stream end) | not ported — ctrl+r reconnects an ended chat in one keystroke, and this host already knows when its own broadcast starts (it created it); an opt-in background re-resolver spending quota on a maybe-live channel is deliberately left out |
+| Y23 | Desktop notifications | ported → `chat/notify.rs` (2s throttle replaces burst coalescing — documented deviation) |
 | Y24 | API-key-only read mode | not ported — msm is OAuth-only by design (its whole auth stack is authorization-code); adding an API-key credential class would fork the repo's credential model for a mode yc itself calls limited. Recorded as a deliberate scope decision. |
 | Y25 | Mock mode | ported (test-level) → fake sources in unit tests rather than a user-facing flag |
 | Y26 | Splash, CLI surface (doctor/quota/setup/profile/export as commands), themes, palette, OSC, alt-screen, non-interactive frame, FPS | not ported — standalone-app trappings per inventory §11 |
