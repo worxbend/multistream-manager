@@ -23,9 +23,13 @@
 // the commit that wires the Chat tab.
 #![allow(dead_code)]
 
+pub mod chatlog;
+pub mod emoji;
+pub mod notify;
 pub mod ratelimit;
 pub mod render;
 pub mod ring;
+pub mod roster;
 pub mod source;
 pub mod state;
 pub mod twitch;
