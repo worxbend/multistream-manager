@@ -65,6 +65,13 @@ pub async fn run(config: Config) -> Result<()> {
 
     let mut guard = TerminalGuard::new()?;
     let mut app = App::new(config);
+    // The chat tasks' shared event stream. Taken out of the tab state here
+    // because only this loop may await on it.
+    let mut chat_events = app
+        .chat
+        .events_rx
+        .take()
+        .expect("the chat event receiver is taken exactly once, here");
     let mut keys = EventStream::new();
 
     // Drives the periodic statistics refresh on the dashboard.
@@ -135,6 +142,16 @@ pub async fn run(config: Config) -> Result<()> {
             // Results coming back from the worker.
             Some(event) = event_rx.recv() => {
                 app.handle_event(event);
+            }
+
+            // Messages and state changes from the chat tasks. After the
+            // awaited event, drain whatever else is already queued so a busy
+            // chat becomes one redraw, not one redraw per message.
+            Some((key, event)) = chat_events.recv() => {
+                app.handle_chat_event(key, event);
+                while let Ok((key, event)) = chat_events.try_recv() {
+                    app.handle_chat_event(key, event);
+                }
             }
 
             // Periodic statistics refresh, only once there is something to poll.

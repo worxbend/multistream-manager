@@ -454,11 +454,17 @@ impl App {
         if key.modifiers.contains(KeyModifiers::ALT) {
             match key.code {
                 KeyCode::Char('1') => {
+                    if self.tab == Tab::Chat {
+                        self.chat.deactivate();
+                    }
                     self.tab = Tab::StreamInfo;
                     return vec![];
                 }
                 KeyCode::Char('2') => {
                     self.tab = Tab::Chat;
+                    // Lazy connection happens here: entering the tab opens
+                    // the selected accounts' own chats if they are not open.
+                    self.chat.activate(&self.config);
                     return vec![];
                 }
                 _ => {}
@@ -476,21 +482,100 @@ impl App {
         }
     }
 
-    /// Keys on the Chat tab. Vim-flavoured, following the conventions the two
-    /// reference chat TUIs establish: h/l (or arrows / tab) move between the
-    /// panes, [ and ] cycle the focused pane's account sub-tabs, < and >
-    /// resize the split toward/away from the focused pane, = resets it.
+    /// Keys on the Chat tab. Vim-flavoured, following the conventions the
+    /// two reference chat TUIs establish.
+    ///
+    /// Normal mode: h/l (or arrows / tab) switch panes · j/k scroll (k moves
+    /// back in history) · pgup/pgdn page · g/G oldest/newest · [ ] cycle the
+    /// account's open chats · { } cycle account sub-tabs · < > resize the
+    /// split toward/away from the focused pane · = reset split · i (or o/a)
+    /// compose · space,c join a channel · space,x close the chat · ctrl+r
+    /// reconnect · q quit. Compose/join modes capture typing until esc.
     fn key_chat(&mut self, key: KeyEvent) -> Vec<Command> {
+        use super::chat_tab::ChatFocus;
+
+        // Modal input first: while composing or joining, printable keys are
+        // text, never commands (so typing a channel called "x" cannot close
+        // anything).
+        match self.chat.mode.clone() {
+            ChatFocus::Compose => {
+                match key.code {
+                    KeyCode::Esc => self.chat.mode = ChatFocus::Normal,
+                    KeyCode::Enter => self.chat.compose_send(),
+                    KeyCode::Backspace => self.chat.compose_backspace(),
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.chat.compose_push(c)
+                    }
+                    _ => {}
+                }
+                return vec![];
+            }
+            ChatFocus::Join(mut buffer) => {
+                match key.code {
+                    KeyCode::Esc => self.chat.mode = ChatFocus::Normal,
+                    KeyCode::Enter => {
+                        self.chat.mode = ChatFocus::Normal;
+                        self.chat.join_target(&self.config, &buffer);
+                    }
+                    KeyCode::Backspace => {
+                        buffer.pop();
+                        self.chat.mode = ChatFocus::Join(buffer);
+                    }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        buffer.push(c);
+                        self.chat.mode = ChatFocus::Join(buffer);
+                    }
+                    _ => {}
+                }
+                return vec![];
+            }
+            ChatFocus::Normal => {}
+        }
+
+        // The space leader chord: space then one key. Any unbound second key
+        // cancels the chord instead of acting.
+        if self.chat.pending_space {
+            self.chat.pending_space = false;
+            match key.code {
+                KeyCode::Char('c') => self.chat.mode = ChatFocus::Join(String::new()),
+                KeyCode::Char('x') => self.chat.close_active_chat(),
+                _ => {}
+            }
+            return vec![];
+        }
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let KeyCode::Char('r') = key.code {
+                self.chat.reconnect_active();
+            }
+            return vec![];
+        }
+
         match key.code {
+            KeyCode::Char(' ') => self.chat.pending_space = true,
             KeyCode::Char('h')
             | KeyCode::Left
             | KeyCode::Char('l')
             | KeyCode::Right
-            | KeyCode::Tab => {
-                self.chat.focus_other();
+            | KeyCode::Tab => self.chat.focus_other(),
+            KeyCode::Char('i') | KeyCode::Char('o') | KeyCode::Char('a') => {
+                if self.chat.active_key(self.chat.focus).is_some() {
+                    self.chat.mode = ChatFocus::Compose;
+                }
             }
-            KeyCode::Char(']') => self.chat.cycle_account(true),
-            KeyCode::Char('[') => self.chat.cycle_account(false),
+            // k moves back in history (bigger offset from the bottom), j back
+            // toward the tail — the vim direction sense over a bottom-anchored
+            // log.
+            KeyCode::Char('k') | KeyCode::Up => self.chat.scroll_by(1),
+            KeyCode::Char('j') | KeyCode::Down => self.chat.scroll_by(-1),
+            KeyCode::PageUp => self.chat.scroll_by(10),
+            KeyCode::PageDown => self.chat.scroll_by(-10),
+            KeyCode::Char('g') => self.chat.scroll_to_end(true),
+            KeyCode::Char('G') => self.chat.scroll_to_end(false),
+            KeyCode::Char(']') => self.chat.cycle_chat(true),
+            KeyCode::Char('[') => self.chat.cycle_chat(false),
+            KeyCode::Char('}') => self.chat.cycle_account(true, &self.config.clone()),
+            KeyCode::Char('{') => self.chat.cycle_account(false, &self.config.clone()),
             KeyCode::Char('>') => self.chat.resize(true),
             KeyCode::Char('<') => self.chat.resize(false),
             KeyCode::Char('=') => self.chat.reset_split(),
@@ -498,6 +583,11 @@ impl App {
             _ => {}
         }
         vec![]
+    }
+
+    /// Fold one event from a chat task into the right chat's state.
+    pub fn handle_chat_event(&mut self, key: crate::chat::ChatKey, event: crate::chat::ChatEvent) {
+        self.chat.handle_event(key, event);
     }
 
     // -- Screen 1: choosing platforms ---------------------------------------
