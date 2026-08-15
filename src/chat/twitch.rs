@@ -400,6 +400,16 @@ impl TaskState {
             _ => (trimmed, false),
         };
         let wire = sanitize_message(body);
+        // The crate frames a `/me` as "\u{1}ACTION <body>\u{1}" *after* this
+        // cap, and Twitch's 500-character limit applies to the framed wire
+        // text (twi caps after framing for the same reason). Without this, a
+        // maximal /me went out at up to 509 characters — silently dropped by
+        // the server while the local echo made it look delivered.
+        let wire = if is_action {
+            cap_graphemes(&wire, MAX_MESSAGE_GRAPHEMES - ACTION_FRAMING_GRAPHEMES)
+        } else {
+            wire
+        };
         if wire.trim().is_empty() {
             self.emit_notice("cannot send an empty message");
             return;
@@ -519,6 +529,21 @@ pub fn sanitize_message(text: &str) -> String {
         }
     }
     truncate_graphemes(&cleaned)
+}
+
+/// The CTCP ACTION wrapper the transport adds around a `/me` body —
+/// `\u{1}ACTION ` before and `\u{1}` after, nine characters that count
+/// toward Twitch's limit like any others.
+const ACTION_FRAMING_GRAPHEMES: usize = 9;
+
+/// Cap `text` at `limit` grapheme clusters.
+fn cap_graphemes(text: &str, limit: usize) -> String {
+    let graphemes: Vec<&str> = text.graphemes(true).collect();
+    if graphemes.len() <= limit {
+        text.to_string()
+    } else {
+        graphemes[..limit].concat()
+    }
 }
 
 fn truncate_graphemes(text: &str) -> String {
@@ -773,6 +798,25 @@ fn notice_row(id: String, text: String, timestamp: Option<DateTime<Utc>>) -> Cha
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A maximal `/me` must fit Twitch's limit *including* the CTCP framing
+    /// the transport adds afterwards — otherwise the server silently drops
+    /// it while the local echo claims delivery.
+    #[test]
+    fn an_action_body_leaves_room_for_its_ctcp_framing() {
+        let body = "x".repeat(600);
+        let capped = cap_graphemes(
+            &sanitize_message(&body),
+            MAX_MESSAGE_GRAPHEMES - ACTION_FRAMING_GRAPHEMES,
+        );
+        let framed = format!("\u{1}ACTION {capped}\u{1}");
+        assert!(
+            framed.chars().count() <= MAX_MESSAGE_GRAPHEMES,
+            "framed length {} exceeds the wire limit",
+            framed.chars().count()
+        );
+    }
+
     use twitch_irc::message::IRCMessage;
 
     /// Parse a raw IRC line the way the wire would deliver it.
