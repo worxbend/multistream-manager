@@ -278,8 +278,12 @@ impl Engine {
 
         let mut tasks = tokio::task::JoinSet::new();
 
+        // Same panic bookkeeping as `go_live`: if a task dies, its id is the
+        // only thing that comes back, and this map turns it into a platform.
+        let mut task_platforms = HashMap::new();
+
         for (platform, mut backend) in self.backends.drain() {
-            tasks.spawn(async move {
+            let handle = tasks.spawn(async move {
                 let stats = match backend.fetch_stats().await {
                     Ok(stats) => stats,
                     // A failed poll must not kill the dashboard. Record the
@@ -291,13 +295,41 @@ impl Engine {
                 };
                 (platform, backend, stats)
             });
+            task_platforms.insert(handle.id(), platform);
         }
 
         let mut results = Vec::new();
         while let Some(joined) = tasks.join_next().await {
-            if let Ok((platform, backend, stats)) = joined {
-                self.backends.insert(platform, backend);
-                results.push((platform, stats));
+            match joined {
+                Ok((platform, backend, stats)) => {
+                    self.backends.insert(platform, backend);
+                    results.push((platform, stats));
+                }
+                Err(err) => {
+                    // A panic inside fetch_stats. The backend was moved into
+                    // the task and died with it, so this platform is gone for
+                    // the rest of the session — but that must be *said*, as an
+                    // error snapshot under the right platform's name, not
+                    // spelled by the panel silently freezing forever.
+                    let Some(platform) = task_platforms.get(&err.id()).copied() else {
+                        tracing::error!(?err, "a statistics task failed with an unknown id");
+                        continue;
+                    };
+                    tracing::error!(
+                        platform = platform.slug(),
+                        ?err,
+                        "a platform task panicked while fetching statistics"
+                    );
+                    results.push((
+                        platform,
+                        PlatformStats {
+                            error: Some(format!(
+                                "internal error: the statistics task stopped unexpectedly ({err})"
+                            )),
+                            ..Default::default()
+                        },
+                    ));
+                }
             }
         }
 
@@ -617,7 +649,11 @@ mod tests {
         }
 
         fn fetch_stats(&mut self) -> BoxFuture<'_, Result<PlatformStats>> {
-            Box::pin(async { Ok(PlatformStats::default()) })
+            let panics = self.panics;
+            Box::pin(async move {
+                assert!(!panics, "deliberate test panic");
+                Ok(PlatformStats::default())
+            })
         }
 
         fn set_access_token(&mut self, _token: String) {}
@@ -634,6 +670,34 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    /// A panic during a statistics poll used to be dropped without a trace:
+    /// no snapshot, no error, and the platform's dashboard panel simply froze
+    /// on stale numbers forever. The platform cannot keep polling (its backend
+    /// died with the task), but the failure must be reported as an error
+    /// snapshot under the right platform's name.
+    #[tokio::test]
+    async fn a_panicking_stats_poll_reports_an_error_instead_of_vanishing() {
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("engine-poll-stats");
+
+        let mut engine = engine_with(vec![(Platform::Twitch, false), (Platform::YouTube, true)]);
+
+        let results = engine.poll_stats().await;
+
+        assert_eq!(results.len(), 2, "both platforms must be reported");
+        let (_, twitch) = &results[0];
+        let (platform, youtube) = &results[1];
+        assert_eq!(*platform, Platform::YouTube);
+        assert!(twitch.error.is_none());
+        assert!(
+            youtube
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("unexpectedly"),
+            "the panicking platform must carry an error snapshot: {youtube:?}"
+        );
     }
 
     /// Building must follow the partial-success rule too: each platform gets
