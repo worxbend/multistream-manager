@@ -200,6 +200,25 @@ pub fn set_active(palette: &Palette) {
     }
 }
 
+/// The escape sequence that tells the terminal emulator to use `hex` as its
+/// own background colour.
+///
+/// This is OSC 11 ("operating system command 11"), a message to the terminal
+/// program itself rather than something drawn into a cell. The difference
+/// matters: this program paints the cells it draws, but a terminal window is
+/// usually taller and wider than the content in it, and every cell it has not
+/// drawn keeps the terminal's own colour. Without this, a light theme leaves
+/// a dark frame around itself wherever the layout does not reach.
+///
+/// It has to be undone on exit — see [`RESET_BACKGROUND_SEQUENCE`] — or the
+/// colour would be left behind in the shell the program was started from.
+pub fn background_sequence(hex: &str) -> String {
+    format!("\x1b]11;{hex}\x07")
+}
+
+/// The sequence that gives the terminal its own background colour back.
+pub const RESET_BACKGROUND_SEQUENCE: &str = "\x1b]111\x07";
+
 /// The name of the palette used when the config names none, and the fallback
 /// when it names one that does not exist.
 pub const DEFAULT_PRESET: &str = "claude";
@@ -981,6 +1000,15 @@ mod tests {
             contrast_corrected("#fefefe", "#ffffff", "#fdfdfd"),
             "#000000"
         );
+    }
+
+    /// The escape sequences have to be exactly right: a malformed one is not
+    /// ignored by a terminal, it is *displayed*, which would leave stray
+    /// characters across the top of the screen.
+    #[test]
+    fn the_terminal_background_sequences_are_well_formed() {
+        assert_eq!(background_sequence("#1a1523"), "\u{1b}]11;#1a1523\u{7}");
+        assert_eq!(RESET_BACKGROUND_SEQUENCE, "\u{1b}]111\u{7}");
     }
 
     #[test]

@@ -37,6 +37,9 @@ use app::{App, Screen};
 /// panics and `?` propagation.
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    /// Whether the terminal's own background colour was overridden, so `drop`
+    /// knows whether it has to be given back.
+    background_overridden: bool,
     /// Whether mouse reporting was switched on, so `drop` knows whether it
     /// has to be switched off again.
     mouse: bool,
@@ -55,7 +58,11 @@ impl TerminalGuard {
         }
         let terminal = Terminal::new(CrosstermBackend::new(stdout))
             .context("initialising the terminal backend")?;
-        Ok(Self { terminal, mouse })
+        Ok(Self {
+            terminal,
+            mouse,
+            background_overridden: false,
+        })
     }
 }
 
@@ -66,6 +73,15 @@ impl Drop for TerminalGuard {
         let _ = disable_raw_mode();
         if self.mouse {
             let _ = execute!(self.terminal.backend_mut(), DisableMouseCapture);
+        }
+        if self.background_overridden {
+            // Give the terminal its own background back. Without this the
+            // theme's colour would be left behind in the shell this was
+            // started from, which is not this program's window to repaint.
+            use std::io::Write as _;
+            let mut stdout = std::io::stdout();
+            let _ = stdout.write_all(crate::theme::RESET_BACKGROUND_SEQUENCE.as_bytes());
+            let _ = stdout.flush();
         }
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         let _ = self.terminal.show_cursor();
@@ -150,7 +166,24 @@ pub async fn run(config: Config) -> Result<()> {
     let mut telemetry = tokio::time::interval(std::time::Duration::from_secs(1));
     telemetry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // The terminal background currently in effect, so it is only rewritten
+    // when it actually changes — which is at start-up, and again each time
+    // the selection moves in the theme picker.
+    let mut applied_background: Option<String> = None;
+
     loop {
+        if app.config.appearance.terminal_background {
+            let wanted = app.palette.canvas();
+            if applied_background.as_deref() != Some(wanted.as_str()) {
+                use std::io::Write as _;
+                let mut stdout = std::io::stdout();
+                let _ = stdout.write_all(crate::theme::background_sequence(&wanted).as_bytes());
+                let _ = stdout.flush();
+                guard.background_overridden = true;
+                applied_background = Some(wanted);
+            }
+        }
+
         guard
             .terminal
             .draw(|frame| draw::draw(frame, &app))
