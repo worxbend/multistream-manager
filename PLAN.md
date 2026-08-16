@@ -35,9 +35,11 @@ Sources of truth (behavioral authority, read exhaustively at these commits):
   `channel:read:stream_key`, `moderator:read:followers`,
   `channel:read:subscriptions`. YouTube scope: `auth/youtube` (full — subsumes
   `force-ssl`, so chat send is already permitted).
-- Login flow the empty states must reference accurately: `msm login twitch`,
-  `msm login youtube` (browser OAuth), credentials configured in `config.toml`
-  (`msm init` writes a commented starter; `msm status` shows state).
+- Login flow the empty states must reference accurately: browser OAuth from
+  the *Authorise your accounts* screen or Config → Accounts, with credentials
+  entered on the setup screen. (These were once `msm login` and `msm init`;
+  the command line has since been removed and every empty state names an
+  in-interface location instead.)
 
 ## 2. Transport strategy
 
@@ -62,7 +64,8 @@ Ported *on top* of the crate, from twi (provenance comments per module):
   CLEARCHAT/CLEARMSG semantics: mark deleted, never reprint).
 
 New scopes requested at Twitch login: `chat:read chat:edit` (+ existing four).
-Existing logins lack them; the chat pane surfaces "re-run `msm login twitch`"
+Existing logins lack them; the chat pane surfaces "log in again under
+Config → Accounts"
 when the token misses a scope (capability disabled with a reason, never hidden).
 
 ### YouTube — hand-rolled `reqwest` poller (mirrors yc exactly)
@@ -129,7 +132,7 @@ handle, and the youtube.com/youtu.be URL family. This answers the spec question
 - Token store (`tokens.json`) already maps arbitrary string keys → `TokenSet`.
   Primary accounts stay under `twitch` / `youtube` (fully backward compatible).
   Additional chat accounts are stored under `twitch:<login>` /
-  `youtube:<channel-id>`; `msm login twitch --add` (and `youtube --add`) runs
+  `youtube:<channel-id>`; `a` on Config → Accounts runs
   the same OAuth flow and keys the result by the identity resolved from
   `/validate` (Twitch) or `channels.list?mine=true` (YouTube).
 - `[chat]` config table (serde `#[serde(default)]`, so old files load
@@ -172,7 +175,7 @@ handle, and the youtube.com/youtu.be URL family. This answers the spec question
   the same chat split; `alt+w` moves the keyboard between the halves because
   both want the same letters (`r`, `y`, `i`).
 - Chat tab: left pane Twitch, right pane YouTube (both always present; per-pane
-  empty state mirrors the hints + `msm login <platform> --add` for more
+  empty state mirrors the hints + Config → Accounts for more
   accounts). Per-pane sub-tab row: one per account of that platform. Activating
   an account sub-tab opens + connects that account's **own** chat (Twitch: own
   channel; YouTube: own current broadcast via the resolve ladder). `space c`
@@ -221,8 +224,9 @@ Status legend: **ported** (Rust module listed) · **planned** (ordered backlog)
 | T28 | `/channels` picker command | ported → join prompt (`ui/chat_tab.rs`) |
 | T29 | Desktop notifications | ported → `chat/notify.rs` (Windows toast omitted — documented deviation) |
 | T30 | Reveal animations, gradients, pulsing chrome | ported → `anim.rs` (one 100ms clock, five effects: typewriter, gradient wave, shimmer, bounce, pulse; every effect a pure function of elapsed time, so frames are reproducible in tests). `animations = fast\|reduced\|off` in `[appearance]`, cycled with `alt+a`. Reveal is applied to chrome only, never to chat rows — see the deviations log |
-| T31 | Themes (57 presets), theme picker, OSC 11/111 | ported → `theme.rs` (all 57 presets, nine roles, gradient/mix/darken/contrast helpers) + `ui/theme_picker.rs` (`ctrl+t`, live preview, swatch strip) + OSC 11/111 behind `terminal_background`. `[appearance]` holds the name and a `custom_theme` table; `msm profile list\|show\|set` is the command-line half |
-| T32 | Splash/mascot, CLI (doctor/setup/profile), Docker/snap packaging, status-bar process telemetry (cpu/mem/fps), command palette, mouse support, Stream Info + Misc tabs | ported → `ui/splash.rs` (logo, typed tagline, scripted mascot chat, skippable), `msm doctor\|setup\|profile` in `main.rs`, `Dockerfile` + `snap/snapcraft.yaml`, `telemetry.rs` (`alt+t`), `ui/command_palette.rs` (`ctrl+p`), `ui/mouse.rs`. Stream Info is the host's own tab and stays that way; the Misc tab is not ported (its contents are host settings, which live in `[appearance]` and the pickers) |
+| T31 | Themes (57 presets), theme picker, OSC 11/111 | ported → `theme.rs` (all 57 presets, nine roles, gradient/mix/darken/contrast helpers) + `ui/theme_picker.rs` (`ctrl+t`, live preview, swatch strip) + OSC 11/111 behind `terminal_background`. `[appearance]` holds the name and a `custom_theme` table; Config → Appearance is the other half |
+| T32 | Splash/mascot, CLI (doctor/setup/profile), Docker/snap packaging, status-bar process telemetry (cpu/mem/fps), command palette, mouse support, Stream Info + Misc tabs | ported → `ui/splash.rs` (logo, typed tagline, scripted mascot chat, skippable), the Config tab's Diagnostics, Appearance and setup screens (these were once
+`msm doctor`, `msm setup` and `msm profile`), `Dockerfile` + `snap/snapcraft.yaml`, `telemetry.rs` (`alt+t`), `ui/command_palette.rs` (`ctrl+p`), `ui/mouse.rs`. Stream Info is the host's own tab and stays that way; the Misc tab is not ported (its contents are host settings, which live in `[appearance]` and the pickers) |
 | T33 | Anonymous justinfan mode | not ported — twi itself never calls it (library-only capability); no twi feature row exists |
 | T34 | Debug logging (redacted structured) | ported → existing `tracing` to msm.log with the repo's redaction discipline |
 
@@ -250,7 +254,7 @@ Status legend: **ported** (Rust module listed) · **planned** (ordered backlog)
 | Y18 | Moderation writes: delete message, ban, timeout | ported → `chat/youtube.rs` + d/t/b keys in `ui/chat_tab.rs` (unban has no UI in yc either — deliberately not exposed) |
 | Y19 | Search (`/`, n/N), filters 1–4 | ported → `ui/chat_tab.rs` search + `chat/state.rs::Filters` |
 | Y20 | Activity column, roster, autocomplete, inspect | ported → see T21/T23/T24 |
-| Y21 | Chat logging JSONL + `export superchats` CSV | ported → `chat/chatlog.rs` + `msm export superchats` |
+| Y21 | Chat logging JSONL + `export superchats` CSV | ported → `chat/chatlog.rs` + Config → Housekeeping |
 | Y22 | Auto-follow (re-resolve after stream end) | not ported — ctrl+r reconnects an ended chat in one keystroke, and this host already knows when its own broadcast starts (it created it); an opt-in background re-resolver spending quota on a maybe-live channel is deliberately left out |
 | Y23 | Desktop notifications | ported → `chat/notify.rs` (2s throttle replaces burst coalescing — documented deviation) |
 | Y24 | API-key-only read mode | not ported — msm is OAuth-only by design (its whole auth stack is authorization-code); adding an API-key credential class would fork the repo's credential model for a mode yc itself calls limited. Recorded as a deliberate scope decision. |
@@ -327,6 +331,45 @@ the standalone-application scaffolding is not.
   chats it would mean waking the interface sixty times a second to move a bar
   most people are not looking at.
 
+## 8c. The interface became the whole program
+
+After the three ports were complete, the command line was removed
+altogether. `msm` takes no subcommands and no flags; it opens the interface,
+and everything the program can do is in it.
+
+The reasoning is the same one that motivated the host in the first place. A
+streaming setup is driven with one hand while the other is doing something
+else, and the moment somebody wants to mute a microphone, switch a scene or
+fix a title is never a moment they would choose to leave what they are
+looking at, find a terminal and remember a subcommand. Fifteen subcommands
+also meant two of every capability to keep working and two to document, and
+the second copy was consistently the one that drifted.
+
+Where each subcommand went:
+
+| was | is |
+|---|---|
+| `login`, `logout`, `status` | Config → Accounts (`a` adds a chat account) |
+| `go`, `key`, `categories` | the streaming flow on the Stream Info tab |
+| `doctor` | Config → Diagnostics (`diagnostics.rs`) |
+| `setup`, `init`, `profile` | the setup screen, and Config → Appearance |
+| `cleanup`, `export`, `streams` | Config → Housekeeping (`maintenance.rs`) |
+| `paths` | Config → Files |
+| `obs …` | the OBS tab |
+
+Two host features were added with it, neither from twi, yc or obsctl-rs:
+
+- **A configurable keymap** (`keys/`), with defaults shaped the way AstroNvim
+  shapes Neovim's: a space leader, two-letter mnemonic groups, a which-key
+  popup, `]`/`[` for next and previous. Every action has a name and `[keys]`
+  rebinds any of them. The per-screen handlers were stripped of the keys the
+  keymap owns — while both existed, removing a default binding appeared to
+  work and the hard-coded key answered anyway.
+- **A configurable Combined tab** (`layout.rs` + `ui/config_tab.rs`). Eight
+  panels placed in rows and columns with proportional shares, edited live
+  with a preview drawn by the same resolver the tab itself uses. The default
+  reproduces the previous fixed arrangement exactly.
+
 ## 9. Deviations log
 
 - (2026-08-15, adapters) `twitch-irc` v6 hard-codes its capability request to
@@ -372,7 +415,7 @@ the standalone-application scaffolding is not.
   that arrive while you are typing — and they arrive precisely then. Pop-ups now
   expire on their own timer and `alt+m` opens the full session history.
 
-- **`msm profile` manages the theme, not config files.** This matches twi's
+- **The theme command managed the theme, not config files.** This matched twi's
   `profile list|show|set` (which is its theme command). msm already has
   `--config <FILE>` for keeping one preset per kind of stream, so the word is
   not needed twice.
@@ -382,6 +425,12 @@ the standalone-application scaffolding is not.
   `/proc/self/stat` and `/proc/self/statm` on Linux, and are simply left out
   elsewhere, rather than taking a libc dependency the program otherwise does
   not need for two numbers.
+
+- **The interface is the only surface.** twi, yc and obsctl-rs are all
+  command-line programs with a TUI attached; this is a TUI with no command
+  line at all. Every capability of all three ports had to find a place on a
+  tab or in the configuration page rather than a subcommand, which is a
+  larger deviation than any single feature and the reason for the Config tab.
 
 - **OBS state is a cache, and treated as one.** OBS is driven by its own
   window and by stream decks too, so anything cached here can be a moment out
@@ -393,7 +442,7 @@ the standalone-application scaffolding is not.
 
 - **A command's result is a distinct update from a periodic snapshot.** The
   status poll runs once a second and its snapshot can arrive between a command
-  being sent and its answer. Without the distinction, `msm obs stream` would
+  being sent and its answer. Without the distinction, a scripted toggle would
   print the state from before its own toggle.
 
 ### Historical deviations
@@ -408,7 +457,7 @@ the standalone-application scaffolding is not.
 
 1. `PLAN.md` (this file).
 2. `chat` model + ring buffer + rate limiters (+tests).
-3. Config `[chat]` table + multi-account token keys + `msm login --add` (+tests).
+3. Config `[chat]` table + multi-account token keys + adding chat accounts (+tests).
 4. YouTube adapter: target parse, resolve, poller, normalize (+tests).
 5. Twitch adapter over `twitch-irc`: normalize, send path (+tests).
 6. Source seam + per-chat tasks.
