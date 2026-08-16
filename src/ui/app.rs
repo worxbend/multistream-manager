@@ -1380,7 +1380,11 @@ impl App {
             KeyCode::Up => palette.move_by(-1),
             KeyCode::Down | KeyCode::Tab => palette.move_by(1),
             KeyCode::Backspace => palette.backspace(),
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => palette.push(c),
+            // Text, but only text. A control- or alt-modified key is a
+            // shortcut somebody pressed out of habit, not a letter they meant
+            // to search for — typing "m" into the query because they reached
+            // for alt+m would be baffling.
+            KeyCode::Char(c) if is_typed_text(&key) => palette.push(c),
             _ => {}
         }
         vec![]
@@ -2164,11 +2168,32 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
+    /// A config whose `save()` writes to a scratch file of its own.
+    ///
+    /// Some keys — `alt+a` and `alt+t` — persist a setting as part of doing
+    /// their job, which is correct behaviour and a hazard in a test: without
+    /// this, `save()` falls back to the real per-user config path and a test
+    /// run would rewrite the config file of whoever is running it. Pointing
+    /// `source_path` at a scratch file keeps every write inside the test.
+    ///
+    /// Deliberately not the `MSM_CONFIG_DIR` override: that is an environment
+    /// variable, which is process-wide, and these tests run in parallel.
+    fn scratch_config() -> Config {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let mut config = Config::default();
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("msm-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        config.source_path = Some(dir.join(format!("config-{unique}.toml")));
+        config
+    }
+
     fn app() -> App {
         // `App::new` opens on the setup or login screen when nothing is
         // configured, which is not what most of these tests are about; they
         // drive the streaming flow, so they start at the platform picker.
-        let mut app = App::new(Config::default());
+        let mut app = App::new(scratch_config());
         // The start-up splash would otherwise cover the screen these tests
         // are looking at, and swallow the keys they send.
         app.splash_skipped = true;
@@ -3807,5 +3832,19 @@ mod tests {
         app.splash_skipped = true;
         app.handle_mouse(mouse_click(17, 0), area());
         assert_eq!(app.tab, Tab::StreamInfo);
+    }
+
+    /// A key pressed out of habit while the palette is open is a shortcut,
+    /// not a letter. Typing "m" into the search box because someone reached
+    /// for alt+m would be baffling.
+    #[test]
+    fn modified_keys_are_not_typed_into_the_palette_query() {
+        let mut app = app();
+        app.handle_key(ctrl('p'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
+        assert_eq!(
+            app.command_palette.as_ref().map(|p| p.query.as_str()),
+            Some("")
+        );
     }
 }

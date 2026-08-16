@@ -137,13 +137,21 @@ fn clock_ticks_per_second() -> f64 {
 }
 
 /// Resident memory in mebibytes.
+///
+/// Read from `/proc/self/status`, whose `VmRSS` line is already in kibibytes.
+/// The obvious alternative, `/proc/self/statm`, reports a count of *pages* —
+/// which is only meaningful alongside the page size, and that needs a C
+/// library call to read. Assuming the usual 4KiB would report a quarter of
+/// the truth on a machine configured with 16KiB pages, which several arm64
+/// systems are. A figure in the wrong units is worse than no figure, because
+/// it looks like an answer.
 #[cfg(target_os = "linux")]
 fn read_resident_memory_mb() -> Option<f64> {
-    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
-    // The second field is the resident set size, in pages.
-    let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
-    const PAGE_SIZE: f64 = 4096.0;
-    Some(pages as f64 * PAGE_SIZE / (1024.0 * 1024.0))
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
+    // "VmRSS:    14024 kB"
+    let kibibytes: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kibibytes / 1024.0)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -240,6 +248,31 @@ mod tests {
         assert!(
             (0.1..100_000.0).contains(&memory),
             "implausible memory figure: {memory}MB"
+        );
+    }
+
+    /// The figure has to be in the units it claims. This checks it against
+    /// the same kernel file read a different way, which would catch the unit
+    /// being off by a factor — the failure mode of deriving it from a page
+    /// count and an assumed page size.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn memory_is_reported_in_mebibytes_not_in_pages_or_kibibytes() {
+        let reported = read_resident_memory_mb().expect("a reading on Linux");
+        let status = std::fs::read_to_string("/proc/self/status").expect("a readable status");
+        let kibibytes: f64 = status
+            .lines()
+            .find(|line| line.starts_with("VmRSS:"))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse().ok())
+            .expect("a VmRSS line");
+
+        // Allowed to differ a little: the two reads happen a moment apart and
+        // the process is running in between.
+        let expected = kibibytes / 1024.0;
+        assert!(
+            (reported - expected).abs() < expected * 0.5 + 1.0,
+            "reported {reported}MB against {expected}MB — the units look wrong"
         );
     }
 }

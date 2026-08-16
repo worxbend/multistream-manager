@@ -1057,16 +1057,24 @@ fn cmd_doctor(config: &Config) -> Result<()> {
     // The clipboard, which is how a stream key gets to OBS. This is worth
     // checking because it is the one part of the flow that depends on
     // something outside this program being installed.
+    const OSC52_NOTE: &str = "Stream keys will be copied with a terminal escape sequence \
+                              instead. That works over ssh, which a helper program cannot, but \
+                              some terminals refuse it — if `y` reports success and nothing \
+                              pastes, this is why.";
     match clipboard::available_helper() {
-        Some(program) => checks.push(Check::Ok(format!(
+        clipboard::HelperStatus::Ready(program) => checks.push(Check::Ok(format!(
             "clipboard: {program} will copy the stream key"
         ))),
-        None => checks.push(Check::Warn(
+        clipboard::HelperStatus::NeedsDisplay(program) => checks.push(Check::Warn(
+            format!("{program} is installed but has no display to talk to"),
+            format!(
+                "That is normal over ssh. {OSC52_NOTE} Nothing needs installing — the helper is \
+                 already there and will work once you are at the machine itself."
+            ),
+        )),
+        clipboard::HelperStatus::Missing => checks.push(Check::Warn(
             "no clipboard helper is installed".to_string(),
-            "Stream keys will be copied with a terminal escape sequence instead, which works \
-             over ssh but which some terminals refuse. Installing wl-copy (Wayland), xclip or \
-             xsel (X11) makes it reliable."
-                .to_string(),
+            format!("{OSC52_NOTE} Installing wl-copy (Wayland), xclip or xsel (X11) avoids it."),
         )),
     }
 
@@ -1152,15 +1160,11 @@ fn cmd_setup(
         Some(value) => value,
         None => prompt("Client id: ")?,
     };
-    // Note that this is read the same way as the id, and therefore echoes.
-    // Turning terminal echo off needs a C library call, and this command
-    // exists precisely for environments where the interface — which does mask
-    // it — cannot run. Saying so beats a silent surprise.
     let client_secret = match client_secret {
         Some(value) => value,
         None => {
-            println!("\nThe secret is not hidden as you type it. Make sure nobody is looking.");
-            prompt("Client secret: ")?
+            println!();
+            prompt_secret("Client secret: ")?
         }
     };
 
@@ -1186,6 +1190,46 @@ fn cmd_setup(
         platform.slug()
     );
     Ok(())
+}
+
+/// Read one line from the keyboard without echoing it back.
+///
+/// A client secret is a credential: typed in the open it ends up in whatever
+/// is recording the terminal, in a screen share, and in anyone's line of
+/// sight. The interface masks it as dots; this has to hide it too.
+///
+/// Echo is switched off by asking `stty`, rather than by binding the C
+/// library call that does it. That keeps this program free of a libc
+/// dependency it needs for nothing else, and `stty` is part of the base
+/// system everywhere this command makes sense to run. Where it is not
+/// available the secret is read in the open and the prompt says so, which is
+/// far better than refusing to accept a credential at all.
+fn prompt_secret(label: &str) -> Result<String> {
+    let hidden = set_terminal_echo(false);
+    if !hidden {
+        println!("(this terminal will show the secret as you type it)");
+    }
+    let value = prompt(label);
+    if hidden {
+        set_terminal_echo(true);
+        // The newline the user typed was swallowed along with the echo, so
+        // the next thing printed would otherwise land on the prompt's line.
+        println!();
+    }
+    value
+}
+
+/// Turn terminal echo on or off. Returns whether it worked.
+fn set_terminal_echo(on: bool) -> bool {
+    let flag = if on { "echo" } else { "-echo" };
+    std::process::Command::new("stty")
+        // Read the terminal directly rather than through this process's own
+        // standard input: that may be a pipe, and `stty` would then be
+        // changing settings on something that has none.
+        .args(["-F", "/dev/tty", flag])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 /// Read one line from the keyboard.

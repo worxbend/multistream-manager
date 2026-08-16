@@ -28,14 +28,34 @@ use std::process::{Command, Stdio};
 /// Copy `text` to the system clipboard.
 ///
 /// The text is never logged or echoed anywhere, including in error messages.
+///
+/// A helper program that fails is not the end of the attempt: the escape
+/// sequence is tried afterwards regardless. This matters most over ssh, which
+/// is where the two routes disagree — the remote machine may well have
+/// `xclip` installed with no display for it to talk to, and giving up there
+/// would fail in exactly the situation the escape sequence exists to handle.
+/// Only when both routes have failed is anything reported, and then the
+/// reason from each is kept, because "it did not work" without saying which
+/// half broke is not a report anybody can act on.
 pub fn copy(text: &str) -> Result<()> {
-    if let Some(helper) = copy_with_helper(text) {
-        return helper;
+    let helper_failure = match copy_with_helper(text) {
+        Some(Ok(())) => return Ok(()),
+        Some(Err(err)) => Some(err),
+        None => None,
+    };
+
+    let osc52 = copy_with_osc52(text);
+    match (osc52, helper_failure) {
+        (Ok(()), _) => Ok(()),
+        (Err(osc_err), Some(helper_err)) => Err(osc_err.context(format!(
+            "the clipboard helper failed first ({helper_err:#}), then the terminal did not \
+             accept the copy escape sequence"
+        ))),
+        (Err(osc_err), None) => Err(osc_err.context(
+            "no clipboard helper program was usable (wl-copy, xclip, xsel, pbcopy or clip) \
+             and the terminal did not accept the copy escape sequence",
+        )),
     }
-    copy_with_osc52(text).context(
-        "no clipboard helper program was found (wl-copy, xclip, xsel, pbcopy or clip) \
-         and the terminal did not accept the copy escape sequence",
-    )
 }
 
 /// The helper programs worth trying, each with the arguments that make it read
@@ -51,27 +71,77 @@ fn helpers() -> Vec<(&'static str, Vec<&'static str>)> {
     ]
 }
 
-/// The first clipboard helper that is actually installed, if any.
+/// Which clipboard helper is available, for `msm doctor`.
 ///
-/// Only used by `msm doctor`: the copy path itself finds this out by trying,
-/// which is both cheaper and more honest than asking in advance. A separate
-/// check exists because "why did nothing get copied?" is a question worth
-/// being able to answer before it is asked.
-pub fn available_helper() -> Option<&'static str> {
-    helpers().into_iter().find_map(|(program, _)| {
-        // `--help` rather than running it for real: this must not touch the
-        // clipboard, and every one of these programs accepts it.
-        let ran = Command::new(program)
-            .arg("--help")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        // The exit status is not checked — `clip.exe` has no `--help` and
-        // fails. The question is only whether the program exists at all,
-        // which is what a successful spawn answers.
-        ran.ok().map(|_| program)
-    })
+/// The copy path finds this out by trying rather than by asking in advance,
+/// which is both cheaper and more honest. This exists because "why did
+/// nothing get copied?" is a question worth being able to answer before it is
+/// asked.
+pub fn available_helper() -> HelperStatus {
+    let installed: Vec<&'static str> = helpers()
+        .into_iter()
+        .map(|(program, _)| program)
+        .filter(|program| is_installed(program))
+        .collect();
+
+    match installed
+        .iter()
+        .find(|program| has_the_display_it_needs(program))
+    {
+        Some(program) => HelperStatus::Ready(program),
+        None => match installed.first() {
+            Some(program) => HelperStatus::NeedsDisplay(program),
+            None => HelperStatus::Missing,
+        },
+    }
+}
+
+/// What `msm doctor` found when it looked for a clipboard helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelperStatus {
+    /// Installed and able to run.
+    Ready(&'static str),
+    /// Installed, but the display server it talks to is not there — which is
+    /// the normal situation over ssh. Worth distinguishing from missing,
+    /// because "install xclip" is useless advice to someone who already has
+    /// it.
+    NeedsDisplay(&'static str),
+    /// Nothing suitable is installed.
+    Missing,
+}
+
+/// Whether a program exists and can be run.
+fn is_installed(program: &str) -> bool {
+    // `--help` rather than running it for real: this must not touch the
+    // clipboard. The exit status is not checked — `clip.exe` has no `--help`
+    // and fails — because the question is only whether the program exists at
+    // all, which is what a successful spawn answers.
+    Command::new(program)
+        .arg("--help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
+}
+
+/// Whether the display server a helper needs is actually there.
+///
+/// Being installed is not the same as being able to work. `xclip` is present
+/// on plenty of machines that are reached over ssh with no X display, and
+/// `wl-copy` on plenty with no Wayland session — in both cases it exits with
+/// an error the moment it is run. Checking this is what stops `msm doctor`
+/// reporting that the clipboard is fine on a machine where copying a stream
+/// key will silently fall through to the escape-sequence route instead.
+fn has_the_display_it_needs(program: &str) -> bool {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    match program {
+        "wl-copy" => set("WAYLAND_DISPLAY"),
+        "xclip" | "xsel" => set("DISPLAY"),
+        // `pbcopy` talks to the macOS pasteboard and `clip` to Windows;
+        // neither needs anything in the environment.
+        _ => true,
+    }
 }
 
 /// Try each helper in turn. Returns `None` when none of them is installed, so
@@ -79,6 +149,13 @@ pub fn available_helper() -> Option<&'static str> {
 /// was found but failed, because that is a real problem worth reporting.
 fn copy_with_helper(text: &str) -> Option<Result<()>> {
     for (program, args) in helpers() {
+        // Skip a helper whose display server is not there. It would spawn
+        // happily and then exit with an error, and treating that as "the
+        // clipboard is broken" would hide the escape-sequence route that
+        // actually works in this situation.
+        if !has_the_display_it_needs(program) {
+            continue;
+        }
         let spawned = Command::new(program)
             .args(&args)
             .stdin(Stdio::piped())
@@ -176,6 +253,80 @@ fn base64(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A helper that needs a display server has to be judged on whether that
+    /// display server is there, not merely on whether the program exists —
+    /// otherwise `msm doctor` reports a working clipboard on a machine where
+    /// copying will quietly fall back to the escape sequence.
+    /// Guards the two display variables, which are process-wide state that
+    /// more than one test here reads and one of them changes.
+    static DISPLAY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn a_helper_that_needs_a_display_is_only_usable_when_one_is_set() {
+        let _guard = DISPLAY_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        // Whatever this machine has, the rule has to be consistent with it.
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+        let x11 = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
+        assert_eq!(has_the_display_it_needs("wl-copy"), wayland);
+        assert_eq!(has_the_display_it_needs("xclip"), x11);
+        assert_eq!(has_the_display_it_needs("xsel"), x11);
+        // These two answer to the operating system rather than to a display
+        // server, so nothing in the environment can rule them out.
+        assert!(has_the_display_it_needs("pbcopy"));
+        assert!(has_the_display_it_needs("clip.exe"));
+    }
+
+    /// Over ssh the remote machine often has a helper installed with no
+    /// display for it to talk to. Copying has to reach the escape sequence in
+    /// that case rather than reporting the helper's failure, because the
+    /// escape sequence is the route that works there — it is answered by the
+    /// terminal on the user's own desk.
+    #[test]
+    fn a_helper_with_no_display_is_skipped_rather_than_failing_the_copy() {
+        // With neither display variable set, none of the display-dependent
+        // helpers may be attempted at all.
+        temporarily_without_display(|| {
+            for program in ["wl-copy", "xclip", "xsel"] {
+                assert!(
+                    !has_the_display_it_needs(program),
+                    "{program} would be attempted with no display to talk to"
+                );
+            }
+        });
+    }
+
+    /// Run `body` with both display variables unset, then put them back.
+    ///
+    /// The environment is process-wide and these tests can run in parallel,
+    /// so this takes a lock rather than trusting that nothing else is looking
+    /// at the same two variables at the same moment.
+    fn temporarily_without_display(body: impl FnOnce()) {
+        let _guard = DISPLAY_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+
+        let wayland = std::env::var_os("WAYLAND_DISPLAY");
+        let x11 = std::env::var_os("DISPLAY");
+        // SAFETY: the lock above makes this the only thread touching these
+        // two variables, and both are restored before it is released.
+        unsafe {
+            std::env::remove_var("WAYLAND_DISPLAY");
+            std::env::remove_var("DISPLAY");
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+
+        unsafe {
+            if let Some(value) = wayland {
+                std::env::set_var("WAYLAND_DISPLAY", value);
+            }
+            if let Some(value) = x11 {
+                std::env::set_var("DISPLAY", value);
+            }
+        }
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
 
     #[test]
     fn base64_matches_the_standard_including_padding() {
