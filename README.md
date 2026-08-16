@@ -195,6 +195,26 @@ Either way you end up with a binary called `msm`. Check it:
 msm --help
 ```
 
+**Container** — no toolchain needed; the image compiles from source and ships one
+binary on a bare Debian base (about 140MB):
+
+```bash
+docker build -t msm .
+docker run -it -v msm-config:/home/msm/.config/msm msm
+```
+
+Authorising an account inside a container is the awkward part, because the OAuth
+redirect goes to localhost and that means the *container*. The simplest answer is
+to run `msm login all` on your own machine first and mount the config directory
+it produced; the `Dockerfile` documents the alternative.
+
+**Snap** — strictly confined, asking only for network, browser and home access:
+
+```bash
+snapcraft
+sudo snap install --dangerous ./msm_*.snap
+```
+
 > [!NOTE]
 > Prebuilt release binaries are **Linux x86_64 and aarch64 only**. The code
 > itself is portable and the test suite runs on Linux, macOS and Windows in CI,
@@ -225,13 +245,24 @@ live, how many people are watching, and the stream info that would be applied.
 Press <kbd>e</kbd> to edit that info, <kbd>Ctrl</kbd>+<kbd>G</kbd> to apply it,
 then "Start Streaming" in OBS.
 
-The command line can still do all of it, if you prefer:
+The command line can still do all of it, if you prefer — and `msm setup` exists
+for the times a terminal interface is not available at all, such as a headless
+box over ssh:
 
 ```bash
-msm init          # write a commented config file, then paste your credentials in
+msm setup twitch  # prompts for the client id and secret and saves them
 msm login all     # authorise Twitch and Google in your browser
 msm status        # confirm both are logged in
 ```
+
+If something is not working, start here:
+
+```bash
+msm doctor        # checks config, credentials, logins, clipboard, terminal
+```
+
+It reports each check as `[ ok ]`, `[warn]` or `[FAIL]`, and every warning says
+what to do about it rather than only what is wrong.
 
 Prefer to stay on the command line? The `[preset]` section of the config file
 holds the same fields the form does, so you can skip the interface entirely:
@@ -263,6 +294,9 @@ msm --config ~/streams/gaming.toml go
 | `msm categories <QUERY>` | Search Twitch's category list |
 | `msm streams [--show-keys]` | List the stream objects on your YouTube channel |
 | `msm cleanup [-y]` | List (and with `-y`, delete) broadcasts that never went live |
+| `msm doctor` | Check the setup and say what would stop a stream |
+| `msm setup <twitch\|youtube>` | Fill in one platform's API credentials from the command line |
+| `msm profile list\|show\|set` | Look at and change the colour theme |
 | `msm init` | Write a commented starter config file |
 | `msm paths` | Show where config, tokens and logs live |
 
@@ -284,6 +318,90 @@ nothing that could end up on screen, in a recording, or in `msm.log` ever holds
 it. Copying uses `wl-copy`/`xclip`/`xsel`/`pbcopy`/`clip` when one is installed
 and falls back to the OSC 52 terminal escape sequence, which is what makes it
 work over SSH.
+
+---
+
+---
+
+## 🎨 Making it yours
+
+Press <kbd>Ctrl</kbd>+<kbd>P</kbd> if you remember nothing else. That opens the
+**command palette**: every action in the program, filtered as you type, each one
+showing the key that runs it. Using it teaches you the key you could have
+pressed, so over time you stop needing it.
+
+### Themes
+
+<kbd>Ctrl</kbd>+<kbd>T</kbd> opens the theme picker. There are **57 built-in
+palettes** — Nord, Dracula, Gruvbox, Solarized, Tokyo Night, all four
+Catppuccin flavours, and a good many more — and moving the selection applies one
+*immediately*, so you judge a theme by looking at the interface you actually use
+rather than at a row of swatches. <kbd>Enter</kbd> keeps it, <kbd>Esc</kbd> puts
+back what was there.
+
+Every built-in palette is checked, by a test rather than by eye, to keep its body
+text at or above the 4.5:1 contrast ratio the WCAG accessibility guidelines set
+for readable text. No theme ships that cannot be read.
+
+From the command line:
+
+```bash
+msm profile list                            # every theme name, active one marked
+msm profile show nord                       # its nine colours
+msm profile set gruvbox                     # switch
+msm profile set custom --accent "#ff0055"   # write your own, one colour at a time
+```
+
+A theme is nine named roles — background, surface, foreground, muted, border,
+accent, warning, error, success — so `[appearance.custom_theme]` in `config.toml`
+lets you override one and inherit the other eight.
+
+### Motion
+
+<kbd>Alt</kbd>+<kbd>A</kbd> cycles how much the interface animates: **fast**,
+**reduced**, or **off**. `reduced` is not the same animation played slowly —
+that would make it last *longer*, which is the opposite of what asking for less
+motion means. It takes bigger steps at a slower rate, so effects finish in about
+the same time having drawn a third of the frames. `off` draws every animated
+element at its finished frame: nothing is hidden, it simply does not move.
+
+The start-up splash obeys the same setting, and any key skips it. `splash =
+false` in `[appearance]` turns it off for good.
+
+### Notifications
+
+Notifications follow vim's model. Something happens, a short message appears in
+the corner, it does not interrupt you and it goes away on its own — but it is not
+lost either. <kbd>Alt</kbd>+<kbd>M</kbd> opens the **message history**, vim's
+`:messages`, with everything the session has raised and when.
+
+This is the bit that matters while you are streaming: the activity log lives at
+the bottom of the Stream Info tab, so while you are reading chat it is not on
+screen at all. A token that failed to refresh or a chat connection that dropped
+now reaches you wherever you are looking. Routine progress deliberately does not
+pop up — a notification for every ordinary step teaches you to ignore them, and
+then you miss the one that mattered.
+
+### The mouse
+
+Clicking a tab switches to it, clicking a chat pane gives it the keyboard, and
+the wheel scrolls whatever is scrollable. Everything the mouse does has a key
+that does the same — it is there for the first ten minutes, before any of the
+keys are in your fingers. `mouse = false` in `[appearance]` turns reporting off
+and gives your terminal its own text selection back.
+
+### Everything else in `[appearance]`
+
+| Setting | Default | What it does |
+|---|---|---|
+| `theme` | `claude` | Which of the 57 palettes, or `custom` |
+| `animations` | `fast` | `fast`, `reduced` or `off` |
+| `splash` | `true` | The animated start-up screen |
+| `mouse` | `true` | React to clicks and the wheel |
+| `telemetry` | `false` | Show cpu, memory and frame rate in the tab bar (<kbd>Alt</kbd>+<kbd>T</kbd>) |
+| `toasts` | `true` | Pop-up notifications (the log records everything either way) |
+| `toast_seconds` | `5` | How long one stays up; warnings get double, errors triple |
+| `terminal_background` | `false` | Repaint the terminal window's own background to match the theme |
 
 ---
 

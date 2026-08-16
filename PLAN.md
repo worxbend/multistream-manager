@@ -149,9 +149,10 @@ handle, and the youtube.com/youtu.be URL family. This answers the spec question
   switch (both Go apps use alt+digit because terminals can't distinguish
   `ctrl+1` from `1`; matches ported muscle memory and avoids every existing
   binding). Tab bar rendered as the first line.
-- Stream Info tab = existing screens untouched, plus an empty state when no
-  credentials/logins exist: names the exact commands (`msm init`, edit
-  `config.toml` credentials, `msm login twitch`, `msm login youtube`).
+- Stream Info tab = existing screens untouched. (An earlier design had an
+  empty state here naming the commands to run when nothing was configured;
+  the Setup and Login screens below replaced it, since asking for the values
+  beats telling someone which file to edit.)
 - Before the streaming flow, two host screens added after the port (not twi/yc
   features): `Screen::Setup` (API credentials typed in-app, secrets masked,
   saved through the comment-preserving `Config::save`) and `Screen::Login`
@@ -161,6 +162,12 @@ handle, and the youtube.com/youtu.be URL family. This answers the spec question
   opens the dashboard, which shows current channel state before any go-live.
   Stream keys are copy-only (`y`/`Y` → `clipboard::copy`, helper program or
   OSC 52); the former reveal toggle is gone.
+- Appearance surfaces, all host-owned and all reachable without the config
+  file: `ctrl+p` command palette (`ui/command_palette.rs`, replays key events),
+  `ctrl+t` theme picker (`ui/theme_picker.rs`, live preview over the whole
+  screen), `alt+m` message history (`ui/toast.rs`, modal), `alt+a` animation
+  mode, `alt+t` telemetry. The start-up splash (`ui/splash.rs`) covers
+  everything until it expires or any key skips it, and swallows that key.
 - Combined tab: `draw_combined` puts a seven-line channel-state strip above
   the same chat split; `alt+w` moves the keyboard between the halves because
   both want the same letters (`r`, `y`, `i`).
@@ -213,9 +220,9 @@ Status legend: **ported** (Rust module listed) · **planned** (ordered backlog)
 | T27 | `/clip` command | ported → `chat/twitch.rs::handle_clip` + clips:edit scope |
 | T28 | `/channels` picker command | ported → join prompt (`ui/chat_tab.rs`) |
 | T29 | Desktop notifications | ported → `chat/notify.rs` (Windows toast omitted — documented deviation) |
-| T30 | Reveal animations, gradients, pulsing chrome | not ported — twi inventory itself lists the animation clock as tied to the standalone frame loop; the host renders on a 500ms tick and has no animation system. Deliberate drop, recorded per spec. |
-| T31 | Themes (57 presets), theme picker, OSC 11/111 | not ported — host owns its palette (both inventories list theming as a standalone trapping); identity-color + contrast helpers are ported (T16) |
-| T32 | Splash/mascot, CLI (doctor/setup/profile), Docker/snap packaging, status-bar process telemetry (cpu/mem/fps), command palette, mouse support, Stream Info + Misc tabs | not ported — standalone-app trappings per inventory §11; the host has its own CLI, config, lifecycle, and (for Stream Info) its own implementation already |
+| T30 | Reveal animations, gradients, pulsing chrome | ported → `anim.rs` (one 100ms clock, five effects: typewriter, gradient wave, shimmer, bounce, pulse; every effect a pure function of elapsed time, so frames are reproducible in tests). `animations = fast\|reduced\|off` in `[appearance]`, cycled with `alt+a`. Reveal is applied to chrome only, never to chat rows — see the deviations log |
+| T31 | Themes (57 presets), theme picker, OSC 11/111 | ported → `theme.rs` (all 57 presets, nine roles, gradient/mix/darken/contrast helpers) + `ui/theme_picker.rs` (`ctrl+t`, live preview, swatch strip) + OSC 11/111 behind `terminal_background`. `[appearance]` holds the name and a `custom_theme` table; `msm profile list\|show\|set` is the command-line half |
+| T32 | Splash/mascot, CLI (doctor/setup/profile), Docker/snap packaging, status-bar process telemetry (cpu/mem/fps), command palette, mouse support, Stream Info + Misc tabs | ported → `ui/splash.rs` (logo, typed tagline, scripted mascot chat, skippable), `msm doctor\|setup\|profile` in `main.rs`, `Dockerfile` + `snap/snapcraft.yaml`, `telemetry.rs` (`alt+t`), `ui/command_palette.rs` (`ctrl+p`), `ui/mouse.rs`. Stream Info is the host's own tab and stays that way; the Misc tab is not ported (its contents are host settings, which live in `[appearance]` and the pickers) |
 | T33 | Anonymous justinfan mode | not ported — twi itself never calls it (library-only capability); no twi feature row exists |
 | T34 | Debug logging (redacted structured) | ported → existing `tracing` to msm.log with the repo's redaction discipline |
 
@@ -302,6 +309,44 @@ src/ui/chat_tab.rs     split view, account sub-tabs, composer, join prompt
 - (2026-08-15, UI) Timeout duration is a fixed 10 minutes behind a
   double-press confirm; yc prompts for a duration. A duration prompt is
   backlog alongside the other overlay work.
+
+- **Animation is for chrome, not chat.** `anim.rs` ports twi's reveal effects,
+  but they are applied to the splash, headings and indicators only. twi reveals
+  chat rows themselves; this host does not. Chat here is two panes of two
+  platforms at once and is the thing being read while something else is being
+  done, so animating the text competes with reading it. The effects, the clock
+  and the reduced-motion mode are all ported; the one place they are pointed at
+  differs.
+
+- **The active theme is one shared value, not a threaded parameter.** Drawing
+  spans three modules and reads a colour in a few hundred places. `draw`
+  publishes the frame's palette into `theme::skin()` once at the top of each
+  frame and everything reads it from there. Single writer, so a frame is never
+  drawn half from one theme and half from another; the tests that render take a
+  lock because parallel test threads would otherwise each see the other's
+  colours.
+
+- **The command palette replays keys rather than implementing actions.** Each
+  entry names the key events it stands for and choosing it feeds them back
+  through `handle_key`. twi's palette dispatches its own action enum. Replaying
+  makes drift impossible and makes the whole list testable: a test replays every
+  entry across all tabs and screens and fails the build if one changes nothing.
+
+- **Notifications are vim's `:messages`, not twi's status-line flash.** The old
+  single-string toast was cleared by the next keypress, which loses messages
+  that arrive while you are typing — and they arrive precisely then. Pop-ups now
+  expire on their own timer and `alt+m` opens the full session history.
+
+- **`msm profile` manages the theme, not config files.** This matches twi's
+  `profile list|show|set` (which is its theme command). msm already has
+  `--config <FILE>` for keeping one preset per kind of stream, so the word is
+  not needed twice.
+
+- **Process telemetry reads `/proc` directly.** twi uses Go's runtime for heap
+  and a syscall for processor time. Here the figures come from
+  `/proc/self/stat` and `/proc/self/statm` on Linux, and are simply left out
+  elsewhere, rather than taking a libc dependency the program otherwise does
+  not need for two numbers.
 
 ### Historical deviations
 
