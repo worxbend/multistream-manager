@@ -167,6 +167,15 @@ impl AppearanceConfig {
         crate::anim::Mode::parse(&self.animations).unwrap_or_default()
     }
 
+    /// How long a pop-up notification stays up.
+    ///
+    /// Clamped rather than validated: a zero would make notifications vanish
+    /// before they could be read, and a very large value would leave them
+    /// stuck on screen with no way to clear them but a keypress.
+    pub fn toast_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.toast_seconds.clamp(1, 60))
+    }
+
     /// The palette to draw with, plus whether the configured name was
     /// recognised. A `false` here is worth logging, not worth failing on.
     pub fn palette(&self) -> (crate::theme::Palette, bool) {

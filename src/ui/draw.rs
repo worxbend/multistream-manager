@@ -66,6 +66,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
         return;
     }
 
+    // Notifications sit above the interface but below the modal overlays: a
+    // pop-up drawn on top of the message history would be covering the very
+    // list it belongs in.
+    super::toast::draw(frame, areas[2], &app.toasts, std::time::Instant::now());
+
+    if app.toasts.history_open {
+        super::toast::draw_history(frame, frame.area(), &app.toasts);
+        return;
+    }
+
     // The theme picker covers everything: colours are judged by looking at
     // the whole screen, so it takes the whole screen.
     if let Some(picker) = &app.theme_picker {
@@ -434,19 +444,6 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let sk = crate::theme::skin();
-    // A toast takes over the footer while it is showing, because it is always
-    // more urgent than a reminder of the key bindings.
-    if let Some(toast) = &app.toast {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!(" {toast}"),
-                Style::new().fg(sk.warning).add_modifier(Modifier::BOLD),
-            ))),
-            area,
-        );
-        return;
-    }
-
     // The hints follow the *tab*, not only the screen. The Stream Info screens
     // and the Chat tab have entirely different keys, and the footer used to
     // advertise whichever Stream Info screen happened to be underneath — so

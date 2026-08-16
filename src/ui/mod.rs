@@ -6,6 +6,7 @@ pub mod draw;
 pub mod input;
 pub mod splash;
 pub mod theme_picker;
+pub mod toast;
 pub mod worker;
 
 use anyhow::{Context, Result};
@@ -208,7 +209,11 @@ pub async fn run(config: Config) -> Result<()> {
             }
 
             // The animation clock, ticking only while something is moving.
-            _ = frames.tick(), if app.is_animating() => {}
+            // It also drives notification expiry: a pop-up whose time is up
+            // has to come off the screen whether or not a key is pressed.
+            _ = frames.tick(), if app.is_animating() => {
+                app.toasts.expire(std::time::Instant::now());
+            }
 
             // Plain redraw tick, so counters stay current.
             _ = redraw.tick() => {}

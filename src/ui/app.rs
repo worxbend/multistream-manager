@@ -223,8 +223,8 @@ pub struct App {
     /// to submit the same plan twice.
     pub busy: bool,
     pub should_quit: bool,
-    /// A transient one-line message shown at the bottom.
-    pub toast: Option<String>,
+    /// Notifications: what is popped up now, and everything said so far.
+    pub toasts: super::toast::Toasts,
     /// How much the interface animates.
     pub animation: crate::anim::Mode,
     /// When this run started.
@@ -353,7 +353,7 @@ impl App {
             stats: BTreeMap::new(),
             busy: false,
             should_quit: false,
-            toast: None,
+            toasts: super::toast::Toasts::default(),
             log_scroll_back: 0,
         }
     }
@@ -473,10 +473,40 @@ impl App {
     }
 
     /// Append a line to the activity log, keeping the last 500.
+    /// Raise a notification.
+    ///
+    /// Notifications and the activity log answer two different questions.
+    /// The log is the record of what the program did, in order, and it is
+    /// there to be read after the fact. A notification is for the moment it
+    /// happens — it appears over whatever you are looking at, whether that is
+    /// the dashboard, a chat pane or the combined tab, and it goes away on
+    /// its own.
+    pub fn notify(&mut self, level: super::toast::Level, text: impl Into<String>) {
+        if !self.config.appearance.toasts {
+            return;
+        }
+        self.toasts
+            .push(level, text, self.config.appearance.toast_duration());
+    }
+
     pub fn push_log(&mut self, level: LogLevel, message: impl Into<String>) {
+        let message = message.into();
+
+        // Anything that went wrong is also raised as a notification. The log
+        // lives at the bottom of the Stream Info tab, so on the Chat or
+        // Combined tab it is not on screen at all — without this, a failure
+        // while you were reading chat would be silent until you went looking
+        // for it. Ordinary progress stays in the log only: a notification for
+        // every routine step would train you to ignore them.
+        match level {
+            LogLevel::Error => self.notify(super::toast::Level::Error, message.clone()),
+            LogLevel::Warning => self.notify(super::toast::Level::Warning, message.clone()),
+            LogLevel::Info | LogLevel::Success => {}
+        }
+
         self.log.push_back(LogLine {
             level,
-            message: message.into(),
+            message,
             at: chrono::Local::now(),
         });
         let mut dropped_from_front = false;
@@ -597,11 +627,15 @@ impl App {
                 self.results = results;
                 if any_ok {
                     self.go_to(Screen::Dashboard);
-                    self.toast =
-                        Some("Ready — start streaming in OBS whenever you like.".to_string());
+                    self.notify(
+                        super::toast::Level::Success,
+                        "Ready — start streaming in OBS whenever you like.",
+                    );
                 } else {
-                    self.toast =
-                        Some("Every platform failed. See the log below for why.".to_string());
+                    self.notify(
+                        super::toast::Level::Error,
+                        "Every platform failed. See the log below for why.",
+                    );
                 }
             }
 
@@ -649,8 +683,11 @@ impl App {
 
     /// Handle a key press, returning any work for the worker to do.
     pub fn handle_key(&mut self, key: KeyEvent) -> Vec<Command> {
-        // Clear the toast on any key, so it behaves like a transient notice.
-        self.toast = None;
+        // Notifications expire on their own timer rather than on the next
+        // keypress. A message that disappears the moment you touch a key is a
+        // message you cannot read while you are working, which is exactly
+        // when they arrive.
+        self.toasts.expire(std::time::Instant::now());
 
         // Ctrl+C always quits, on every screen, even mid-request.
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
@@ -667,6 +704,12 @@ impl App {
         if self.splash_is_showing() {
             self.splash_skipped = true;
             return vec![];
+        }
+
+        // The message history is modal: while it is open it owns the screen
+        // and every key, exactly like a vim `:messages` listing.
+        if self.toasts.history_open {
+            return self.key_message_history(key);
         }
 
         // The theme picker takes the whole screen and every key while it is
@@ -697,6 +740,18 @@ impl App {
                     };
                     self.chat.pending_mod = None;
                     self.chat.pending_space = false;
+                    return vec![];
+                }
+                // Open the message history — vim's `:messages`, on a key.
+                KeyCode::Char('m') => {
+                    self.chat.pending_mod = None;
+                    self.chat.pending_space = false;
+                    // Opening the history takes the pop-ups off the screen:
+                    // every one of them is in the list you are now looking
+                    // at, so leaving them stacked on top of it would only
+                    // cover the entries they duplicate.
+                    self.toasts.dismiss_all();
+                    self.toasts.open_history();
                     return vec![];
                 }
                 KeyCode::Char('3') => {
@@ -1106,9 +1161,9 @@ impl App {
     /// the form's "save defaults" uses. Nothing here ever logs a secret.
     fn save_credentials(&mut self) -> Vec<Command> {
         if !self.setup_is_complete() {
-            self.toast = Some(
-                "Fill in both the client id and the client secret for at least one platform."
-                    .to_string(),
+            self.notify(
+                super::toast::Level::Warning,
+                "Fill in both the client id and the client secret for at least one platform.",
             );
             return vec![];
         }
@@ -1155,6 +1210,22 @@ impl App {
             .copied()
             .filter(|platform| self.config.check_credentials(&[*platform]).is_ok())
             .collect()
+    }
+
+    /// Keys while the modal message history is open.
+    fn key_message_history(&mut self, key: KeyEvent) -> Vec<Command> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.toasts.close_history(),
+            KeyCode::Up | KeyCode::Char('k') => self.toasts.scroll_history(1),
+            KeyCode::Down | KeyCode::Char('j') => self.toasts.scroll_history(-1),
+            KeyCode::PageUp => self.toasts.scroll_history(10),
+            KeyCode::PageDown => self.toasts.scroll_history(-10),
+            // `g` jumps to the newest, the way `G` jumps to the end of a file.
+            KeyCode::Char('g') => self.toasts.scroll_history(isize::MIN / 2),
+            KeyCode::Char('G') => self.toasts.scroll_history(isize::MAX / 2),
+            _ => {}
+        }
+        vec![]
     }
 
     /// Keys while the theme picker is open.
@@ -1213,9 +1284,12 @@ impl App {
     /// an idle interface costs two redraws a second rather than ten.
     pub fn is_animating(&self) -> bool {
         if self.animation == crate::anim::Mode::Off {
-            return false;
+            // Notifications still have to disappear when their time is up, so
+            // even with motion turned off there has to be a tick while any
+            // are showing — it simply removes them rather than fading them.
+            return self.toasts.showing();
         }
-        self.splash_is_showing()
+        self.splash_is_showing() || self.toasts.showing()
     }
 
     /// Whether the start-up splash is still covering the interface.
@@ -1291,8 +1365,10 @@ impl App {
                 if self.logged_in.values().any(|yes| *yes) {
                     self.go_to(Screen::Platforms);
                 } else {
-                    self.toast =
-                        Some("Nothing is authorised yet, so there is nothing to skip to.".into());
+                    self.notify(
+                        super::toast::Level::Warning,
+                        "Nothing is authorised yet, so there is nothing to skip to.",
+                    );
                 }
             }
             KeyCode::Enter => {
@@ -1301,10 +1377,10 @@ impl App {
                 }
                 let targets = self.login_targets();
                 if targets.is_empty() {
-                    self.toast = Some(
+                    self.notify(
+                        super::toast::Level::Warning,
                         "Tick a platform whose credentials are configured (Space), or press c to \
-                         enter credentials."
-                            .to_string(),
+                         enter credentials.",
                     );
                     return vec![];
                 }
@@ -1353,7 +1429,10 @@ impl App {
             }
             KeyCode::Enter => {
                 if self.selected.is_empty() {
-                    self.toast = Some("Tick at least one platform with Space first.".to_string());
+                    self.notify(
+                        super::toast::Level::Warning,
+                        "Tick at least one platform with Space first.",
+                    );
                     return vec![];
                 }
                 if self.busy {
@@ -1702,7 +1781,7 @@ impl App {
         self.popup = None;
 
         if self.busy {
-            self.toast = Some("Already working — hold on.".to_string());
+            self.notify(super::toast::Level::Warning, "Already working — hold on.");
             return vec![];
         }
 
@@ -1722,7 +1801,8 @@ impl App {
                     format!("{}: {}", issue.field.label(), issue.message),
                 );
             }
-            self.toast = Some(blocking[0].message.clone());
+            let message = blocking[0].message.clone();
+            self.notify(super::toast::Level::Warning, message);
             return vec![];
         }
 
@@ -1757,7 +1837,7 @@ impl App {
             Ok(()) => {
                 self.config = config;
                 self.push_log(LogLevel::Success, "Saved these settings as your defaults.");
-                self.toast = Some("Saved to config.toml.".to_string());
+                self.notify(super::toast::Level::Success, "Saved to config.toml.");
             }
             Err(err) => {
                 self.push_log(LogLevel::Error, format!("Could not save config: {err:#}"));
@@ -1784,12 +1864,13 @@ impl App {
                 // paste into chat, or to see what viewers see.
                 match self.first_watch_url() {
                     Some(url) => {
-                        self.toast = Some(format!("Opening {url}"));
+                        self.notify(super::toast::Level::Info, format!("Opening {url}"));
                         return vec![Command::OpenUrl(url)];
                     }
                     None => {
-                        self.toast = Some(
-                            "No platform has a watch page yet — nothing has gone live.".to_string(),
+                        self.notify(
+                            super::toast::Level::Warning,
+                            "No platform has a watch page yet — nothing has gone live.",
                         );
                     }
                 }
@@ -1819,13 +1900,16 @@ impl App {
     /// whether it worked.
     fn copy_stream_key(&mut self, platform: Platform) -> Vec<Command> {
         if !self.is_selected(platform) {
-            self.toast = Some(format!(
-                "{} is not one of the selected platforms.",
-                platform.label()
-            ));
+            self.notify(
+                super::toast::Level::Warning,
+                format!("{} is not one of the selected platforms.", platform.label()),
+            );
             return vec![];
         }
-        self.toast = Some(format!("Copying the {} stream key…", platform.label()));
+        self.notify(
+            super::toast::Level::Info,
+            format!("Copying the {} stream key…", platform.label()),
+        );
         vec![Command::CopyStreamKey(platform)]
     }
 
@@ -1970,7 +2054,11 @@ mod tests {
 
         let commands = app.handle_key(key(KeyCode::Enter));
         assert!(commands.is_empty());
-        assert!(app.toast.as_deref().unwrap().contains("at least one"));
+        assert!(app
+            .toasts
+            .visible_text()
+            .iter()
+            .any(|text| text.contains("at least one")));
         assert!(!app.busy);
     }
 
@@ -2492,7 +2580,11 @@ mod tests {
             Screen::Form,
             "there is nothing to show on a dashboard"
         );
-        assert!(app.toast.as_deref().unwrap().contains("failed"));
+        assert!(app
+            .toasts
+            .visible_text()
+            .iter()
+            .any(|text| text.contains("failed")));
     }
 
     #[test]
@@ -2860,7 +2952,11 @@ mod tests {
         let commands = app.handle_key(key(KeyCode::Char('Y')));
 
         assert!(commands.is_empty());
-        assert!(app.toast.as_deref().unwrap().contains("YouTube"));
+        assert!(app
+            .toasts
+            .visible_text()
+            .iter()
+            .any(|text| text.contains("YouTube")));
     }
 
     #[test]
@@ -3126,7 +3222,11 @@ mod tests {
 
         let commands = app.handle_key(key(KeyCode::Char('o')));
         assert!(commands.is_empty());
-        assert!(app.toast.as_deref().unwrap().contains("watch page"));
+        assert!(app
+            .toasts
+            .visible_text()
+            .iter()
+            .any(|text| text.contains("watch page")));
     }
 
     #[test]
@@ -3192,5 +3292,89 @@ mod tests {
         let app = App::new(config);
         assert!(app.splash_is_showing());
         assert!(!app.is_animating());
+    }
+
+    /// A failure while you are reading chat has to reach you. The activity
+    /// log is on the Stream Info tab, so on any other tab a logged error
+    /// would otherwise be invisible until you went looking for it.
+    #[test]
+    fn a_logged_failure_is_also_raised_as_a_notification() {
+        let mut app = app();
+        app.push_log(LogLevel::Error, "the token could not be refreshed");
+        assert!(app
+            .toasts
+            .visible_text()
+            .iter()
+            .any(|text| text.contains("token could not be refreshed")));
+    }
+
+    /// Routine progress stays in the log. A pop-up for every ordinary step
+    /// would train you to ignore pop-ups, which costs you the one that
+    /// mattered.
+    #[test]
+    fn ordinary_progress_stays_in_the_log_without_popping_up() {
+        let mut app = app();
+        app.push_log(LogLevel::Info, "connecting to Twitch");
+        app.push_log(LogLevel::Success, "connected");
+        assert!(app.toasts.visible_text().is_empty());
+        assert_eq!(app.log.len(), 2);
+    }
+
+    #[test]
+    fn notifications_can_be_turned_off_entirely() {
+        let mut config = Config::default();
+        config.appearance.toasts = false;
+        let mut app = App::new(config);
+        app.splash_skipped = true;
+        app.push_log(LogLevel::Error, "something broke");
+        assert!(app.toasts.visible_text().is_empty());
+        assert_eq!(app.log.len(), 1, "the log still records it");
+    }
+
+    /// Notifications must not disappear the moment a key is pressed: they
+    /// arrive precisely while you are working, and a message you cannot read
+    /// without stopping typing is a message you cannot read.
+    #[test]
+    fn typing_does_not_clear_a_notification() {
+        let mut app = app();
+        app.push_log(LogLevel::Error, "something broke");
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert!(!app.toasts.visible_text().is_empty());
+    }
+
+    /// The modal history takes every key while it is open, so a key that
+    /// would otherwise quit or moderate has to do nothing but scroll.
+    #[test]
+    fn the_message_history_is_modal_while_it_is_open() {
+        let mut app = app();
+        app.push_log(LogLevel::Error, "one");
+        app.push_log(LogLevel::Error, "two");
+        app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
+        assert!(app.toasts.history_open);
+        assert!(
+            app.toasts.visible_text().is_empty(),
+            "the pop-ups are in the list now, so they come off the screen"
+        );
+
+        // `q` would quit from the platform picker underneath. Here it closes
+        // the history and nothing more.
+        app.handle_key(KeyEvent::from(KeyCode::Char('q')));
+        assert!(!app.should_quit);
+        assert!(!app.toasts.history_open);
+    }
+
+    #[test]
+    fn the_message_history_scrolls_and_stops_at_both_ends() {
+        let mut app = app();
+        for index in 0..5 {
+            app.push_log(LogLevel::Error, format!("message {index}"));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
+        app.handle_key(KeyEvent::from(KeyCode::Char('k')));
+        assert_eq!(app.toasts.history_scroll, 1);
+        app.handle_key(KeyEvent::from(KeyCode::Char('G')));
+        assert_eq!(app.toasts.history_scroll, 4, "G reaches the oldest");
+        app.handle_key(KeyEvent::from(KeyCode::Char('g')));
+        assert_eq!(app.toasts.history_scroll, 0, "g returns to the newest");
     }
 }
