@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod chat_tab;
+pub mod command_palette;
 pub mod draw;
 pub mod input;
 pub mod splash;

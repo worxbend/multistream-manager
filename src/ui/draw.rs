@@ -76,6 +76,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
         return;
     }
 
+    if let Some(palette) = &app.command_palette {
+        super::command_palette::draw(
+            frame,
+            frame.area(),
+            palette,
+            app.chat.active_key(app.chat.focus).is_some(),
+        );
+        return;
+    }
+
     // The theme picker covers everything: colours are judged by looking at
     // the whole screen, so it takes the whole screen.
     if let Some(picker) = &app.theme_picker {

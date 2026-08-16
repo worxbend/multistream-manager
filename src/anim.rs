@@ -60,6 +60,25 @@ impl Mode {
         }
     }
 
+    /// The name this mode is written as in the config file.
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Off => "off",
+            Mode::Reduced => "reduced",
+            Mode::Fast => "fast",
+        }
+    }
+
+    /// The next mode when cycling through them from a key or the command
+    /// palette: fast → reduced → off → fast.
+    pub fn next(self) -> Self {
+        match self {
+            Mode::Fast => Mode::Reduced,
+            Mode::Reduced => Mode::Off,
+            Mode::Off => Mode::Fast,
+        }
+    }
+
     /// How long one step of an effect lasts in this mode.
     ///
     /// `Reduced` does not merely slow the same animation down — that would
@@ -626,6 +645,11 @@ mod tests {
         assert_eq!(Mode::parse("fast"), Some(Mode::Fast));
         assert_eq!(Mode::parse("sideways"), None);
         assert_eq!(Mode::default(), Mode::Fast);
+    }
+
+    #[test]
+    fn cycling_the_mode_returns_to_where_it_started() {
+        assert_eq!(Mode::Fast.next().next().next(), Mode::Fast);
     }
 
     /// The whole point of the width guarantee: whatever the effect and

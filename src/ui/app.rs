@@ -235,6 +235,8 @@ pub struct App {
     /// Set once the start-up splash has been dismissed by a keypress.
     pub splash_skipped: bool,
 
+    /// The command palette, while it is open.
+    pub command_palette: Option<super::command_palette::CommandPalette>,
     /// The theme picker, while it is open.
     pub theme_picker: Option<super::theme_picker::ThemePicker>,
     /// The palette every surface is drawn from.
@@ -319,6 +321,7 @@ impl App {
             );
         }
         Self {
+            command_palette: None,
             animation: config.appearance.animation_mode(),
             started_at: std::time::Instant::now(),
             splash_skipped: false,
@@ -706,6 +709,16 @@ impl App {
             return vec![];
         }
 
+        // The command palette owns the keyboard while it is open, because
+        // every letter is part of the query rather than a shortcut.
+        if self.command_palette.is_some() {
+            return self.key_command_palette(key);
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('p')) {
+            self.command_palette = Some(super::command_palette::CommandPalette::default());
+            return vec![];
+        }
+
         // The message history is modal: while it is open it owns the screen
         // and every key, exactly like a vim `:messages` listing.
         if self.toasts.history_open {
@@ -741,6 +754,31 @@ impl App {
                     self.chat.pending_mod = None;
                     self.chat.pending_space = false;
                     return vec![];
+                }
+                // Cycle how much the interface animates, without going to
+                // the config file for it: whether motion is comfortable is
+                // something you find out by looking at it.
+                KeyCode::Char('a') => {
+                    self.chat.pending_mod = None;
+                    self.chat.pending_space = false;
+                    self.animation = self.animation.next();
+                    self.config.appearance.animations = self.animation.name().to_string();
+                    let mode = self.animation.name();
+                    self.notify(super::toast::Level::Info, format!("Animations: {mode}"));
+                    return self.save_appearance();
+                }
+                // Show or hide the process telemetry in the header.
+                KeyCode::Char('t') => {
+                    self.chat.pending_mod = None;
+                    self.chat.pending_space = false;
+                    self.config.appearance.telemetry = !self.config.appearance.telemetry;
+                    let state = if self.config.appearance.telemetry {
+                        "on"
+                    } else {
+                        "off"
+                    };
+                    self.notify(super::toast::Level::Info, format!("Telemetry: {state}"));
+                    return self.save_appearance();
                 }
                 // Open the message history — vim's `:messages`, on a key.
                 KeyCode::Char('m') => {
@@ -1014,6 +1052,15 @@ impl App {
             KeyCode::Char('i') | KeyCode::Char('o') | KeyCode::Char('a') => {
                 if self.chat.active_key(self.chat.focus).is_some() {
                     self.chat.mode = ChatFocus::Compose;
+                } else {
+                    // There is nowhere to type. Saying so beats doing
+                    // nothing: a key that silently ignores you is
+                    // indistinguishable from a key that is broken.
+                    let platform = self.chat.focus.label();
+                    self.notify(
+                        super::toast::Level::Warning,
+                        format!("No {platform} chat is open to write to yet."),
+                    );
                 }
             }
             // k moves the selection back in history (bigger offset from the
@@ -1212,6 +1259,43 @@ impl App {
             .collect()
     }
 
+    /// Keys while the command palette is open.
+    ///
+    /// Choosing an entry replays the keys that entry stands for, through the
+    /// same `handle_key` everything else goes through. The palette therefore
+    /// cannot do anything a key could not, and cannot drift away from what
+    /// the key actually does.
+    fn key_command_palette(&mut self, key: KeyEvent) -> Vec<Command> {
+        let Some(palette) = self.command_palette.as_mut() else {
+            return vec![];
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.command_palette = None;
+            }
+            KeyCode::Enter => {
+                let keys: Vec<KeyEvent> = palette
+                    .chosen()
+                    .map(|entry| entry.keys.iter().map(|key| key.event()).collect())
+                    .unwrap_or_default();
+                // Close the palette *before* replaying, or the replayed key
+                // would be typed straight back into the query box.
+                self.command_palette = None;
+                let mut commands = Vec::new();
+                for key in keys {
+                    commands.extend(self.handle_key(key));
+                }
+                return commands;
+            }
+            KeyCode::Up => palette.move_by(-1),
+            KeyCode::Down | KeyCode::Tab => palette.move_by(1),
+            KeyCode::Backspace => palette.backspace(),
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => palette.push(c),
+            _ => {}
+        }
+        vec![]
+    }
+
     /// Keys while the modal message history is open.
     fn key_message_history(&mut self, key: KeyEvent) -> Vec<Command> {
         match key.code {
@@ -1306,6 +1390,24 @@ impl App {
     /// Storing it is all that is needed: the next frame publishes it.
     fn apply_palette(&mut self, palette: crate::theme::Palette) {
         self.palette = palette;
+    }
+
+    /// Write an `[appearance]` change back to the config file.
+    ///
+    /// A setting toggled from a key has to survive a restart, or it is not a
+    /// setting — it is a thing you have to redo every session. A failed write
+    /// is reported and the change stays in effect for this run.
+    fn save_appearance(&mut self) -> Vec<Command> {
+        match self.config.save() {
+            Ok(()) => vec![Command::ReloadConfig(Box::new(self.config.clone()))],
+            Err(err) => {
+                self.notify(
+                    super::toast::Level::Error,
+                    format!("Could not save that setting: {err:#}"),
+                );
+                vec![]
+            }
+        }
     }
 
     /// Keep the previewed theme: write the name into the config file and close
@@ -3376,5 +3478,131 @@ mod tests {
         assert_eq!(app.toasts.history_scroll, 4, "G reaches the oldest");
         app.handle_key(KeyEvent::from(KeyCode::Char('g')));
         assert_eq!(app.toasts.history_scroll, 0, "g returns to the newest");
+    }
+
+    /// The palette's promise is that choosing an entry does exactly what its
+    /// key does, so an entry naming a key that nothing handles would be a lie
+    /// printed in a list of instructions.
+    ///
+    /// This replays every entry's keys and requires each to change something
+    /// — the screen, a tab, a mode, a setting, a queued command, or a
+    /// notification explaining why not. Each is tried from all three tabs,
+    /// because an action is allowed to be a no-op where it does not apply
+    /// ("go to the Chat tab" while already on it) but not everywhere.
+    #[test]
+    fn every_command_palette_entry_does_something_when_its_keys_are_replayed() {
+        /// Everything a key is allowed to have changed. Compared as a whole
+        /// rather than field by field, so a new kind of state does not
+        /// silently fall outside the check.
+        fn snapshot(app: &App) -> String {
+            format!(
+                "{:?}|{:?}|{:?}|{}|{}|{}|{:?}|{}|{}|{:?}|{}|{}",
+                app.screen,
+                app.tab,
+                app.combined_focus,
+                app.should_quit,
+                app.toasts.history_open,
+                app.theme_picker.is_some(),
+                app.animation,
+                app.config.appearance.telemetry,
+                app.chat.split_percent,
+                app.chat.mode,
+                app.log.len(),
+                app.toasts.visible_text().len(),
+            )
+        }
+
+        for entry in super::super::command_palette::ENTRIES {
+            // Entries that act on an open chat have nothing to act on in a
+            // fresh session, which is correct rather than broken. They are
+            // covered by the chat tab's own tests.
+            if entry.needs_chat {
+                continue;
+            }
+            let did_something = [Tab::StreamInfo, Tab::Chat, Tab::Combined]
+                .into_iter()
+                .flat_map(|tab| {
+                    [Screen::Platforms, Screen::Form, Screen::Dashboard]
+                        .into_iter()
+                        .map(move |screen| (tab, screen))
+                })
+                .any(|(tab, screen)| {
+                    let mut app = app();
+                    app.tab = tab;
+                    app.screen = screen;
+                    // Nudge the pane split off its default, so an action
+                    // whose job is to put something back has something to
+                    // put back.
+                    app.chat.split_percent = 70;
+                    let before = snapshot(&app);
+                    let mut commands = Vec::new();
+                    for key in entry.keys {
+                        commands.extend(app.handle_key(key.event()));
+                    }
+                    snapshot(&app) != before || !commands.is_empty()
+                });
+
+            assert!(
+                did_something,
+                "the palette offers \"{}\" ({}), but replaying that key changed \
+                 nothing on any tab or screen",
+                entry.title, entry.shortcut
+            );
+        }
+    }
+
+    #[test]
+    fn the_command_palette_opens_and_filters_as_you_type() {
+        let mut app = app();
+        app.handle_key(ctrl('p'));
+        let palette = app.command_palette.as_ref().expect("the palette is open");
+        assert_eq!(
+            palette.matches().len(),
+            super::super::command_palette::ENTRIES.len()
+        );
+
+        for c in "theme".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let palette = app.command_palette.as_ref().expect("still open");
+        assert_eq!(palette.query, "theme");
+        assert_eq!(palette.matches().len(), 1);
+    }
+
+    /// Choosing an entry has to run the action, not type its key into the
+    /// query box it was chosen from.
+    #[test]
+    fn choosing_an_entry_closes_the_palette_and_runs_the_action() {
+        let mut app = app();
+        app.handle_key(ctrl('p'));
+        for c in "combined".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.command_palette.is_none(), "the palette must close");
+        assert_eq!(app.tab, Tab::Combined);
+    }
+
+    #[test]
+    fn escape_closes_the_command_palette_without_running_anything() {
+        let mut app = app();
+        app.handle_key(ctrl('p'));
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.command_palette.is_none());
+        assert_eq!(app.tab, Tab::StreamInfo);
+    }
+
+    /// Letters typed into the palette are query text, not shortcuts — `q`
+    /// must search rather than quit.
+    #[test]
+    fn typing_in_the_palette_does_not_trigger_shortcuts() {
+        let mut app = app();
+        app.handle_key(ctrl('p'));
+        app.handle_key(KeyEvent::from(KeyCode::Char('q')));
+        assert!(!app.should_quit);
+        assert_eq!(
+            app.command_palette.as_ref().map(|p| p.query.as_str()),
+            Some("q")
+        );
     }
 }
