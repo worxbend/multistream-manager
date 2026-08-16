@@ -18,6 +18,7 @@ go-lives, printing a stream key, and housekeeping.
 | [`msm categories <QUERY>`](#msm-categories-query) | Search Twitch's category list. |
 | [`msm streams`](#msm-streams) | List the stream keys on your YouTube channel. |
 | [`msm cleanup`](#msm-cleanup) | Find, and optionally delete, YouTube broadcasts that never went live. |
+| [`msm obs`](#msm-obs) | Control OBS Studio. |
 | [`msm doctor`](#msm-doctor) | Check the setup and report anything that would stop a stream. |
 | [`msm setup <PLATFORM>`](#msm-setup-platform) | Fill in one platform's API credentials from the command line. |
 | [`msm profile`](#msm-profile) | Look at and change the colour theme. |
@@ -404,6 +405,76 @@ keep it.
 With `--yes`, each deletion is reported individually and one that refuses to be
 deleted does not stop the rest. The command fails only if none of them could be
 deleted.
+
+---
+
+## `msm obs`
+
+```bash
+msm obs status
+msm obs scenes | msm obs audio
+msm obs scene <TARGET>
+msm obs mute <TARGET> | unmute <TARGET> | toggle-mute <TARGET>
+msm obs volume <TARGET> <PERCENT>
+msm obs stream | record | pause-recording
+msm obs profiles [NAME] | collections [NAME]
+```
+
+Drives OBS Studio. The interface's OBS tab (<kbd>Alt</kbd>+<kbd>4</kbd>) is the
+comfortable way to do all of this; these exist for a stream deck hotkey, a
+shell alias, or a scene change fired from another program.
+
+`<TARGET>` is a scene or input named any of three ways: its OBS name, an alias
+from `[obs.scene_aliases]` / `[obs.audio_aliases]`, or a shortcut. A name that
+matches nothing is refused with a list of what would have worked.
+
+Each invocation opens its own connection, does one thing and exits — which is
+why there is no background daemon to start or manage.
+
+**Reading**
+
+`status` prints everything at once: versions, the current scene, profile and
+collection, whether streaming and recording are running and for how long, every
+audio input with its mute state and level, and OBS's own performance figures
+including frames lost at the encoder and frames dropped on the way out.
+
+`scenes`, `audio`, `profiles` and `collections` list just that, marking the
+current one with `*`.
+
+**Changing**
+
+Every changing command prints what it produced, read back from OBS rather than
+assumed:
+
+```
+$ msm obs stream
+Streaming: on
+$ msm obs volume mic 40
+Mic/Aux: 40%
+```
+
+`stream`, `record` and `pause-recording` are toggles, and `toggle-mute` is the
+one to bind to a key: a toggle cannot act on a stale idea of which way round
+something currently is, which matters when it may also have been changed in OBS
+itself a moment earlier.
+
+`volume` takes a percentage of unity gain and is capped at 100. Amplifying past
+unity is a deliberate act with real consequences for how a stream sounds, and
+not something to reach by mistyping a number.
+
+**When OBS is not there**
+
+The command fails with a non-zero status and says what to check, rather than
+retrying — a command line has somebody waiting for it, and silently retrying
+for thirty seconds would look like a hang. (The *interface* does retry, because
+nobody is waiting on it.)
+
+```
+$ msm obs status
+Error: could not reach OBS: connecting to OBS at ws://127.0.0.1:4455: Connection refused
+
+Is OBS running, with its WebSocket server turned on under Tools → WebSocket Server Settings?
+```
 
 ---
 

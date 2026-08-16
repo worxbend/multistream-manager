@@ -18,6 +18,7 @@ different kinds of thing:
 * [`[general]`](#general)
 * [`[chat]`](#chat)
 * [`[appearance]`](#appearance)
+* [`[obs]`](#obs)
 * [`[preset]`](#preset)
 * [A full worked example](#a-full-worked-example)
 * [The preset workflow](#the-preset-workflow)
@@ -53,7 +54,7 @@ consider setting those permissions yourself.
 
 ## Shape of the file
 
-Six sections, all optional. Anything you leave out falls back to the default
+Seven sections, all optional. Anything you leave out falls back to the default
 listed below, so a partial file is valid and a completely empty file parses.
 
 ```toml
@@ -62,6 +63,7 @@ listed below, so a partial file is valid and a completely empty file parses.
 [general]     # settings that belong to neither platform
 [chat]        # the chat panes: scrollback, polling, quota, logging
 [appearance]  # colours, motion, mouse, notifications
+[obs]         # controlling OBS Studio
 [preset]      # your default stream settings
 ```
 
@@ -351,6 +353,92 @@ reaches the parts of the window this program never draws to.
 It is off by default because it is not always wanted: a terminal background is
 often deliberately transparent or blurred, and this replaces that with a solid
 colour. It is undone when `msm` exits.
+
+---
+
+## `[obs]`
+
+Controlling OBS Studio from the OBS tab (<kbd>Alt</kbd>+<kbd>4</kbd>) and the
+`msm obs` commands.
+
+OBS has a WebSocket server built in. Turn it on under **Tools → WebSocket
+Server Settings**, and note the port and password it shows you.
+
+```toml
+[obs]
+enabled = true
+host = "127.0.0.1"
+port = 4455
+password = ""                              # prefer the environment variable
+password_env = "OBS_WEBSOCKET_PASSWORD"
+```
+
+### `enabled`
+
+On by default. Connecting costs one local socket, and anyone running OBS almost
+certainly wants the pane; with no OBS listening the attempt fails quietly and
+retries in the background, which looks the same as having it turned off.
+
+Set it to `false` to stop even trying — the OBS tab then says so rather than
+sitting on "waiting for OBS".
+
+### `password` and `password_env`
+
+`password_env` names an environment variable to read the password from, and is
+the better of the two. `config.toml` already holds your Twitch and Google
+credentials; a password sitting in a file is one more place it can be read
+from, and an OBS password lets whoever has it control your stream.
+
+If both are set, the file wins — naming a value explicitly should beat
+inheriting one. An environment variable that exists but is empty counts as
+unset, because that is what an unfilled shell variable looks like.
+
+The password is never actually sent. OBS issues a salt fixed to the password
+and a challenge fresh for each connection, and what travels over the wire is a
+hash of all three — so capturing it does not allow a replay, which matters
+because the connection itself is unencrypted.
+
+### Aliases and shortcuts
+
+Four optional tables give scenes and audio inputs shorter names and one-key
+bindings. They are written `alias = "the OBS name"`, which is the readable
+direction:
+
+```toml
+[obs.scene_aliases]
+brb = "Be Right Back"
+cam = "Main Camera"
+
+[obs.scene_shortcuts]
+1 = "Starting Soon"
+2 = "Main Camera"
+3 = "Be Right Back"
+
+[obs.audio_aliases]
+mic = "Mic/Aux"
+
+[obs.audio_shortcuts]
+m = "Mic/Aux"
+```
+
+An **alias** is a name you can use anywhere a scene or input is named —
+`msm obs scene brb` — and it is what the pane shows in the list. The real OBS
+name is still displayed beside it, or the pane and the OBS window would
+disagree about what everything is called.
+
+A **shortcut** is a single key that acts on the OBS tab: pressing `3` switches
+to Be Right Back, pressing `m` toggles the microphone. Keep them to one
+character; anything longer can never be typed as a shortcut.
+
+Both are resolved in a fixed order — an exact shortcut, then an exact alias,
+then the exact OBS name, then the same three ignoring case. The order is fixed
+so that adding a scene can never silently change what an existing alias means.
+
+> [!NOTE]
+> Shortcuts take precedence over the tab's own keys, so binding `s` to a scene
+> means `s` no longer starts the stream on that tab. Bind digits and letters
+> the tab does not use: `s`, `r`, `p`, `m`, `M`, `P`, `C`, `R`, `j`, `k` and
+> `q` all already do something.
 
 ---
 

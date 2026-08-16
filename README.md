@@ -73,8 +73,8 @@ written up in [docs/how-it-works.md](docs/how-it-works.md).
 
 ## 💬 Chat
 
-The window has three top-level tabs, switched with <kbd>Alt</kbd>+<kbd>1</kbd> /
-<kbd>Alt</kbd>+<kbd>2</kbd> / <kbd>Alt</kbd>+<kbd>3</kbd>: **Stream Info**
+The window has four top-level tabs, switched with <kbd>Alt</kbd>+<kbd>1</kbd> /
+<kbd>Alt</kbd>+<kbd>2</kbd> / <kbd>Alt</kbd>+<kbd>3</kbd> / <kbd>Alt</kbd>+<kbd>4</kbd>: **Stream Info**
 (everything above), **Chat** — Twitch chat on the left, YouTube live chat on the
 right, always side by side — and **Combined**, which puts a compact line of
 channel state (connected account, live or not, viewers, uptime) above those same
@@ -294,6 +294,7 @@ msm --config ~/streams/gaming.toml go
 | `msm categories <QUERY>` | Search Twitch's category list |
 | `msm streams [--show-keys]` | List the stream objects on your YouTube channel |
 | `msm cleanup [-y]` | List (and with `-y`, delete) broadcasts that never went live |
+| `msm obs <status\|scene\|mute\|volume\|stream\|record\|…>` | Control OBS Studio |
 | `msm doctor` | Check the setup and say what would stop a stream |
 | `msm setup <twitch\|youtube>` | Fill in one platform's API credentials from the command line |
 | `msm profile list\|show\|set` | Look at and change the colour theme |
@@ -320,6 +321,102 @@ and falls back to the OSC 52 terminal escape sequence, which is what makes it
 work over SSH.
 
 ---
+
+---
+
+---
+
+## 🎬 OBS
+
+<kbd>Alt</kbd>+<kbd>4</kbd> opens an OBS tab: scenes on the left, audio inputs on
+the right, what OBS is doing along the top, and how hard it is working along the
+bottom.
+
+OBS is the other half of a stream. This program sets the title and reads the
+chats; OBS holds the scenes, the microphone and the encoder. Leaving the terminal
+to press one button in a graphical window is exactly the interruption the rest of
+this program exists to avoid.
+
+| Key | What it does |
+|---|---|
+| <kbd>j</kbd> / <kbd>k</kbd> | Move within the focused list |
+| <kbd>tab</kbd> | Swap between scenes and audio |
+| <kbd>enter</kbd> | Switch to the scene, or toggle the input's mute |
+| <kbd>m</kbd> | Mute or unmute the selected input, from either list |
+| <kbd>M</kbd> | **Mute everything** — the panic key |
+| <kbd>+</kbd> / <kbd>-</kbd> | Nudge the selected input's level |
+| <kbd>s</kbd> / <kbd>r</kbd> | Start or stop streaming / recording |
+| <kbd>p</kbd> | Pause or resume a recording |
+| <kbd>P</kbd> / <kbd>C</kbd> | Cycle profiles / scene collections |
+| <kbd>R</kbd> | Reconnect now |
+
+Anything given a shortcut in the config is one key away, so <kbd>3</kbd> can be
+"switch to Be Right Back" and <kbd>m</kbd> can be "mute the microphone".
+
+### Setting it up
+
+In OBS: **Tools → WebSocket Server Settings**, tick "Enable WebSocket server",
+and note the port and password. Then in `config.toml`:
+
+```toml
+[obs]
+enabled = true
+host = "127.0.0.1"
+port = 4455
+# Better than putting the password in this file:
+password_env = "OBS_WEBSOCKET_PASSWORD"
+
+# Short names, so `msm obs scene brb` and the pane both say "brb".
+[obs.scene_aliases]
+brb = "Be Right Back"
+cam = "Main Camera"
+
+# One-key shortcuts, used on the OBS tab.
+[obs.scene_shortcuts]
+1 = "Starting Soon"
+2 = "Main Camera"
+3 = "Be Right Back"
+
+[obs.audio_aliases]
+mic = "Mic/Aux"
+
+[obs.audio_shortcuts]
+m = "Mic/Aux"
+```
+
+The password is never sent. OBS issues a salt and a fresh challenge per
+connection, and what goes over the wire is a hash of all three — so capturing it
+does not let anyone replay it.
+
+**OBS not being there is normal.** Start `msm` before OBS, or never run OBS at
+all, and nothing complains: the pane says what to turn on, and the connection
+retries quietly in the background with a backoff that stops growing at thirty
+seconds. `msm doctor` reports it either way.
+
+### From a script
+
+The tab is the comfortable way; these are for a stream deck hotkey or a shell
+alias:
+
+```bash
+msm obs status                 # everything, in one screen
+msm obs scene brb              # switch, by name, alias or shortcut
+msm obs toggle-mute mic        # prefer this to mute/unmute for a hotkey
+msm obs volume mic 40          # a percentage of unity gain
+msm obs stream                 # start if stopped, stop if started
+msm obs record
+msm obs profiles               # list; add a name to switch
+```
+
+Prefer `toggle-mute` to `mute`/`unmute` when binding a key: a toggle cannot act
+on a stale idea of which way round the input is, which matters when it may also
+have been changed in OBS itself a moment earlier.
+
+This port comes from **[obsctl-rs](https://github.com/worxbend/obsctl-rs)**. What
+it deliberately leaves behind is that project's background daemon and IPC layer:
+those exist so many short-lived `obsctl` invocations can share one OBS
+connection, and a long-running program that owns its own connection is the thing
+they were standing in for.
 
 ---
 

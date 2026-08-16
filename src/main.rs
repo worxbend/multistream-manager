@@ -1215,6 +1215,23 @@ fn cmd_doctor(config_path: Option<&std::path::Path>) -> Result<()> {
         )),
     }
 
+    // OBS, which is optional and therefore only worth a note either way.
+    if config.obs.enabled {
+        checks.push(Check::Ok(format!(
+            "OBS: will connect to {} ({})",
+            config.obs.url(),
+            if config.obs.password().is_some() {
+                "with a password"
+            } else {
+                "no password"
+            }
+        )));
+    } else {
+        checks.push(Check::Ok(
+            "OBS control is turned off in config.toml".to_string(),
+        ));
+    }
+
     // The theme, since a name that does not exist silently falls back.
     let (_, recognised) = config.appearance.palette();
     if recognised {

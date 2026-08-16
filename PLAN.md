@@ -292,6 +292,41 @@ src/ui/chat_tab.rs     split view, account sub-tabs, composer, join prompt
   crates for the 200-grapheme cap and wrapping.
 - twi/yc flat config files → this repo's real TOML `[chat]` table.
 
+## 8b. OBS control (../obsctl-rs)
+
+The OBS pane is a third port, alongside twi and yc. Its source is the sibling
+`obsctl-rs` project, and the same rule applies: the *capabilities* are ported,
+the standalone-application scaffolding is not.
+
+| Capability | obsctl-rs | msm |
+|---|---|---|
+| obs-websocket 5 framing, Hello/Identify handshake | `obs/protocol.rs` | `obs/protocol.rs` |
+| SHA-256 challenge authentication | `obs/auth.rs` | `obs/auth.rs` |
+| Request builders | `obs/requests.rs` | `obs/requests.rs` |
+| Connection task, request correlation, timeouts | `obs/client.rs` | `obs/task.rs` |
+| Event model and application | `obs/client.rs::ObsEvent` | `obs/event.rs` |
+| State snapshot (scenes, audio, outputs, stats) | `obs/state.rs` | `obs/state.rs` |
+| Reconnect with backoff | `runtime/reconnect_policy.rs` | `obs/task.rs` |
+| Alias/shortcut resolution | `domain/aliases.rs` | `obs/state.rs::find` |
+| Scene/audio/output/profile/collection commands | `domain/command.rs` | OBS tab keys + `msm obs` |
+| Scenes, audio, stats, live-bar widgets | `tui/widgets/*` | `ui/obs_tab.rs` |
+
+**Not ported**, and why:
+
+- **The daemon, the IPC layer and the systemd installer** (`ipc/`, `server/`,
+  `service/`). That architecture exists so several one-shot `obsctl` CLI
+  invocations can share a single OBS connection. msm is a long-running program
+  that owns its own connection, which is the thing the daemon was standing in
+  for; `msm obs` opens its own connection per invocation because there is
+  nothing to share between invocations that do not overlap.
+- **Its TUI shell, theme system, splash, command palette and mouse layer.**
+  msm has all of these already (T30–T32); the OBS pane plugs into them.
+- **rust-i18n localisation.** msm is English-only throughout.
+- **Volume meters** (`INPUT_VOLUME_METERS`, ~60 events/second per input).
+  Right for a dedicated meter bridge; for a pane sharing a terminal with two
+  chats it would mean waking the interface sixty times a second to move a bar
+  most people are not looking at.
+
 ## 9. Deviations log
 
 - (2026-08-15, adapters) `twitch-irc` v6 hard-codes its capability request to
@@ -347,6 +382,19 @@ src/ui/chat_tab.rs     split view, account sub-tabs, composer, join prompt
   `/proc/self/stat` and `/proc/self/statm` on Linux, and are simply left out
   elsewhere, rather than taking a libc dependency the program otherwise does
   not need for two numbers.
+
+- **OBS state is a cache, and treated as one.** OBS is driven by its own
+  window and by stream decks too, so anything cached here can be a moment out
+  of date. Two consequences run through the design: actions are toggles
+  wherever OBS offers one, so they cannot act on a stale belief about which way
+  round something is; and a command re-reads what it changed before reporting,
+  rather than trusting the event that announces it — events arrive on their own
+  schedule and not at all when a value did not really change.
+
+- **A command's result is a distinct update from a periodic snapshot.** The
+  status poll runs once a second and its snapshot can arrive between a command
+  being sent and its answer. Without the distinction, `msm obs stream` would
+  print the state from before its own toggle.
 
 ### Historical deviations
 

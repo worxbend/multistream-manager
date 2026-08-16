@@ -55,6 +55,7 @@ tail -f "$(msm paths | awk '/^Log:/{print $2}')"     # in another
 * [msm key youtube does not print a key](#msm-key-youtube-does-not-print-a-key)
 * [Copying a stream key does nothing](#copying-a-stream-key-does-nothing)
 * [The theme looks wrong, or colours are approximate](#the-theme-looks-wrong-or-colours-are-approximate)
+* [The OBS tab will not connect](#the-obs-tab-will-not-connect)
 
 ---
 
@@ -609,3 +610,62 @@ framed in dark, say — that is `terminal_background = false` in `[appearance]`,
 which is the default. Turning it on repaints the whole window; it is off by
 default because it replaces a deliberately transparent or blurred background
 with a solid colour.
+
+---
+
+## The OBS tab will not connect
+
+The tab says "waiting for OBS", or `msm obs status` fails.
+
+```bash
+msm obs status
+```
+
+says which of the four usual causes it is.
+
+**"Connection refused"** — nothing is listening. Either OBS is not running, or
+its WebSocket server is off: **Tools → WebSocket Server Settings** in OBS, tick
+"Enable WebSocket server". Check the port there matches `port` under `[obs]`;
+the default is 4455 on both sides.
+
+**"the password is probably wrong"** — OBS closes the connection without a word
+when authentication fails, so this is inferred rather than reported by OBS.
+Press "Show Connect Info" in that same settings window to see the real
+password. If you are using `password_env`, check the variable is actually set
+in the environment `msm` runs in:
+
+```bash
+echo "${OBS_WEBSOCKET_PASSWORD:-(not set)}"
+```
+
+A variable set in your shell profile will not be visible to a `msm` started
+from a desktop launcher, which is a common way for this to work in one terminal
+and not another.
+
+**"OBS control is turned off"** — `enabled = false` under `[obs]`.
+
+**It connects and then drops repeatedly** — OBS restarting, or a firewall
+between two machines. The interface reconnects on its own with a backoff that
+stops growing at thirty seconds; <kbd>R</kbd> on the OBS tab retries
+immediately rather than waiting it out.
+
+### A scene or input cannot be found
+
+```
+Error: no scene called "brb". Try one of: Starting Soon, Main Camera
+```
+
+The name is matched against the OBS name, the aliases in
+`[obs.scene_aliases]` / `[obs.audio_aliases]`, and the shortcuts — so this
+means none of the three matched. `msm obs scenes` and `msm obs audio` list
+exactly what OBS reports, which is the authority.
+
+Audio inputs are picked out of OBS's full input list by kind, so a source that
+is not an audio capture will not appear — that is deliberate, not a fault.
+
+### A shortcut key stopped doing what it used to
+
+Shortcuts from the config take precedence over the OBS tab's built-in keys. If
+you bind `s` to a scene, `s` no longer starts the stream on that tab. The keys
+the tab uses itself are `j`, `k`, `m`, `M`, `s`, `r`, `p`, `P`, `C`, `R`, `u`
+and `q`.
