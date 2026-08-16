@@ -597,6 +597,55 @@ pub mod edit {
         }
     }
 
+    /// Move a panel one place earlier or later within the split it sits in.
+    ///
+    /// Reordering rather than re-parenting: a panel keeps whichever row or
+    /// column it belongs to and swaps with its neighbour there. Moving a
+    /// panel *between* rows would need a target chosen as well as a
+    /// direction, which is a bigger interaction than one key can carry.
+    pub fn move_panel(layout: &mut PaneLayout, index: usize, delta: isize) -> bool {
+        let mut seen = 0;
+        move_walk(&mut layout.root, &mut seen, index, delta)
+    }
+
+    fn move_walk(
+        node: &mut crate::layout::Node,
+        seen: &mut usize,
+        target: usize,
+        delta: isize,
+    ) -> bool {
+        let crate::layout::Node::Split { children, .. } = node else {
+            return false;
+        };
+        let mut swap = None;
+        for (position, child) in children.iter_mut().enumerate() {
+            match &mut child.node {
+                crate::layout::Node::Panel(_) => {
+                    if *seen == target {
+                        swap = Some(position);
+                    }
+                    *seen += 1;
+                }
+                other => {
+                    if move_walk(other, seen, target, delta) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        let Some(position) = swap else { return false };
+        let destination = position as isize + delta;
+        // Stopping at the ends rather than wrapping: a panel that leapt from
+        // the bottom of a column to the top would look like a different
+        // action from the one that was asked for.
+        if destination < 0 || destination >= children.len() as isize {
+            return false;
+        }
+        children.swap(position, destination as usize);
+        true
+    }
+
     /// Turn rows into columns and back.
     pub fn rotate(layout: &mut PaneLayout) {
         flip(&mut layout.root);
@@ -800,5 +849,46 @@ mod tests {
             }
             assert!(layout.validate().is_ok(), "broken after step {step}");
         }
+    }
+
+    /// The editor's hint advertises J and K for moving a panel, so they have
+    /// to move one.
+    #[test]
+    fn a_panel_can_be_moved_within_its_row() {
+        let mut layout = PaneLayout::default();
+        // The default has two chats side by side in the second row.
+        let before = layout.panels();
+        let twitch = before
+            .iter()
+            .position(|panel| *panel == Panel::TwitchChat)
+            .expect("the default layout has a Twitch pane");
+
+        assert!(edit::move_panel(&mut layout, twitch, 1));
+        let after = layout.panels();
+        assert_ne!(before, after, "the order changed");
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "moving must not add or lose a panel"
+        );
+    }
+
+    /// A panel at the end of its row stays there rather than leaping to the
+    /// other end, which would look like a different action from the one
+    /// asked for.
+    #[test]
+    fn moving_stops_at_the_ends_rather_than_wrapping() {
+        let mut layout = PaneLayout::default();
+        let first = layout.panels();
+        assert!(!edit::move_panel(&mut layout, 0, -1));
+        assert_eq!(layout.panels(), first, "nothing moved");
+    }
+
+    #[test]
+    fn moving_a_panel_that_is_not_there_changes_nothing() {
+        let mut layout = PaneLayout::default();
+        let before = layout.panels();
+        assert!(!edit::move_panel(&mut layout, 99, 1));
+        assert_eq!(layout.panels(), before);
     }
 }

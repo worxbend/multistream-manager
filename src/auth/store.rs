@@ -28,7 +28,7 @@ pub struct TokenSet {
     pub scopes: Vec<String>,
     /// Who this token belongs to, resolved once at login time. Cached so the
     /// Chat tab can label account sub-tabs without spending an API call, and
-    /// so `msm login --add` can key extra accounts by identity. Absent on
+    /// so extra chat accounts can be keyed by identity. Absent on
     /// tokens saved by older versions — `None` means unknown, and everything
     /// keeps working without it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,7 +124,7 @@ fn expiry_from_now(secs: i64) -> Option<DateTime<Utc>> {
 /// its whole duration. The write itself is already atomic (temp file plus
 /// rename), but atomicity alone cannot stop a *lost update*: process A loads
 /// the store, spends seconds refreshing a token over the network, and saves —
-/// while process B (say, `msm login youtube` in another terminal) saved fresh
+/// while process B (say, a second copy of this program) saved fresh
 /// tokens in between. A's save then writes back its stale snapshot and B's
 /// brand-new login is erased. Twitch makes this worse by rotating the refresh
 /// token on every refresh, so the erased token may be the only valid one.
@@ -189,7 +189,8 @@ impl TokenStore {
         }
         serde_json::from_str(&text).with_context(|| {
             format!(
-                "parsing {}. If it has been corrupted, delete it and run `msm login` again.",
+                "parsing {}. If it has been corrupted, delete it and log in again under \
+                 Config → Accounts.",
                 path.display()
             )
         })
@@ -327,7 +328,7 @@ mod tests {
     }
 
     /// `expires_in` is a number chosen by the remote server. An absurd one used
-    /// to panic inside chrono and abort the process — during `msm login`, and
+    /// to panic inside chrono and abort the process — during a login, and
     /// worse, during the silent refresh that runs while the dashboard is up.
     #[test]
     fn an_out_of_range_expiry_is_ignored_rather_than_crashing() {

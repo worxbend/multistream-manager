@@ -24,12 +24,6 @@
 //!   nobody wants to hand-edit. See the comment on [`LayoutFile`] for the full
 //!   reasoning.
 
-// Nothing outside this module calls into it yet: the Combined tab still draws
-// its fixed arrangement, and wiring the two together is a separate change. The
-// allowance is here rather than on each item so it can be deleted in one line
-// once the drawing code reads its layout from here.
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 use ratatui::layout::Rect;
@@ -519,7 +513,7 @@ pub struct LayoutFile {
 }
 
 impl Default for LayoutFile {
-    /// The written form of [`Layout::default`], so `msm init` can print the
+    /// The written form of [`Layout::default`], so a starter config can carry the
     /// current arrangement rather than an empty section.
     fn default() -> Self {
         LayoutFile::from_layout(&Layout::default())

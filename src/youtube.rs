@@ -277,7 +277,7 @@ impl YouTubeBackend {
         body.items.into_iter().next().ok_or_else(|| {
             anyhow!(
                 "your Google account has no YouTube channel. Open youtube.com, create a \
-                 channel, then run `msm login youtube` again."
+                 channel, then log in again under Config → Accounts."
             )
         })
     }
@@ -541,7 +541,7 @@ impl YouTubeBackend {
     ///
     /// `liveBroadcasts.list` returns 50 at a time. A channel that has been
     /// resubmitted to over many sessions can hold more than one page of the
-    /// leftovers `msm cleanup` is looking for, and a command that offered to
+    /// leftovers the cleanup job looks for, and a job that offered to
     /// tidy up but only ever saw the first fifty would be worse than useless.
     ///
     /// The page count is capped because each page costs API quota, and because
@@ -958,7 +958,7 @@ impl Backend for YouTubeBackend {
 
 /// Whether a listed broadcast was created but never received a video feed.
 ///
-/// This is the safety rule behind `msm cleanup`, so it is deliberately
+/// This is the safety rule behind the cleanup job, so it is deliberately
 /// pessimistic: deleting a broadcast that holds a recording somebody wanted
 /// cannot be undone, whereas leaving an orphan behind costs nothing but clutter.
 ///
@@ -1029,7 +1029,7 @@ async fn check(response: reqwest::Response, action: &str) -> Result<reqwest::Res
              youtube.com/features — note that first-time activation takes 24 hours."
         }
         "insufficientPermissions" => {
-            "\n  The saved token lacks the permission this needs. Run `msm login youtube`."
+            "\n  The saved token lacks the permission this needs. Log in again under Config → Accounts."
         }
         "invalidVideoMetadata" | "invalidTags" => {
             "\n  YouTube rejected the metadata. An over-long description or a tag \
@@ -1039,7 +1039,7 @@ async fn check(response: reqwest::Response, action: &str) -> Result<reqwest::Res
             "\n  YouTube cannot see a video feed yet. Start streaming in OBS first."
         }
         _ => match status.as_u16() {
-            401 => "\n  Your YouTube login has expired. Run `msm login youtube`.",
+            401 => "\n  Your YouTube login has expired. Log in again under Config → Accounts.",
             403 => {
                 "\n  YouTube refused this action. Check that live streaming is enabled \
                     on your channel and that you are not out of API quota."
@@ -1150,7 +1150,7 @@ struct BroadcastSnippet {
     #[serde(default)]
     scheduled_start_time: Option<chrono::DateTime<chrono::Utc>>,
     /// Set the moment YouTube first sees a feed. Its presence is the definitive
-    /// proof that a broadcast has been live, which is what `msm cleanup` uses to
+    /// proof that a broadcast has been live, which is what the cleanup job uses to
     /// decide what it must never touch.
     #[serde(default)]
     actual_start_time: Option<chrono::DateTime<chrono::Utc>>,
@@ -1469,7 +1469,7 @@ mod tests {
 
     #[test]
     fn a_broadcast_that_was_only_created_counts_as_stale() {
-        // This is the exact leftover `msm cleanup` exists for: submitting the
+        // This is the exact leftover the cleanup job exists for: submitting the
         // form again makes a fresh broadcast and abandons the previous one in
         // the "created" state with no feed ever attached to it.
         assert!(never_went_live(&broadcast("created", None, None)));

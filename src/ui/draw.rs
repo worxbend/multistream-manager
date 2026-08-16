@@ -1416,7 +1416,12 @@ mod tests {
         assert!(screen.contains("YouTube"));
         assert!(screen.contains("No Twitch chat accounts yet"));
         assert!(screen.contains("No YouTube chat accounts yet"));
-        assert!(screen.contains("--add"));
+        // The empty state has to say where to log in, and that place has to
+        // be inside the interface — there is nowhere else for it to be.
+        assert!(
+            screen.contains("Config") && screen.contains("Accounts"),
+            "the empty state should point at Config → Accounts:\n{screen}"
+        );
     }
 
     /// The tab bar names both tabs and how to switch.

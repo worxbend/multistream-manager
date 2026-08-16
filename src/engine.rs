@@ -314,7 +314,7 @@ impl Engine {
     }
 
     /// List the RTMP ingest endpoints on a platform's account. Backs
-    /// `msm streams`.
+    /// the stream listing in Config → Housekeeping.
     pub async fn list_ingest_endpoints(
         &mut self,
         platform: Platform,
@@ -323,7 +323,7 @@ impl Engine {
     }
 
     /// List broadcasts that were created but never received a feed. Backs the
-    /// listing half of `msm cleanup`.
+    /// listing half of the cleanup job in Config → Housekeeping.
     pub async fn list_stale_broadcasts(
         &mut self,
         platform: Platform,
@@ -331,7 +331,8 @@ impl Engine {
         self.backend(platform)?.list_stale_broadcasts().await
     }
 
-    /// Delete one broadcast. Backs the `--yes` half of `msm cleanup`.
+    /// Delete one broadcast. Backs the second press of the cleanup job, which is
+    /// the one that actually removes anything.
     pub async fn delete_broadcast(&mut self, platform: Platform, id: &str) -> Result<()> {
         self.backend(platform)?.delete_broadcast(id).await
     }
@@ -478,7 +479,7 @@ mod tests {
     /// A backend that panics must be reported against *its own* platform. The
     /// bug this guards against tagged every panic as Twitch, so a broken
     /// YouTube produced two contradictory Twitch rows and no YouTube row at
-    /// all — the dashboard blamed a healthy platform and `msm go` exited 0.
+    /// all — the dashboard blamed a healthy platform that had worked.
     #[tokio::test]
     async fn a_panicking_backend_is_reported_against_its_own_platform() {
         // Token lookups must not touch the real user's files.

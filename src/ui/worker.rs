@@ -488,7 +488,7 @@ pub async fn run(
                             message: format!(
                                 "{} did not return a stream key. On Twitch this usually means the \
                                  saved login predates the `channel:read:stream_key` permission — \
-                                 run `msm login twitch` again.",
+                                 log in again under Config → Accounts.",
                                 platform.label()
                             ),
                         });

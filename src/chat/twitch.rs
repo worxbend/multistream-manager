@@ -376,7 +376,7 @@ async fn run(mut state: TaskState, mut commands: mpsc::Receiver<ChatCommand>) {
                                 state.emit_status(
                                     ConnectionStatus::Failed,
                                     "Twitch rejected the login token even after refreshing it; \
-                                     run `msm login twitch` to sign in again, then press ctrl+r",
+                                     log in again under Config → Accounts, then press ctrl+r",
                                 );
                                 match park(&mut commands, &state).await {
                                     ParkOutcome::Shutdown => return,
@@ -585,7 +585,7 @@ async fn run_clip(
     };
     if account_user_id.is_empty() {
         notice(
-            "clipping needs to know your user id; re-run `msm login twitch` \
+            "clipping needs to know your user id; log in again under Config → Accounts \
              to refresh the saved account identity"
                 .into(),
         );
@@ -640,7 +640,7 @@ async fn run_clip(
         }
         401 | 403 => notice(
             "your Twitch login is missing the clips:edit permission; \
-             run `msm login twitch` again to grant it"
+             log in again under Config → Accounts to grant it"
                 .into(),
         ),
         404 => notice("clips aren't available: you are not currently live".into()),

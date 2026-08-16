@@ -1011,6 +1011,22 @@ impl App {
                         edit::resize(&mut config.draft, config.cursor, -1);
                         config.dirty = true;
                     }
+                    // Reordering keeps the cursor on the panel that moved,
+                    // so holding the key walks a panel along rather than
+                    // moving a different one each time.
+                    KeyCode::Char('J') => {
+                        if edit::move_panel(&mut config.draft, config.cursor, 1) {
+                            config.cursor = (config.cursor + 1)
+                                .min(config.draft.panels().len().saturating_sub(1));
+                            config.dirty = true;
+                        }
+                    }
+                    KeyCode::Char('K') => {
+                        if edit::move_panel(&mut config.draft, config.cursor, -1) {
+                            config.cursor = config.cursor.saturating_sub(1);
+                            config.dirty = true;
+                        }
+                    }
                     KeyCode::Char('r') => {
                         edit::rotate(&mut config.draft);
                         config.dirty = true;

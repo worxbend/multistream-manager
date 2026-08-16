@@ -1357,7 +1357,7 @@ fn classify(status: u16, reason: &str) -> Failure {
             500.. => FailKind::Transient,
             // Anything unlisted (402, 405, 408, 409, a stray 3xx) is not
             // evidence the saved login is wrong. Calling it Auth parks the
-            // poller for good and tells the user to re-run `msm login
+            // poller for good and tells the user to log in again under Config →
             // youtube`, which fixes nothing; Transient at least retries.
             _ => FailKind::Transient,
         },
@@ -1376,7 +1376,7 @@ fn classify(status: u16, reason: &str) -> Failure {
             _ => "the live chat was not found; the broadcast may be over".to_string(),
         },
         FailKind::Auth => {
-            "YouTube refused the saved login; run `msm login youtube` to sign in again".to_string()
+            "YouTube refused the saved login; log in again under Config → Accounts".to_string()
         }
         FailKind::Rejected => format!("YouTube rejected the request (HTTP {status} {reason})"),
         FailKind::Transient => format!("YouTube had a temporary problem (HTTP {status})"),
@@ -3046,7 +3046,7 @@ mod tests {
     fn unlisted_http_statuses_are_transient_rather_than_auth_failures() {
         // These statuses say nothing about the saved login. Treating them as
         // auth failures parked the poller permanently and told the user to run
-        // `msm login youtube`, which could never fix the real problem.
+        // logging in again, which could never fix the real problem.
         for status in [402_u16, 405, 408, 409, 302] {
             let failure = classify(status, "");
             assert_eq!(

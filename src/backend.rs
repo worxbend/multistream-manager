@@ -78,7 +78,7 @@ pub trait Backend: Send {
 
     /// List every RTMP ingest endpoint configured on the account.
     ///
-    /// Backs `msm streams`. On YouTube these are the reusable stream objects,
+    /// Shown by Config → Housekeeping. On YouTube these are the reusable stream objects,
     /// and the whole reason for showing them is that one of their ids can be
     /// pinned as `stream_id` so the same key is bound every single time.
     ///
@@ -91,7 +91,7 @@ pub trait Backend: Send {
 
     /// List broadcasts that were created but never received a video feed.
     ///
-    /// Backs `msm cleanup`. Platforms that have no broadcast objects at all —
+    /// Backs the cleanup job in Config → Housekeeping. Platforms with no broadcast objects —
     /// Twitch, where the channel is permanently there and going live means no
     /// more than pointing OBS at it — return an empty vector, so there is never
     /// anything for the command to offer to delete.

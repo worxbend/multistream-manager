@@ -14,7 +14,7 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scene {
     pub name: String,
-    /// A short name from the config, for saying `msm obs scene brb` rather
+    /// A short name from the config, shown in the OBS pane rather
     /// than typing whatever the scene is really called.
     pub alias: Option<String>,
     /// A single key that switches to this scene from the OBS pane.

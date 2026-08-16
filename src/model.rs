@@ -544,7 +544,7 @@ pub struct GoLiveOutcome {
 /// One of the RTMP ingest endpoints a platform holds for your account — what
 /// YouTube calls a "stream" and everybody else calls a stream key.
 ///
-/// Listing these is how `msm streams` lets you find the id to pin as `stream_id`
+/// Listing these in Config → Housekeeping is how the id to pin as `stream_id`
 /// in the config, so that every broadcast binds to the same key and your OBS (or
 /// Aitum) settings never have to change.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -556,7 +556,7 @@ pub struct IngestEndpoint {
     pub title: String,
     /// The key itself, when the platform reported one.
     ///
-    /// It is carried here so that `msm streams --show-keys` can print it when
+    /// It is carried here so the copy-to-clipboard path can reach it, and
     /// asked, and for no other reason: a key is enough on its own to broadcast
     /// to the channel, so nothing prints it unless the flag was passed.
     pub key: Option<String>,
@@ -567,7 +567,7 @@ pub struct IngestEndpoint {
 /// Submitting a plan a second time creates a *new* YouTube broadcast rather than
 /// editing the previous one, so a session where you fixed a typo and resubmitted
 /// leaves the earlier attempt behind. Nothing removes them by itself, and they
-/// pile up in YouTube Studio's list of upcoming streams. `msm cleanup` finds
+/// pile up in YouTube Studio's list of upcoming streams. Config → Housekeeping finds
 /// them; see there for why "never received a feed" is defined so cautiously.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaleBroadcast {

@@ -71,7 +71,7 @@ fn helpers() -> Vec<(&'static str, Vec<&'static str>)> {
     ]
 }
 
-/// Which clipboard helper is available, for `msm doctor`.
+/// Which clipboard helper is available, for Config → Diagnostics.
 ///
 /// The copy path finds this out by trying rather than by asking in advance,
 /// which is both cheaper and more honest. This exists because "why did
@@ -96,7 +96,7 @@ pub fn available_helper() -> HelperStatus {
     }
 }
 
-/// What `msm doctor` found when it looked for a clipboard helper.
+/// What the diagnostics found when they looked for a clipboard helper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelperStatus {
     /// Installed and able to run.
@@ -130,7 +130,7 @@ fn is_installed(program: &str) -> bool {
 /// Being installed is not the same as being able to work. `xclip` is present
 /// on plenty of machines that are reached over ssh with no X display, and
 /// `wl-copy` on plenty with no Wayland session — in both cases it exits with
-/// an error the moment it is run. Checking this is what stops `msm doctor`
+/// an error the moment it is run. Checking this is what stops the diagnostics
 /// reporting that the clipboard is fine on a machine where copying a stream
 /// key will silently fall through to the escape-sequence route instead.
 fn has_the_display_it_needs(program: &str) -> bool {
@@ -256,7 +256,7 @@ mod tests {
 
     /// A helper that needs a display server has to be judged on whether that
     /// display server is there, not merely on whether the program exists —
-    /// otherwise `msm doctor` reports a working clipboard on a machine where
+    /// otherwise the diagnostics report a working clipboard on a machine where
     /// copying will quietly fall back to the escape sequence.
     /// Guards the two display variables, which are process-wide state that
     /// more than one test here reads and one of them changes.

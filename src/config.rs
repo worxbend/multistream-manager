@@ -56,7 +56,8 @@ pub struct AppearanceConfig {
     /// Which palette to draw with: one of the 57 built-in names, or `custom`
     /// to use the `[appearance.custom_theme]` colours below.
     ///
-    /// Run `msm profile list` to see every name. An unrecognised name
+    /// Config → Appearance lists every name, and ctrl+t previews them. An
+    /// unrecognised name
     /// falls back to the default palette.
     pub theme: String,
 
@@ -364,7 +365,8 @@ pub struct ObsConfig {
 
     /// Short names for scenes, as `alias = "OBS scene name"`.
     ///
-    /// `brb = "Be Right Back"` lets `msm obs scene brb` do the obvious thing,
+    /// `brb = "Be Right Back"` names the scene "brb" in the OBS pane and lets a
+    /// shortcut reach it,
     /// and shows "brb" in the pane. Without one, the scene's real name is
     /// used for both.
     pub scene_aliases: std::collections::BTreeMap<String, String>,
@@ -554,7 +556,7 @@ pub struct ChatConfig {
     /// Write every chat message to append-only JSON Lines files.
     pub chat_logging: bool,
     /// Where those files go. Empty means `chatlog/` under the config
-    /// directory (`msm paths` prints where that lives).
+    /// directory (Config → Files shows where that is).
     pub chat_log_dir: String,
     /// Rotate a log file once it reaches this many bytes.
     pub chat_log_max_bytes: u64,
@@ -750,7 +752,8 @@ impl Config {
     ///
     /// The obvious implementation — serialise the struct to TOML and write that
     /// — loses every comment in the file, because comments are not fields.
-    /// `msm init` writes about forty lines of them explaining where to get each
+    /// The starter file written on first run carries about forty lines of them
+    /// explaining where to get each
     /// client id and secret, what `reuse_stream` does and what the YouTube
     /// category numbers mean, and users add their own notes. Pressing Ctrl+S
     /// once in the form used to delete all of it.
@@ -895,7 +898,7 @@ const CONFIG_HEADER: &str = r#"# multistream-manager configuration
 #   [preset]              Your default stream settings. The TUI form starts from
 #                         these values, and pressing Ctrl+S in the form saves
 #                         whatever you have typed back here. You can also just
-#                         edit this section by hand and run `msm go --yes`.
+#                         edit this section by hand; the interface picks it up.
 #
 # Anything you omit falls back to a sensible default, so a partial file is fine.
 "#;

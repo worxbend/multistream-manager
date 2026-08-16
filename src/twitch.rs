@@ -89,9 +89,7 @@ impl TwitchBackend {
             .context("contacting Twitch to validate your access token")?;
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            bail!(
-                "your Twitch access token is not valid. Run `msm login twitch` to authorise again."
-            );
+            bail!("your Twitch access token is not valid. Log in again under Config → Accounts.");
         }
 
         let response = check(response, "validating the Twitch token").await?;
@@ -224,7 +222,7 @@ impl Backend for TwitchBackend {
                 bail!(
                     "your saved Twitch token does not include the {required} permission, \
                      so it cannot change your stream title or category. \
-                     Run `msm login twitch` to re-authorise with the current permissions."
+                     Log in again under Config → Accounts to re-authorise with the current permissions."
                 );
             }
 
@@ -459,7 +457,7 @@ async fn check(response: reqwest::Response, action: &str) -> Result<reqwest::Res
 
     // Translate the status codes that have a specific, actionable cause.
     let hint = match status.as_u16() {
-        401 => "\n  Your Twitch login has expired. Run `msm login twitch`.",
+        401 => "\n  Your Twitch login has expired. Log in again under Config → Accounts.",
         403 => {
             "\n  Twitch refused this action. If you were changing the category, some \
                 categories are age-restricted or unavailable in your region."

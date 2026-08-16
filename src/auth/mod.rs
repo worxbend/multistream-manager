@@ -246,7 +246,7 @@ pub async fn access_tokens(
     // Held for the whole load-refresh-save cycle. Without it, this process
     // could spend seconds in a network refresh and then save a snapshot that
     // erases whatever another msm process wrote in the meantime — such as the
-    // fresh tokens of an `msm login` running in a second terminal.
+    // fresh tokens of a login running in a second copy of this program.
     let lock = match lock_store().await {
         Ok(lock) => lock,
         Err(err) => {
@@ -337,15 +337,14 @@ async fn keyed_token_from(
     let Some(tokens) = store.get_keyed(key).cloned() else {
         if key == platform.slug() {
             bail!(
-                "not logged in to {}. Run `msm login {}` first.",
-                platform.label(),
-                platform.slug()
+                "not logged in to {}. Log in under Config → Accounts (alt+5), or on the \
+                 Authorise your accounts screen.",
+                platform.label()
             );
         }
         bail!(
-            "no saved login for the chat account `{key}`. Run `msm login {} --add` \
-             and authorise that account in the browser.",
-            platform.slug()
+            "no saved login for the chat account `{key}`. Add it under Config → Accounts \
+             and authorise that account in the browser."
         );
     };
 
@@ -356,9 +355,8 @@ async fn keyed_token_from(
     let Some(refresh_token) = tokens.refresh_token.clone() else {
         bail!(
             "your {} access token has expired and there is no refresh token saved, \
-             so it cannot be renewed automatically. Run `msm login {}` again.",
-            platform.label(),
-            platform.slug()
+             so it cannot be renewed automatically. Log in again under Config → Accounts.",
+            platform.label()
         );
     };
 
@@ -374,9 +372,8 @@ async fn keyed_token_from(
         .await
         .with_context(|| {
             format!(
-                "could not renew your {} access token. Run `msm login {}` to authorise again.",
-                platform.label(),
-                platform.slug()
+                "could not renew your {} access token. Log in again under Config → Accounts.",
+                platform.label()
             )
         })?;
 
@@ -392,11 +389,7 @@ async fn keyed_token_from(
 /// A one-line summary of a platform's login state, for `msm status`.
 pub fn describe(platform: Platform, tokens: Option<&TokenSet>) -> String {
     match tokens {
-        None => format!(
-            "{:<8} not logged in — run `msm login {}`",
-            platform.label(),
-            platform.slug()
-        ),
+        None => format!("{:<8} not logged in — Config → Accounts", platform.label()),
         Some(tokens) => {
             let renewable = if tokens.refresh_token.is_some() {
                 "renews automatically"
@@ -417,9 +410,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn describe_tells_you_what_to_run_when_logged_out() {
+    fn describe_tells_you_where_to_log_in_when_logged_out() {
         let text = describe(Platform::Twitch, None);
-        assert!(text.contains("msm login twitch"));
+        assert!(
+            text.contains("Config → Accounts"),
+            "a logged-out platform should say where to log in: {text}"
+        );
     }
 
     #[test]
@@ -469,7 +465,7 @@ mod tests {
             .find(|(p, _)| *p == Platform::YouTube)
             .unwrap();
         let err = youtube.1.as_ref().unwrap_err().to_string();
-        assert!(err.contains("msm login youtube"), "unhelpful error: {err}");
+        assert!(err.contains("Config → Accounts"), "unhelpful error: {err}");
 
         // Nothing needed renewing, so the file must not have been rewritten.
         let written = std::fs::read_to_string(scratch.path().join("tokens.json")).unwrap();

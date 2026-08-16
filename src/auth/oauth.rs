@@ -765,7 +765,7 @@ fn summarise_oauth_error(body: &str) -> String {
     let hint = match code {
         "invalid_grant" => {
             "\n  This usually means the saved refresh token has been revoked or has expired. \
-             Run `msm login <platform>` to authorise again."
+             Log in again under Config → Accounts."
         }
         "invalid_client" => {
             "\n  The client id or client secret in your config does not match what the \
@@ -908,7 +908,7 @@ mod tests {
             r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#;
         let summary = summarise_oauth_error(body);
         assert!(summary.contains("invalid_grant"));
-        assert!(summary.contains("msm login"));
+        assert!(summary.contains("Config → Accounts"));
     }
 
     #[test]

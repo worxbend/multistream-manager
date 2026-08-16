@@ -1641,7 +1641,6 @@ fn draw_composer(
 /// recon, not invented.
 fn draw_empty_state(frame: &mut Frame, area: Rect, config: &Config, platform: Platform) {
     let sk = crate::theme::skin();
-    let slug = platform.slug();
     let credentials_ready = config.check_credentials(&[platform]).is_ok();
 
     let mut lines = vec![
@@ -1652,26 +1651,28 @@ fn draw_empty_state(frame: &mut Frame, area: Rect, config: &Config, platform: Pl
         )),
         Line::from(""),
     ];
+    // Everything named here happens inside the interface, because there is
+    // nowhere else for it to happen: telling somebody to quit and run a
+    // command was already poor advice and is now impossible advice.
     if !credentials_ready {
+        lines.push(Line::from(format!(
+            "1. Enter the {} API credentials on the setup screen.",
+            platform.label()
+        )));
         lines.push(Line::from(
-            "1. Create API credentials first: run `msm init`, then fill in the",
+            "2. Log in under Config → Accounts (alt+5), or on the",
         ));
-        lines.push(Line::from(format!(
-            "   [{slug}] section of config.toml (`msm paths` shows where it lives)."
-        )));
-        lines.push(Line::from(format!(
-            "2. Log in: quit and run `msm login {slug}`."
-        )));
+        lines.push(Line::from("   Authorise your accounts screen."));
     } else {
-        lines.push(Line::from(format!(
-            "Log in: quit and run `msm login {slug}`."
-        )));
+        lines.push(Line::from(
+            "Log in under Config → Accounts (alt+5), or on the",
+        ));
+        lines.push(Line::from("Authorise your accounts screen."));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(format!(
-        "Add more accounts any time with `msm login {slug} --add`;"
-    )));
-    lines.push(Line::from("each appears here as its own sub-tab."));
+    lines.push(Line::from(
+        "Every logged-in account appears here as its own sub-tab.",
+    ));
 
     let paragraph = Paragraph::new(lines)
         .style(Style::default().fg(sk.muted))
