@@ -1262,6 +1262,93 @@ impl App {
             .collect()
     }
 
+    /// A mouse click or wheel movement.
+    ///
+    /// The mouse does a deliberately small number of things — pick a tab,
+    /// pick a pane, scroll — and everything it does has a key that does the
+    /// same. It is routed through the same handlers as those keys rather than
+    /// acting directly, for the same reason the command palette is: two
+    /// implementations of one action drift apart.
+    pub fn handle_mouse(
+        &mut self,
+        event: crossterm::event::MouseEvent,
+        area: ratatui::layout::Rect,
+    ) -> Vec<Command> {
+        use super::mouse::Action;
+
+        if !self.config.appearance.mouse {
+            return vec![];
+        }
+        // While the splash or a modal overlay is up, the thing under the
+        // pointer is not the thing being drawn there. Scrolling still works,
+        // since a long list is exactly what a wheel is for, but a click would
+        // land on whatever happened to be underneath.
+        let overlay_open =
+            self.splash_is_showing() || self.toasts.history_open || self.theme_picker.is_some();
+
+        let action = super::mouse::action_for(
+            event,
+            area,
+            self.chat_is_showing(),
+            self.tab == Tab::Combined,
+            self.chat.split_percent,
+        );
+        let Some(action) = action else { return vec![] };
+
+        match action {
+            Action::SelectTab(_) | Action::FocusChat(_) | Action::FocusStreamInfo
+                if overlay_open =>
+            {
+                vec![]
+            }
+            Action::SelectTab(index) => {
+                let key = match index {
+                    0 => '1',
+                    1 => '2',
+                    _ => '3',
+                };
+                self.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::ALT))
+            }
+            Action::FocusChat(platform) => {
+                // On the combined tab the keyboard may be on the stream-info
+                // half, so clicking a chat pane has to move it across as well
+                // as choose the pane.
+                if self.tab == Tab::Combined {
+                    self.combined_focus = CombinedFocus::Chat;
+                }
+                self.chat.focus = platform;
+                vec![]
+            }
+            Action::FocusStreamInfo => {
+                self.combined_focus = CombinedFocus::StreamInfo;
+                vec![]
+            }
+            Action::ScrollBack => self.scroll(true),
+            Action::ScrollForward => self.scroll(false),
+        }
+    }
+
+    /// Scroll whatever is currently scrollable, in the direction the wheel
+    /// turned: the message history when it is open, the chat when it is
+    /// showing, and otherwise the activity log.
+    fn scroll(&mut self, back: bool) -> Vec<Command> {
+        const WHEEL_LINES: isize = 3;
+        if self.toasts.history_open {
+            self.toasts
+                .scroll_history(if back { WHEEL_LINES } else { -WHEEL_LINES });
+        } else if self.chat_has_the_keyboard() {
+            for _ in 0..WHEEL_LINES {
+                self.chat.select_move(if back { 1 } else { -1 });
+            }
+        } else if back {
+            self.log_scroll_back =
+                (self.log_scroll_back + WHEEL_LINES as usize).min(self.log.len().saturating_sub(1));
+        } else {
+            self.log_scroll_back = self.log_scroll_back.saturating_sub(WHEEL_LINES as usize);
+        }
+        vec![]
+    }
+
     /// Keys while the command palette is open.
     ///
     /// Choosing an entry replays the keys that entry stands for, through the
@@ -3607,5 +3694,118 @@ mod tests {
             app.command_palette.as_ref().map(|p| p.query.as_str()),
             Some("q")
         );
+    }
+
+    fn area() -> ratatui::layout::Rect {
+        ratatui::layout::Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 30,
+        }
+    }
+
+    fn mouse_click(column: u16, row: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn wheel(up: bool) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: if up {
+                crossterm::event::MouseEventKind::ScrollUp
+            } else {
+                crossterm::event::MouseEventKind::ScrollDown
+            },
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn clicking_a_tab_switches_to_it() {
+        let mut app = app();
+        app.handle_mouse(mouse_click(17, 0), area());
+        assert_eq!(app.tab, Tab::Chat);
+        app.handle_mouse(mouse_click(28, 0), area());
+        assert_eq!(app.tab, Tab::Combined);
+        app.handle_mouse(mouse_click(2, 0), area());
+        assert_eq!(app.tab, Tab::StreamInfo);
+    }
+
+    #[test]
+    fn clicking_a_chat_pane_gives_it_the_keyboard() {
+        let mut app = app();
+        app.tab = Tab::Chat;
+        app.handle_mouse(mouse_click(90, 10), area());
+        assert_eq!(app.chat.focus, Platform::YouTube);
+        app.handle_mouse(mouse_click(10, 10), area());
+        assert_eq!(app.chat.focus, Platform::Twitch);
+    }
+
+    /// On the combined tab the keyboard may be on the stream-info half, so
+    /// clicking a chat pane has to move it across as well as pick the pane —
+    /// otherwise the pane looks focused and does not answer to the keyboard.
+    #[test]
+    fn clicking_a_chat_pane_on_the_combined_tab_moves_the_keyboard_to_the_chats() {
+        let mut app = app();
+        app.tab = Tab::Combined;
+        app.combined_focus = CombinedFocus::StreamInfo;
+        app.handle_mouse(mouse_click(10, 20), area());
+        assert_eq!(app.combined_focus, CombinedFocus::Chat);
+        assert_eq!(app.chat.focus, Platform::Twitch);
+
+        app.handle_mouse(mouse_click(10, 6), area());
+        assert_eq!(app.combined_focus, CombinedFocus::StreamInfo);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_activity_log_on_the_stream_info_tab() {
+        let mut app = app();
+        for index in 0..20 {
+            app.push_log(LogLevel::Info, format!("line {index}"));
+        }
+        app.handle_mouse(wheel(true), area());
+        assert!(app.log_scroll_back > 0, "the wheel must scroll back");
+        app.handle_mouse(wheel(false), area());
+        assert_eq!(app.log_scroll_back, 0, "and forward again");
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_message_history_while_it_is_open() {
+        let mut app = app();
+        for index in 0..20 {
+            app.push_log(LogLevel::Error, format!("line {index}"));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
+        app.handle_mouse(wheel(true), area());
+        assert!(app.toasts.history_scroll > 0);
+    }
+
+    /// A click while a modal overlay is up would land on whatever happened to
+    /// be underneath it, which is not what the user is looking at.
+    #[test]
+    fn clicks_are_ignored_while_a_modal_overlay_is_open() {
+        let mut app = app();
+        app.toasts.open_history();
+        app.handle_mouse(mouse_click(17, 0), area());
+        assert_eq!(app.tab, Tab::StreamInfo, "the tab must not have changed");
+    }
+
+    /// Turning mouse reporting off has to actually turn it off, since the
+    /// reason to turn it off is to get the terminal's own selection back.
+    #[test]
+    fn the_mouse_can_be_turned_off_entirely() {
+        let mut config = Config::default();
+        config.appearance.mouse = false;
+        let mut app = App::new(config);
+        app.splash_skipped = true;
+        app.handle_mouse(mouse_click(17, 0), area());
+        assert_eq!(app.tab, Tab::StreamInfo);
     }
 }

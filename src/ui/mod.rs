@@ -5,13 +5,16 @@ pub mod chat_tab;
 pub mod command_palette;
 pub mod draw;
 pub mod input;
+pub mod mouse;
 pub mod splash;
 pub mod theme_picker;
 pub mod toast;
 pub mod worker;
 
 use anyhow::{Context, Result};
-use crossterm::event::{Event as TermEvent, EventStream, KeyEventKind};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event as TermEvent, EventStream, KeyEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -34,16 +37,25 @@ use app::{App, Screen};
 /// panics and `?` propagation.
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    /// Whether mouse reporting was switched on, so `drop` knows whether it
+    /// has to be switched off again.
+    mouse: bool,
 }
 
 impl TerminalGuard {
-    fn new() -> Result<Self> {
+    fn new(mouse: bool) -> Result<Self> {
         enable_raw_mode().context("switching the terminal into raw mode")?;
         let mut stdout = std::io::stdout();
         execute!(stdout, EnterAlternateScreen).context("opening the alternate screen")?;
+        if mouse {
+            // Cell-motion reporting: the terminal sends clicks and wheel
+            // events. It also stops the terminal handling drag-selection
+            // itself, which is why this is a setting rather than always on.
+            execute!(stdout, EnableMouseCapture).context("enabling mouse reporting")?;
+        }
         let terminal = Terminal::new(CrosstermBackend::new(stdout))
             .context("initialising the terminal backend")?;
-        Ok(Self { terminal })
+        Ok(Self { terminal, mouse })
     }
 }
 
@@ -52,6 +64,9 @@ impl Drop for TerminalGuard {
         // Every step is best-effort: if restoring fails there is nothing useful
         // left to do about it, and returning an error from `drop` is impossible.
         let _ = disable_raw_mode();
+        if self.mouse {
+            let _ = execute!(self.terminal.backend_mut(), DisableMouseCapture);
+        }
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         let _ = self.terminal.show_cursor();
     }
@@ -98,7 +113,7 @@ pub async fn run(config: Config) -> Result<()> {
 
     let worker = tokio::spawn(worker::run(config.clone(), command_rx, event_tx));
 
-    let mut guard = TerminalGuard::new()?;
+    let mut guard = TerminalGuard::new(config.appearance.mouse)?;
     let mut app = App::new(config);
     // The chat tasks' shared event stream. Taken out of the tab state here
     // because only this loop may await on it.
@@ -169,6 +184,18 @@ pub async fn run(config: Config) -> Result<()> {
                         // would make every keystroke register twice.
                         if key.kind != KeyEventKind::Release {
                             let commands = app.handle_key(key);
+                            dispatch(&mut app, &command_tx, commands);
+                        }
+                    }
+                    Ok(TermEvent::Mouse(event)) => {
+                        let area = guard.terminal.size().map(|size| ratatui::layout::Rect {
+                            x: 0,
+                            y: 0,
+                            width: size.width,
+                            height: size.height,
+                        });
+                        if let Ok(area) = area {
+                            let commands = app.handle_mouse(event, area);
                             dispatch(&mut app, &command_tx, commands);
                         }
                     }

@@ -188,12 +188,18 @@ mod tests {
         assert!(summary.contains("fps"), "got {summary:?}");
     }
 
-    /// A second sample after real work has to produce a plausible figure —
-    /// not a negative one, and not one implying more processor time than has
-    /// actually elapsed on a single core.
+    /// A second sample after real work has to produce a usable figure.
+    ///
+    /// The bound is deliberately loose. The kernel reports processor time in
+    /// ticks of ten milliseconds, so over a short interval the reading is
+    /// coarse — a single tick landing inside a twenty-millisecond window is
+    /// already "fifty per cent", and the test suite runs many threads at
+    /// once. What must hold is that the figure exists, is a real number, and
+    /// is never negative; a negative one would mean the subtraction of two
+    /// readings had gone the wrong way round.
     #[test]
     #[cfg(target_os = "linux")]
-    fn a_second_sample_produces_a_plausible_processor_figure() {
+    fn a_second_sample_produces_a_usable_processor_figure() {
         let mut telemetry = Telemetry::default();
         telemetry.sample(Instant::now());
 
@@ -208,10 +214,23 @@ mod tests {
         telemetry.sample(Instant::now());
 
         let cpu = telemetry.cpu_percent.expect("a figure on Linux");
-        assert!(
-            (0.0..=400.0).contains(&cpu),
-            "implausible processor figure: {cpu}"
-        );
+        assert!(cpu.is_finite(), "not a number: {cpu}");
+        assert!(cpu >= 0.0, "negative processor time: {cpu}");
+    }
+
+    /// Processor time is cumulative, so a later reading can never be smaller
+    /// than an earlier one. If it were, the percentage would go negative.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn processor_time_never_goes_backwards() {
+        let first = read_process_cpu_time().expect("a reading on Linux");
+        let mut total = 0u64;
+        for value in 0..1_000_000u64 {
+            total = total.wrapping_add(value);
+        }
+        assert!(total > 0);
+        let second = read_process_cpu_time().expect("a reading on Linux");
+        assert!(second >= first, "{second:?} came before {first:?}");
     }
 
     #[test]
