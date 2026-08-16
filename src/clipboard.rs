@@ -51,6 +51,29 @@ fn helpers() -> Vec<(&'static str, Vec<&'static str>)> {
     ]
 }
 
+/// The first clipboard helper that is actually installed, if any.
+///
+/// Only used by `msm doctor`: the copy path itself finds this out by trying,
+/// which is both cheaper and more honest than asking in advance. A separate
+/// check exists because "why did nothing get copied?" is a question worth
+/// being able to answer before it is asked.
+pub fn available_helper() -> Option<&'static str> {
+    helpers().into_iter().find_map(|(program, _)| {
+        // `--help` rather than running it for real: this must not touch the
+        // clipboard, and every one of these programs accepts it.
+        let ran = Command::new(program)
+            .arg("--help")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        // The exit status is not checked — `clip.exe` has no `--help` and
+        // fails. The question is only whether the program exists at all,
+        // which is what a successful spawn answers.
+        ran.ok().map(|_| program)
+    })
+}
+
 /// Try each helper in turn. Returns `None` when none of them is installed, so
 /// the caller can fall back to OSC 52; returns `Some(Err(..))` when a helper
 /// was found but failed, because that is a real problem worth reporting.

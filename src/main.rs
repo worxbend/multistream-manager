@@ -157,11 +157,99 @@ enum Commands {
         out: Option<std::path::PathBuf>,
     },
 
+    /// Check the setup and report anything that would stop a stream.
+    ///
+    /// Run this first when something is not working. It looks at every part
+    /// of the setup in the order it matters — config file, credentials,
+    /// logins, clipboard, terminal, writable paths — and says what is wrong
+    /// and what to do about it, rather than leaving you to guess from a
+    /// failure that happened three steps later.
+    Doctor,
+
+    /// Fill in the API credentials from the command line.
+    ///
+    /// The interface asks for these itself on first run, which is the easier
+    /// way. This exists for the times a terminal interface is not available:
+    /// a headless box over ssh, a container, or a scripted install.
+    Setup {
+        /// Which platform to set up: `twitch` or `youtube`.
+        platform: String,
+
+        /// The client id. Prompted for if not given.
+        #[arg(long, value_name = "ID")]
+        client_id: Option<String>,
+
+        /// The client secret. Prompted for if not given.
+        ///
+        /// Passing a secret as an argument leaves it in your shell history
+        /// and in the process list, where anyone on the machine can read it.
+        /// Leaving this out and typing it at the prompt does not.
+        #[arg(long, value_name = "SECRET")]
+        client_secret: Option<String>,
+    },
+
+    /// Look at and change the colour theme.
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
+
     /// Write a commented starter config file.
     Init,
 
     /// Show where the config, token and log files live.
     Paths,
+}
+
+#[derive(Subcommand)]
+enum ProfileCommand {
+    /// List every theme name.
+    List,
+
+    /// Show a theme's nine colours.
+    Show {
+        /// Which theme. Defaults to the one in use.
+        name: Option<String>,
+    },
+
+    /// Choose a theme, or set individual colours of your own.
+    ///
+    /// `msm profile set nord` picks a built-in one. Passing any colour flag
+    /// writes that colour into `[appearance.custom_theme]` and switches to
+    /// `custom`, so `msm profile set custom --accent "#ff0055"` changes one
+    /// colour and leaves the other eight alone.
+    Set {
+        /// A built-in theme name, or `custom`.
+        name: String,
+
+        /// The nine colours. Boxed so this one variant does not make every
+        /// `ProfileCommand` value as large as its largest member.
+        #[command(flatten)]
+        colors: Box<ProfileColors>,
+    },
+}
+
+/// The nine colours `msm profile set` can write, each optional.
+#[derive(clap::Args, Clone, Default)]
+struct ProfileColors {
+    #[arg(long, value_name = "HEX")]
+    background: Option<String>,
+    #[arg(long, value_name = "HEX")]
+    foreground: Option<String>,
+    #[arg(long, value_name = "HEX")]
+    accent: Option<String>,
+    #[arg(long, value_name = "HEX")]
+    muted: Option<String>,
+    #[arg(long, value_name = "HEX")]
+    border: Option<String>,
+    #[arg(long, value_name = "HEX")]
+    surface: Option<String>,
+    #[arg(long, value_name = "HEX")]
+    warning: Option<String>,
+    #[arg(long, value_name = "HEX")]
+    error: Option<String>,
+    #[arg(long, value_name = "HEX")]
+    success: Option<String>,
 }
 
 #[tokio::main]
@@ -192,6 +280,13 @@ async fn main() -> Result<()> {
         None | Some(Commands::Tui) => ui::run(config).await,
         Some(Commands::Login { platform, add }) => cmd_login(&config, &platform, add).await,
         Some(Commands::Status) => cmd_status(&config),
+        Some(Commands::Doctor) => cmd_doctor(&config),
+        Some(Commands::Setup {
+            platform,
+            client_id,
+            client_secret,
+        }) => cmd_setup(config, &platform, client_id, client_secret),
+        Some(Commands::Profile { command }) => cmd_profile(config, command),
         Some(Commands::Go {
             platforms,
             yes,
@@ -858,6 +953,338 @@ fn cmd_init() -> Result<()> {
     Ok(())
 }
 
+/// A single thing `msm doctor` checked, and how it went.
+enum Check {
+    /// Working.
+    Ok(String),
+    /// Working, but something is worth knowing.
+    Warn(String, String),
+    /// Not working. The second string says what to do about it.
+    Fail(String, String),
+}
+
+impl Check {
+    fn print(&self) {
+        match self {
+            Check::Ok(what) => println!("  [ ok ]  {what}"),
+            Check::Warn(what, advice) => {
+                println!("  [warn]  {what}");
+                println!("          {advice}");
+            }
+            Check::Fail(what, advice) => {
+                println!("  [FAIL]  {what}");
+                println!("          {advice}");
+            }
+        }
+    }
+
+    fn failed(&self) -> bool {
+        matches!(self, Check::Fail(_, _))
+    }
+}
+
+/// Check everything that has to be right for a stream to start, and say what
+/// is not.
+///
+/// The order is the order things matter in: a missing client id makes the
+/// login question moot, and a login you do not have makes the stream key
+/// question moot. Reporting them in that order means the first `[FAIL]` is
+/// usually the only one worth acting on.
+fn cmd_doctor(config: &Config) -> Result<()> {
+    let mut checks = Vec::new();
+
+    // Where things live, and whether they can be written.
+    match paths::config_file() {
+        Ok(path) => {
+            if path.exists() {
+                checks.push(Check::Ok(format!("config file: {}", path.display())));
+            } else {
+                checks.push(Check::Warn(
+                    format!("no config file at {}", path.display()),
+                    "Run `msm init` to write a commented starter one, or just run `msm` and \
+                     fill in the setup screen."
+                        .to_string(),
+                ));
+            }
+        }
+        Err(err) => checks.push(Check::Fail(
+            "cannot work out where the config file should live".to_string(),
+            format!("{err:#}"),
+        )),
+    }
+
+    // Credentials, per platform.
+    for platform in Platform::ALL {
+        match config.check_credentials(&[platform]) {
+            Ok(()) => checks.push(Check::Ok(format!(
+                "{} credentials configured",
+                platform.label()
+            ))),
+            Err(_) => checks.push(Check::Warn(
+                format!("{} has no client id and secret", platform.label()),
+                format!(
+                    "Run `msm setup {}`, or fill them in on the interface's first screen. \
+                     Skip this if you do not stream to {}.",
+                    platform.slug(),
+                    platform.label()
+                ),
+            )),
+        }
+    }
+
+    // Logins.
+    match auth::store::TokenStore::load() {
+        Ok(store) => {
+            let authorised = store.authorised_platforms();
+            if authorised.is_empty() {
+                checks.push(Check::Warn(
+                    "no platform is authorised".to_string(),
+                    "Run `msm login all`, or press Enter on the interface's login screen."
+                        .to_string(),
+                ));
+            } else {
+                for platform in authorised {
+                    checks.push(Check::Ok(auth::describe(platform, store.get(platform))));
+                }
+            }
+        }
+        Err(err) => checks.push(Check::Fail(
+            "the saved logins could not be read".to_string(),
+            format!("{err:#}  —  `msm logout all` clears them so you can log in again."),
+        )),
+    }
+
+    // The clipboard, which is how a stream key gets to OBS. This is worth
+    // checking because it is the one part of the flow that depends on
+    // something outside this program being installed.
+    match clipboard::available_helper() {
+        Some(program) => checks.push(Check::Ok(format!(
+            "clipboard: {program} will copy the stream key"
+        ))),
+        None => checks.push(Check::Warn(
+            "no clipboard helper is installed".to_string(),
+            "Stream keys will be copied with a terminal escape sequence instead, which works \
+             over ssh but which some terminals refuse. Installing wl-copy (Wayland), xclip or \
+             xsel (X11) makes it reliable."
+                .to_string(),
+        )),
+    }
+
+    // The theme, since a name that does not exist silently falls back.
+    let (_, recognised) = config.appearance.palette();
+    if recognised {
+        checks.push(Check::Ok(format!("theme: {}", config.appearance.theme)));
+    } else {
+        checks.push(Check::Warn(
+            format!("unknown theme name {:?}", config.appearance.theme),
+            "The default palette is being used instead. `msm profile list` shows every name."
+                .to_string(),
+        ));
+    }
+
+    // Colour support, because 57 palettes are not much use in eight colours.
+    match std::env::var("COLORTERM").ok().as_deref() {
+        Some("truecolor") | Some("24bit") => {
+            checks.push(Check::Ok("terminal: 24-bit colour".to_string()))
+        }
+        _ => checks.push(Check::Warn(
+            "the terminal does not advertise 24-bit colour".to_string(),
+            "Themes are written as exact colours, so they will be approximated. If your \
+             terminal does support it, setting COLORTERM=truecolor tells programs so."
+                .to_string(),
+        )),
+    }
+
+    // The log, which is where the answer lives when something fails later.
+    match paths::log_file() {
+        Ok(path) => checks.push(Check::Ok(format!("log file: {}", path.display()))),
+        Err(err) => checks.push(Check::Warn(
+            "the log file location could not be worked out".to_string(),
+            format!("{err:#}"),
+        )),
+    }
+
+    println!("msm doctor\n");
+    for check in &checks {
+        check.print();
+    }
+
+    let failures = checks.iter().filter(|check| check.failed()).count();
+    println!();
+    if failures == 0 {
+        println!("Nothing is broken.");
+    } else {
+        println!("{failures} thing(s) need fixing before this will work.");
+    }
+    Ok(())
+}
+
+/// Fill in one platform's API credentials from the command line.
+fn cmd_setup(
+    mut config: Config,
+    platform: &str,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+) -> Result<()> {
+    let platform = parse_platform_arg(platform)?;
+    let [platform] = platform[..] else {
+        bail!("`msm setup` takes one platform at a time: `twitch` or `youtube`");
+    };
+
+    println!("Setting up {}.\n", platform.label());
+    match platform {
+        Platform::Twitch => {
+            println!("Create an application at https://dev.twitch.tv/console/apps");
+        }
+        Platform::YouTube => {
+            println!(
+                "Create an OAuth client of type \"Desktop app\" at\n\
+                 https://console.cloud.google.com/apis/credentials"
+            );
+        }
+    }
+    println!(
+        "Register this as the redirect URL: {}\n",
+        config.redirect_uri()
+    );
+
+    let client_id = match client_id {
+        Some(value) => value,
+        None => prompt("Client id: ")?,
+    };
+    // Note that this is read the same way as the id, and therefore echoes.
+    // Turning terminal echo off needs a C library call, and this command
+    // exists precisely for environments where the interface — which does mask
+    // it — cannot run. Saying so beats a silent surprise.
+    let client_secret = match client_secret {
+        Some(value) => value,
+        None => {
+            println!("\nThe secret is not hidden as you type it. Make sure nobody is looking.");
+            prompt("Client secret: ")?
+        }
+    };
+
+    if client_id.trim().is_empty() || client_secret.trim().is_empty() {
+        bail!("both the client id and the client secret are needed");
+    }
+
+    match platform {
+        Platform::Twitch => {
+            config.twitch.client_id = client_id.trim().to_string();
+            config.twitch.client_secret = client_secret.trim().to_string();
+        }
+        Platform::YouTube => {
+            config.youtube.client_id = client_id.trim().to_string();
+            config.youtube.client_secret = client_secret.trim().to_string();
+        }
+    }
+    config.save()?;
+
+    println!("\nSaved to {}.", paths::config_file()?.display());
+    println!(
+        "Now run `msm login {}` to authorise your account.",
+        platform.slug()
+    );
+    Ok(())
+}
+
+/// Read one line from the keyboard.
+fn prompt(label: &str) -> Result<String> {
+    use std::io::Write as _;
+    print!("{label}");
+    std::io::stdout().flush().context("writing the prompt")?;
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("reading your answer")?;
+    Ok(line.trim().to_string())
+}
+
+/// `msm profile list|show|set` — look at and change the colour theme.
+fn cmd_profile(mut config: Config, command: ProfileCommand) -> Result<()> {
+    match command {
+        ProfileCommand::List => {
+            let active = config.appearance.theme.trim().to_ascii_lowercase();
+            for name in theme::preset_names() {
+                let marker = if name == active { "*" } else { " " };
+                println!("{marker} {name}");
+            }
+            println!(
+                "{} custom   (the colours under [appearance.custom_theme])",
+                if active == "custom" { "*" } else { " " }
+            );
+            Ok(())
+        }
+
+        ProfileCommand::Show { name } => {
+            let name = name.unwrap_or_else(|| config.appearance.theme.clone());
+            let custom = config.appearance.custom_theme.to_palette();
+            let (palette, known) = theme::resolve(&name, &custom);
+            if !known {
+                bail!("no theme called {name:?}. `msm profile list` shows every name.");
+            }
+            println!("{name}");
+            for role in theme::ROLES {
+                println!("  {role:<11} {}", palette.role(role));
+            }
+            Ok(())
+        }
+
+        ProfileCommand::Set { name, colors } => {
+            let overrides = [
+                ("background", colors.background),
+                ("foreground", colors.foreground),
+                ("accent", colors.accent),
+                ("muted", colors.muted),
+                ("border", colors.border),
+                ("surface", colors.surface),
+                ("warning", colors.warning),
+                ("error", colors.error),
+                ("success", colors.success),
+            ];
+            let any_override = overrides.iter().any(|(_, value)| value.is_some());
+
+            // A name that is neither a preset nor `custom` is a typo, and
+            // accepting it would leave the config file naming a theme that
+            // does not exist — which falls back silently at start-up.
+            let is_custom = name.trim().eq_ignore_ascii_case("custom");
+            if !is_custom && !theme::preset_names().contains(&name.trim()) {
+                bail!("no theme called {name:?}. `msm profile list` shows every name.");
+            }
+            if any_override && !is_custom {
+                bail!(
+                    "colours can only be set on the `custom` theme — the built-in ones are \
+                     fixed. Try `msm profile set custom --accent \"...\"`."
+                );
+            }
+
+            for (role, value) in overrides {
+                let Some(value) = value else { continue };
+                if theme::color(&value) == ratatui::style::Color::Reset {
+                    bail!("{role}: {value:?} is not a colour. Write it as #rrggbb.");
+                }
+                let field = match role {
+                    "background" => &mut config.appearance.custom_theme.background,
+                    "foreground" => &mut config.appearance.custom_theme.foreground,
+                    "accent" => &mut config.appearance.custom_theme.accent,
+                    "muted" => &mut config.appearance.custom_theme.muted,
+                    "border" => &mut config.appearance.custom_theme.border,
+                    "surface" => &mut config.appearance.custom_theme.surface,
+                    "warning" => &mut config.appearance.custom_theme.warning,
+                    "error" => &mut config.appearance.custom_theme.error,
+                    _ => &mut config.appearance.custom_theme.success,
+                };
+                *field = value;
+            }
+
+            config.appearance.theme = name.trim().to_ascii_lowercase();
+            config.save()?;
+            println!("Theme set to {}.", config.appearance.theme);
+            Ok(())
+        }
+    }
+}
+
 fn cmd_paths() -> Result<()> {
     println!("Config: {}", paths::config_file()?.display());
     println!("Tokens: {}", paths::token_file()?.display());
@@ -1274,5 +1701,52 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A theme name written into the config file by `msm profile set` has to
+    /// be one the interface will actually resolve at start-up. Accepting a
+    /// typo here would produce a config that silently falls back to the
+    /// default and never explains why.
+    #[test]
+    fn every_name_profile_set_accepts_resolves_to_a_real_theme() {
+        let custom = theme::default_palette();
+        for name in theme::preset_names() {
+            let (_, known) = theme::resolve(name, &custom);
+            assert!(known, "`msm profile set {name}` would not resolve");
+        }
+        let (_, known) = theme::resolve("custom", &custom);
+        assert!(known, "`msm profile set custom` would not resolve");
+    }
+
+    /// `msm profile list` marks the active theme, and the marker has to fall
+    /// on exactly one row or it says nothing.
+    #[test]
+    fn exactly_one_theme_is_ever_the_active_one() {
+        let mut config = Config::default();
+        config.appearance.theme = "nord".into();
+        let active = config.appearance.theme.trim().to_ascii_lowercase();
+        let marked = theme::preset_names()
+            .into_iter()
+            .filter(|name| *name == active)
+            .count();
+        assert_eq!(marked, 1);
+    }
+
+    #[test]
+    fn the_doctor_reports_a_failure_only_for_things_that_are_actually_broken() {
+        // A check that merely warns must not be counted as a failure, or a
+        // fresh install with no logins yet would look broken when it is
+        // simply not finished.
+        assert!(!Check::Warn("a".into(), "b".into()).failed());
+        assert!(!Check::Ok("a".into()).failed());
+        assert!(Check::Fail("a".into(), "b".into()).failed());
+    }
+
+    #[test]
+    fn setup_takes_one_platform_at_a_time() {
+        // `all` is meaningful for login and logout, but a single pair of
+        // credentials cannot be set for two platforms at once.
+        let parsed = parse_platform_arg("all").expect("all is a valid platform argument");
+        assert_eq!(parsed.len(), 2, "so `msm setup all` has to be rejected");
     }
 }
