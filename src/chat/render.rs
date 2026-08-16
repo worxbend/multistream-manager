@@ -29,21 +29,37 @@ const MINIMUM_TEXT_CONTRAST: f64 = 4.5;
 // ---------------------------------------------------------------------------
 // Palette
 //
-// The host owns its palette (PLAN.md row T31: themes are not ported); these
-// mirror the fixed colors in `ui/draw.rs::theme` so the chat rows sit on the
-// same canvas as the rest of the TUI.
+// Chat rows are drawn from the same active theme as the rest of the
+// interface, so a chat message sits on the same canvas as the pane around it
+// and changes colour with it. These read the theme afresh on each call rather
+// than caching it, because the theme can change between one frame and the
+// next when someone is browsing the theme picker.
 // ---------------------------------------------------------------------------
 
-const TEXT: Color = Color::Rgb(230, 237, 243);
-const MUTED: Color = Color::Rgb(139, 148, 158);
-const ACCENT: Color = Color::Rgb(145, 71, 255);
-const SUCCESS: Color = Color::Rgb(63, 185, 80);
-const WARNING: Color = Color::Rgb(210, 153, 34);
-const ERROR: Color = Color::Rgb(248, 81, 73);
-/// The terminal canvas the chip text sits on. Chips draw their tier color as
-/// the background (yc: a solid block is impossible to scroll past where a
-/// tinted word is not), so the text uses the dark canvas color.
-const CANVAS: Color = Color::Rgb(13, 17, 23);
+fn text_color() -> Color {
+    crate::theme::skin().foreground
+}
+fn muted_color() -> Color {
+    crate::theme::skin().muted
+}
+fn accent_color() -> Color {
+    crate::theme::skin().accent
+}
+fn success_color() -> Color {
+    crate::theme::skin().success
+}
+fn warning_color() -> Color {
+    crate::theme::skin().warning
+}
+fn error_color() -> Color {
+    crate::theme::skin().error
+}
+/// The canvas the chip text sits on. Chips draw their tier colour as the
+/// background (a solid block is impossible to scroll past where a tinted word
+/// is not), so the text on top uses the canvas colour.
+fn canvas_color() -> Color {
+    crate::theme::skin().canvas
+}
 
 // ---------------------------------------------------------------------------
 // Identity colors (twi/yc theme.IdentityColor)
@@ -178,11 +194,11 @@ impl BadgeTone {
     /// The concrete color for this tone on the host palette.
     pub fn color(self) -> Color {
         match self {
-            Self::Alert => ERROR,
-            Self::Success => SUCCESS,
-            Self::Accent => ACCENT,
-            Self::Warning => WARNING,
-            Self::Muted => MUTED,
+            Self::Alert => error_color(),
+            Self::Success => success_color(),
+            Self::Accent => accent_color(),
+            Self::Warning => warning_color(),
+            Self::Muted => muted_color(),
         }
     }
 }
@@ -481,12 +497,12 @@ impl ChipTone {
     /// warning (210,153,34) + error (248,81,73) → (229,117,54).
     pub fn color(self) -> Color {
         match self {
-            Self::Accent => ACCENT,
+            Self::Accent => accent_color(),
             Self::AccentSuccessMix => Color::Rgb(104, 128, 168),
-            Self::Success => SUCCESS,
-            Self::Warning => WARNING,
+            Self::Success => success_color(),
+            Self::Warning => warning_color(),
             Self::WarningErrorMix => Color::Rgb(229, 117, 54),
-            Self::Error => ERROR,
+            Self::Error => error_color(),
         }
     }
 }
@@ -577,12 +593,44 @@ impl Default for RenderOpts {
 // shortcodeHighlight/emojiHighlight — Mix(surface, tint, 0.22))
 // ---------------------------------------------------------------------------
 
-/// Fixed 22% blends of the host canvas toward accent/warning, precomputed the
-/// same way the chip-tone mixes above are:
-/// canvas (13,17,23) + 22% accent (145,71,255) → (42,29,74);
-/// canvas (13,17,23) + 22% warning (210,153,34) → (56,47,25).
-const SHORTCODE_HIGHLIGHT: Color = Color::Rgb(42, 29, 74);
-const EMOJI_HIGHLIGHT: Color = Color::Rgb(56, 47, 25);
+/// The tint behind a highlighted shortcode or emoji: the theme's canvas
+/// blended 22% of the way toward accent and warning respectively. A tint
+/// rather than a solid colour, so the highlight marks the word without
+/// competing with the text drawn on top of it.
+const HIGHLIGHT_TINT: f64 = 0.22;
+
+fn shortcode_highlight() -> Color {
+    tint_toward(crate::theme::skin().accent)
+}
+
+fn emoji_highlight() -> Color {
+    tint_toward(crate::theme::skin().warning)
+}
+
+/// Blend `toward` into the theme canvas by [`HIGHLIGHT_TINT`].
+///
+/// A colour the terminal defines rather than one with known channel values
+/// (the theme fell back to `Color::Reset`) cannot be blended arithmetically,
+/// so it is used as-is.
+fn tint_toward(toward: Color) -> Color {
+    let (Some(canvas), Some(target)) = (rgb_of(crate::theme::skin().canvas), rgb_of(toward)) else {
+        return toward;
+    };
+    let blend =
+        |from: u8, to: u8| (from as f64 + (to as f64 - from as f64) * HIGHLIGHT_TINT).round() as u8;
+    Color::Rgb(
+        blend(canvas.0, target.0),
+        blend(canvas.1, target.1),
+        blend(canvas.2, target.2),
+    )
+}
+
+fn rgb_of(color: Color) -> Option<(u8, u8, u8)> {
+    match color {
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        _ => None,
+    }
+}
 
 /// A styled piece queued for wrapping. `atomic` pieces (badges, mentions,
 /// shortcodes, URLs, emoji, chips) move to the next row whole; text pieces
@@ -616,7 +664,7 @@ pub fn render_message(msg: &ChatMessage, width: u16, opts: &RenderOpts) -> Vec<L
         };
         prefix.push(Piece {
             text: format!("{stamp} "),
-            style: Style::new().fg(MUTED),
+            style: Style::new().fg(muted_color()),
             atomic: true,
         });
     }
@@ -653,7 +701,7 @@ pub fn render_message(msg: &ChatMessage, width: u16, opts: &RenderOpts) -> Vec<L
     if action {
         prefix.push(Piece {
             text: "* ".to_string(),
-            style: Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            style: Style::new().fg(accent_color()).add_modifier(Modifier::BOLD),
             atomic: true,
         });
     }
@@ -662,7 +710,7 @@ pub fn render_message(msg: &ChatMessage, width: u16, opts: &RenderOpts) -> Vec<L
     prefix.push(Piece {
         // An action reads as prose ("* name does a thing"), so no colon.
         text: if action { " " } else { ": " }.to_string(),
-        style: Style::new().fg(TEXT),
+        style: Style::new().fg(text_color()),
         atomic: true,
     });
 
@@ -681,7 +729,7 @@ fn name_pieces(msg: &ChatMessage, opts: &RenderOpts) -> Vec<Piece> {
     } else {
         &msg.author.id
     };
-    let name_color = identity_color(identity, &[CANVAS], TEXT);
+    let name_color = identity_color(identity, &[canvas_color()], text_color());
     let name = if msg.author.display_name.is_empty() {
         &msg.author.login
     } else {
@@ -699,7 +747,7 @@ fn name_pieces(msg: &ChatMessage, opts: &RenderOpts) -> Vec<Piece> {
         if !login.is_empty() && !login.eq_ignore_ascii_case(name) {
             pieces.push(Piece {
                 text: format!(" ({login})"),
-                style: Style::new().fg(MUTED),
+                style: Style::new().fg(muted_color()),
                 atomic: true,
             });
         }
@@ -733,7 +781,7 @@ fn render_grouped(msg: &ChatMessage, width: usize, opts: &RenderOpts) -> Vec<Lin
         if width >= 24 && opts.badge_mode != BadgeMode::Off && !msg.author.badges.is_empty() {
             header.push(Piece {
                 text: " ".to_string(),
-                style: Style::new().fg(TEXT),
+                style: Style::new().fg(text_color()),
                 atomic: true,
             });
             for badge in &msg.author.badges {
@@ -760,7 +808,7 @@ fn render_grouped(msg: &ChatMessage, width: usize, opts: &RenderOpts) -> Vec<Lin
             };
             header.push(Piece {
                 text: format!(" {stamp}"),
-                style: Style::new().fg(MUTED),
+                style: Style::new().fg(muted_color()),
                 atomic: true,
             });
         }
@@ -809,7 +857,7 @@ fn content_pieces(msg: &ChatMessage, opts: &RenderOpts) -> Vec<Piece> {
         return vec![Piece {
             text: "[message deleted]".to_string(),
             style: Style::new()
-                .fg(MUTED)
+                .fg(muted_color())
                 .add_modifier(Modifier::ITALIC | Modifier::CROSSED_OUT),
             atomic: false,
         }];
@@ -820,7 +868,9 @@ fn content_pieces(msg: &ChatMessage, opts: &RenderOpts) -> Vec<Piece> {
     if msg.kind == MessageKind::Notice {
         pieces.push(Piece {
             text: "[notice] ".to_string(),
-            style: Style::new().fg(WARNING).add_modifier(Modifier::BOLD),
+            style: Style::new()
+                .fg(warning_color())
+                .add_modifier(Modifier::BOLD),
             atomic: true,
         });
     }
@@ -839,14 +889,14 @@ fn content_pieces(msg: &ChatMessage, opts: &RenderOpts) -> Vec<Piece> {
             pieces.push(Piece {
                 text: format!(" {label} "),
                 style: Style::new()
-                    .fg(CANVAS)
+                    .fg(canvas_color())
                     .bg(tier_color(paid.tier).color())
                     .add_modifier(Modifier::BOLD),
                 atomic: true,
             });
             pieces.push(Piece {
                 text: " ".to_string(),
-                style: Style::new().fg(TEXT),
+                style: Style::new().fg(text_color()),
                 atomic: true,
             });
         }
@@ -855,14 +905,14 @@ fn content_pieces(msg: &ChatMessage, opts: &RenderOpts) -> Vec<Piece> {
             pieces.push(Piece {
                 text: format!(" {label} "),
                 style: Style::new()
-                    .fg(CANVAS)
+                    .fg(canvas_color())
                     .bg(color)
                     .add_modifier(Modifier::BOLD),
                 atomic: true,
             });
             pieces.push(Piece {
                 text: " ".to_string(),
-                style: Style::new().fg(TEXT),
+                style: Style::new().fg(text_color()),
                 atomic: true,
             });
         }
@@ -875,30 +925,33 @@ fn content_pieces(msg: &ChatMessage, opts: &RenderOpts) -> Vec<Piece> {
     };
     for frag in split_fragments(&msg.text) {
         let (style, atomic) = match frag.kind {
-            FragKind::Text => (Style::new().fg(TEXT).add_modifier(body_modifier), false),
+            FragKind::Text => (
+                Style::new().fg(text_color()).add_modifier(body_modifier),
+                false,
+            ),
             FragKind::Mention => (
                 Style::new()
-                    .fg(ACCENT)
+                    .fg(accent_color())
                     .add_modifier(Modifier::BOLD | body_modifier),
                 true,
             ),
             FragKind::Shortcode => {
-                let mut style = Style::new().fg(SUCCESS).add_modifier(body_modifier);
+                let mut style = Style::new().fg(success_color()).add_modifier(body_modifier);
                 if opts.highlight_emotes {
-                    style = style.bg(SHORTCODE_HIGHLIGHT);
+                    style = style.bg(shortcode_highlight());
                 }
                 (style, true)
             }
             FragKind::Url => (
                 Style::new()
-                    .fg(ACCENT)
+                    .fg(accent_color())
                     .add_modifier(Modifier::UNDERLINED | body_modifier),
                 true,
             ),
             FragKind::Emoji => {
-                let mut style = Style::new().fg(TEXT).add_modifier(body_modifier);
+                let mut style = Style::new().fg(text_color()).add_modifier(body_modifier);
                 if opts.highlight_emotes {
-                    style = style.bg(EMOJI_HIGHLIGHT);
+                    style = style.bg(emoji_highlight());
                 }
                 (style, true)
             }
@@ -917,15 +970,15 @@ fn content_pieces(msg: &ChatMessage, opts: &RenderOpts) -> Vec<Piece> {
 /// already names the person.
 fn membership_chip(details: &MembershipDetails) -> (String, Color) {
     match details.kind {
-        MembershipKind::New => ("★ new member".to_string(), ACCENT),
-        MembershipKind::Upgrade => ("★ member upgrade".to_string(), ACCENT),
+        MembershipKind::New => ("★ new member".to_string(), accent_color()),
+        MembershipKind::Upgrade => ("★ member upgrade".to_string(), accent_color()),
         MembershipKind::Milestone => {
             // Months of 0 means "unknown", which must render as nothing
             // rather than "0 mo".
             if details.months > 0 {
-                (format!("★ member {} mo", details.months), ACCENT)
+                (format!("★ member {} mo", details.months), accent_color())
             } else {
-                ("★ member milestone".to_string(), ACCENT)
+                ("★ member milestone".to_string(), accent_color())
             }
         }
         MembershipKind::Gifting => {
@@ -934,9 +987,9 @@ fn membership_chip(details: &MembershipDetails) -> (String, Color) {
                 1 => "♥ 1 gift membership".to_string(),
                 n => format!("♥ {n} gift memberships"),
             };
-            (label, SUCCESS)
+            (label, success_color())
         }
-        MembershipKind::GiftReceived => ("♥ gift member".to_string(), SUCCESS),
+        MembershipKind::GiftReceived => ("♥ gift member".to_string(), success_color()),
     }
 }
 
@@ -1173,24 +1226,24 @@ mod tests {
 
     #[test]
     fn identity_color_is_deterministic() {
-        let a = identity_color("somebody", &[DARK_BG], TEXT);
-        let b = identity_color("somebody", &[DARK_BG], TEXT);
+        let a = identity_color("somebody", &[DARK_BG], text_color());
+        let b = identity_color("somebody", &[DARK_BG], text_color());
         assert_eq!(a, b);
         // Case and surrounding whitespace do not change the identity.
-        assert_eq!(identity_color(" SomeBody ", &[DARK_BG], TEXT), a);
+        assert_eq!(identity_color(" SomeBody ", &[DARK_BG], text_color()), a);
     }
 
     #[test]
     fn different_identities_get_different_colors() {
-        let a = identity_color("alice", &[DARK_BG], TEXT);
-        let b = identity_color("bob", &[DARK_BG], TEXT);
+        let a = identity_color("alice", &[DARK_BG], text_color());
+        let b = identity_color("bob", &[DARK_BG], text_color());
         assert_ne!(a, b);
     }
 
     #[test]
     fn identity_colors_meet_wcag_contrast_on_the_background() {
         for identity in ["alice", "bob", "carol", "dave", "erin", "mallory", "yui"] {
-            let color = identity_color(identity, &[DARK_BG], TEXT);
+            let color = identity_color(identity, &[DARK_BG], text_color());
             let Color::Rgb(r, g, b) = color else {
                 panic!("expected an RGB color for {identity}, got {color:?}");
             };
@@ -1204,11 +1257,14 @@ mod tests {
 
     #[test]
     fn empty_identity_and_unknowable_backgrounds_use_the_fallback() {
-        assert_eq!(identity_color("", &[DARK_BG], TEXT), TEXT);
+        assert_eq!(identity_color("", &[DARK_BG], text_color()), text_color());
         // Named terminal colors have no knowable RGB, so no contrast check
         // is possible and the fallback wins.
-        assert_eq!(identity_color("alice", &[Color::Black], TEXT), TEXT);
-        assert_eq!(identity_color("alice", &[], TEXT), TEXT);
+        assert_eq!(
+            identity_color("alice", &[Color::Black], text_color()),
+            text_color()
+        );
+        assert_eq!(identity_color("alice", &[], text_color()), text_color());
     }
 
     // -- badges -------------------------------------------------------------
@@ -1578,12 +1634,12 @@ mod tests {
                 .unwrap_or_else(|| panic!("span {needle:?} missing"))
                 .style
         };
-        assert_eq!(find("@alice").fg, Some(ACCENT));
+        assert_eq!(find("@alice").fg, Some(accent_color()));
         assert!(find("@alice").add_modifier.contains(Modifier::BOLD));
         assert!(find("https://x.example")
             .add_modifier
             .contains(Modifier::UNDERLINED));
-        assert_eq!(find(":wave:").fg, Some(SUCCESS));
+        assert_eq!(find(":wave:").fg, Some(success_color()));
     }
 
     // -- layouts ------------------------------------------------------------
@@ -1623,7 +1679,7 @@ mod tests {
         assert!(name_span.style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(
             name_span.style.fg,
-            Some(identity_color("u1", &[DARK_BG], TEXT))
+            Some(identity_color("u1", &[DARK_BG], text_color()))
         );
         // Body rows carry the 3-cell indent at width 80 and no header parts.
         let body = joined(std::slice::from_ref(&lines[1]));
@@ -1729,7 +1785,7 @@ mod tests {
             .iter()
             .find(|s| s.content.contains("(kanji_name)"))
             .expect("the login span exists (asserted above)");
-        assert_eq!(login_span.style.fg, Some(MUTED));
+        assert_eq!(login_span.style.fg, Some(muted_color()));
     }
 
     #[test]

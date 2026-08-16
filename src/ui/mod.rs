@@ -4,6 +4,7 @@ pub mod app;
 pub mod chat_tab;
 pub mod draw;
 pub mod input;
+pub mod theme_picker;
 pub mod worker;
 
 use anyhow::{Context, Result};

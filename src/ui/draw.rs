@@ -10,30 +10,28 @@ use super::worker::LogLevel;
 use crate::lang;
 use crate::model::{Field, Platform, Privacy};
 
-/// The colour scheme, kept in one place so the whole UI stays consistent.
-mod theme {
-    use ratatui::style::Color;
-
-    pub const ACCENT: Color = Color::Rgb(145, 71, 255); // Twitch purple
-    pub const YOUTUBE: Color = Color::Rgb(255, 0, 0);
-    pub const TEXT: Color = Color::Rgb(230, 237, 243);
-    pub const DIM: Color = Color::Rgb(139, 148, 158);
-    pub const BORDER: Color = Color::Rgb(48, 54, 61);
-    pub const OK: Color = Color::Rgb(63, 185, 80);
-    pub const WARN: Color = Color::Rgb(210, 153, 34);
-    pub const ERROR: Color = Color::Rgb(248, 81, 73);
-}
-
 /// Brand colour for a platform, used on its panel border and heading.
+///
+/// Twitch purple and YouTube red are the two colours in the interface that do
+/// *not* come from the theme: they identify a platform rather than decorate a
+/// surface, and a Twitch panel that turns green under a green theme has
+/// stopped saying "Twitch". Everything else on the panel is themed.
 fn platform_color(platform: Platform) -> Color {
     match platform {
-        Platform::Twitch => theme::ACCENT,
-        Platform::YouTube => theme::YOUTUBE,
+        Platform::Twitch => Color::Rgb(145, 71, 255),
+        Platform::YouTube => Color::Rgb(255, 0, 0),
     }
 }
 
 /// Draw the whole screen.
 pub fn draw(frame: &mut Frame, app: &App) {
+    // Publish this frame's palette before anything reads it. Drawing runs
+    // across three modules and hundreds of call sites that all read one
+    // shared skin (see `theme::skin`); establishing it once here means a
+    // frame is always drawn entirely from the palette this `App` holds, and
+    // never half from one theme and half from another.
+    crate::theme::set_active(&app.palette);
+
     let areas = Layout::vertical([
         Constraint::Length(1), // top-level tab bar
         Constraint::Length(3), // header
@@ -60,21 +58,33 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 
     draw_footer(frame, areas[3], app);
+
+    // The theme picker covers everything: colours are judged by looking at
+    // the whole screen, so it takes the whole screen.
+    if let Some(picker) = &app.theme_picker {
+        super::theme_picker::draw(
+            frame,
+            frame.area(),
+            picker,
+            &app.config.appearance.custom_theme.to_palette(),
+        );
+    }
 }
 
 /// The top-level tab strip: `1 Stream Info` and `2 Chat`.
 fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
+    let sk = crate::theme::skin();
     let tab = |label: &str, active: bool| {
         if active {
             Span::styled(
                 format!(" {label} "),
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(sk.on_accent)
+                    .bg(sk.accent)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            Span::styled(format!(" {label} "), Style::default().fg(Color::Gray))
+            Span::styled(format!(" {label} "), Style::default().fg(sk.muted))
         }
     };
     let line = Line::from(vec![
@@ -83,10 +93,7 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
         tab("2 Chat", app.tab == super::app::Tab::Chat),
         Span::raw(" "),
         tab("3 Combined", app.tab == super::app::Tab::Combined),
-        Span::styled(
-            "   alt+1/2/3 to switch",
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled("   alt+1/2/3 to switch", Style::default().fg(sk.muted)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -97,6 +104,7 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
 /// before anything else can happen; this asks for the two values that console
 /// gives you, so a fresh install never has to be fixed by hand-editing a file.
 fn draw_setup(frame: &mut Frame, area: Rect, app: &App) {
+    let sk = crate::theme::skin();
     use super::app::SetupField;
 
     let areas = Layout::vertical([Constraint::Length(9), Constraint::Min(0)])
@@ -106,29 +114,29 @@ fn draw_setup(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines = vec![
         Line::from(Span::styled(
             "Set up API access",
-            Style::new().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+            Style::new().fg(sk.foreground).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(
             "Each platform needs an application registered in its developer console.",
-            Style::new().fg(theme::DIM),
+            Style::new().fg(sk.muted),
         )),
         Line::from(Span::styled(
             "Twitch:  https://dev.twitch.tv/console/apps  (OAuth redirect URL below)",
-            Style::new().fg(theme::DIM),
+            Style::new().fg(sk.muted),
         )),
         Line::from(Span::styled(
             "YouTube: https://console.cloud.google.com/apis/credentials  (Desktop app)",
-            Style::new().fg(theme::DIM),
+            Style::new().fg(sk.muted),
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("Redirect URL to register: ", Style::new().fg(theme::DIM)),
-            Span::styled(app.config.redirect_uri(), Style::new().fg(theme::TEXT)),
+            Span::styled("Redirect URL to register: ", Style::new().fg(sk.muted)),
+            Span::styled(app.config.redirect_uri(), Style::new().fg(sk.foreground)),
         ]),
         Line::from(Span::styled(
             "Fill in one platform or both — an empty pair is simply skipped.",
-            Style::new().fg(theme::DIM),
+            Style::new().fg(sk.muted),
         )),
     ];
     lines.push(Line::from(""));
@@ -161,7 +169,7 @@ fn draw_setup(frame: &mut Frame, area: Rect, app: &App) {
         let border = if focused {
             platform_color(field.platform())
         } else {
-            theme::BORDER
+            sk.border
         };
         let block = Block::default()
             .borders(Borders::ALL)
@@ -173,7 +181,7 @@ fn draw_setup(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 shown,
-                Style::new().fg(theme::TEXT),
+                Style::new().fg(sk.foreground),
             )))
             .block(block),
             rows[index],
@@ -183,6 +191,7 @@ fn draw_setup(frame: &mut Frame, area: Rect, app: &App) {
 
 /// The login screen: which platforms to authorise in the browser.
 fn draw_login(frame: &mut Frame, area: Rect, app: &App) {
+    let sk = crate::theme::skin();
     let areas = Layout::vertical([Constraint::Length(6), Constraint::Min(0)])
         .horizontal_margin(2)
         .split(area);
@@ -191,16 +200,16 @@ fn draw_login(frame: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(vec![
             Line::from(Span::styled(
                 "Authorise your accounts",
-                Style::new().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+                Style::new().fg(sk.foreground).add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from(Span::styled(
                 "Tick the platforms you want to stream to and press Enter. Your browser",
-                Style::new().fg(theme::DIM),
+                Style::new().fg(sk.muted),
             )),
             Line::from(Span::styled(
                 "opens for each one in turn; approve the access and come back here.",
-                Style::new().fg(theme::DIM),
+                Style::new().fg(sk.muted),
             )),
         ])
         .wrap(Wrap { trim: false }),
@@ -229,9 +238,9 @@ fn draw_login(frame: &mut Frame, area: Rect, app: &App) {
                     .fg(platform_color(*platform))
                     .add_modifier(Modifier::BOLD)
             } else if configured {
-                Style::new().fg(theme::TEXT)
+                Style::new().fg(sk.foreground)
             } else {
-                Style::new().fg(theme::DIM)
+                Style::new().fg(sk.muted)
             };
 
             ListItem::new(Line::from(vec![
@@ -243,7 +252,7 @@ fn draw_login(frame: &mut Frame, area: Rect, app: &App) {
                     ),
                     style,
                 ),
-                Span::styled(state.to_string(), Style::new().fg(theme::DIM)),
+                Span::styled(state.to_string(), Style::new().fg(sk.muted)),
             ]))
         })
         .collect();
@@ -257,14 +266,15 @@ fn draw_login(frame: &mut Frame, area: Rect, app: &App) {
 /// chat while keeping an eye on whether you are actually live and how many
 /// people are watching, not to duplicate the whole dashboard.
 fn draw_combined(frame: &mut Frame, area: Rect, app: &App) {
+    let sk = crate::theme::skin();
     use super::app::CombinedFocus;
 
     let areas = Layout::vertical([Constraint::Length(7), Constraint::Min(0)]).split(area);
     let focused_border = |focused: bool| {
         if focused {
-            Style::new().fg(theme::ACCENT)
+            Style::new().fg(sk.accent)
         } else {
-            Style::new().fg(theme::BORDER)
+            Style::new().fg(sk.border)
         }
     };
 
@@ -295,16 +305,17 @@ fn draw_combined(frame: &mut Frame, area: Rect, app: &App) {
 /// A few lines describing where each platform stands right now: which account
 /// is connected, whether it is live, and what the stream is called.
 fn stream_summary_lines(app: &App) -> Vec<Line<'static>> {
+    let sk = crate::theme::skin();
     let plan = app.plan();
     let mut lines = vec![Line::from(vec![
-        Span::styled("Title  ", Style::new().fg(theme::DIM)),
+        Span::styled("Title  ", Style::new().fg(sk.muted)),
         Span::styled(
             if plan.title.is_empty() {
                 "(not set — press alt+1 to edit)".to_string()
             } else {
                 plan.title.clone()
             },
-            Style::new().fg(theme::TEXT),
+            Style::new().fg(sk.foreground),
         ),
     ])];
 
@@ -322,13 +333,10 @@ fn stream_summary_lines(app: &App) -> Vec<Line<'static>> {
         match app.accounts.get(&platform) {
             Some(Ok(name)) => spans.push(Span::styled(
                 format!("{name}  "),
-                Style::new().fg(theme::TEXT),
+                Style::new().fg(sk.foreground),
             )),
-            Some(Err(_)) => spans.push(Span::styled(
-                "not connected  ",
-                Style::new().fg(theme::ERROR),
-            )),
-            None => spans.push(Span::styled("connecting…  ", Style::new().fg(theme::DIM))),
+            Some(Err(_)) => spans.push(Span::styled("not connected  ", Style::new().fg(sk.error))),
+            None => spans.push(Span::styled("connecting…  ", Style::new().fg(sk.muted))),
         }
 
         match app.stats_for(platform) {
@@ -339,29 +347,26 @@ fn stream_summary_lines(app: &App) -> Vec<Line<'static>> {
                     } else {
                         "○ offline  "
                     },
-                    Style::new().fg(if stats.live { theme::OK } else { theme::DIM }),
+                    Style::new().fg(if stats.live { sk.success } else { sk.muted }),
                 ));
                 if let Some(viewers) = stats.viewers {
                     spans.push(Span::styled(
                         format!("{viewers} watching  "),
-                        Style::new().fg(theme::TEXT),
+                        Style::new().fg(sk.foreground),
                     ));
                 }
                 if let Some(started) = stats.started_at {
                     spans.push(Span::styled(
                         format!("up {}", uptime(started)),
-                        Style::new().fg(theme::DIM),
+                        Style::new().fg(sk.muted),
                     ));
                 }
             }
             Some(_) => spans.push(Span::styled(
                 "statistics unavailable",
-                Style::new().fg(theme::WARN),
+                Style::new().fg(sk.warning),
             )),
-            None => spans.push(Span::styled(
-                "no statistics yet",
-                Style::new().fg(theme::DIM),
-            )),
+            None => spans.push(Span::styled("no statistics yet", Style::new().fg(sk.muted))),
         }
 
         lines.push(Line::from(spans));
@@ -370,13 +375,14 @@ fn stream_summary_lines(app: &App) -> Vec<Line<'static>> {
     if lines.len() == 1 {
         lines.push(Line::from(Span::styled(
             "No platform is connected — alt+1 opens the Stream Info tab.",
-            Style::new().fg(theme::DIM),
+            Style::new().fg(sk.muted),
         )));
     }
     lines
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
+    let sk = crate::theme::skin();
     let selected: Vec<Span> = Platform::ALL
         .iter()
         .filter(|p| app.is_selected(**p))
@@ -391,14 +397,14 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let mut spans = vec![
         Span::styled(
             " multistream-manager ",
-            Style::new().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+            Style::new().fg(sk.foreground).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("│ ", Style::new().fg(theme::BORDER)),
+        Span::styled("│ ", Style::new().fg(sk.border)),
     ];
     if selected.is_empty() {
         spans.push(Span::styled(
             "no platforms selected",
-            Style::new().fg(theme::DIM),
+            Style::new().fg(sk.muted),
         ));
     } else {
         spans.extend(selected);
@@ -407,26 +413,27 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     if app.busy {
         spans.push(Span::styled(
             "  working…",
-            Style::new().fg(theme::WARN).add_modifier(Modifier::BOLD),
+            Style::new().fg(sk.warning).add_modifier(Modifier::BOLD),
         ));
     }
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(theme::BORDER));
+        .border_style(Style::new().fg(sk.border));
 
     frame.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
+    let sk = crate::theme::skin();
     // A toast takes over the footer while it is showing, because it is always
     // more urgent than a reminder of the key bindings.
     if let Some(toast) = &app.toast {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 format!(" {toast}"),
-                Style::new().fg(theme::WARN).add_modifier(Modifier::BOLD),
+                Style::new().fg(sk.warning).add_modifier(Modifier::BOLD),
             ))),
             area,
         );
@@ -445,7 +452,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             " alt+w stream info   h/l pane   j/k scroll   i compose   / search   q quit"
         };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(hints, Style::new().fg(theme::DIM)))),
+            Paragraph::new(Line::from(Span::styled(hints, Style::new().fg(sk.muted)))),
             area,
         );
         return;
@@ -456,7 +463,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Paragraph::new(Line::from(Span::styled(
                 " h/l pane   j/k scroll   [ ] chats   { } accounts   i compose   \
                  space,c join   / search   ctrl+r reconnect   q quit",
-                Style::new().fg(theme::DIM),
+                Style::new().fg(sk.muted),
             ))),
             area,
         );
@@ -470,22 +477,22 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         let (go_hint, go_style) = if ready {
             (
                 "Ctrl+G go live",
-                Style::new().fg(theme::OK).add_modifier(Modifier::BOLD),
+                Style::new().fg(sk.success).add_modifier(Modifier::BOLD),
             )
         } else {
-            ("Ctrl+G go live (not ready)", Style::new().fg(theme::DIM))
+            ("Ctrl+G go live (not ready)", Style::new().fg(sk.muted))
         };
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     " Tab/↑↓ field   Enter complete   ",
-                    Style::new().fg(theme::DIM),
+                    Style::new().fg(sk.muted),
                 ),
                 Span::styled(go_hint, go_style),
                 Span::styled(
                     "   Ctrl+S save defaults   Esc back",
-                    Style::new().fg(theme::DIM),
+                    Style::new().fg(sk.muted),
                 ),
             ])),
             area,
@@ -509,7 +516,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             format!(" {hints}"),
-            Style::new().fg(theme::DIM),
+            Style::new().fg(sk.muted),
         ))),
         area,
     );
@@ -518,6 +525,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 // -- Screen 1 ---------------------------------------------------------------
 
 fn draw_platforms(frame: &mut Frame, area: Rect, app: &App) {
+    let sk = crate::theme::skin();
     let areas = Layout::vertical([Constraint::Length(8), Constraint::Min(0)])
         .horizontal_margin(1)
         .split(area);
@@ -535,9 +543,9 @@ fn draw_platforms(frame: &mut Frame, area: Rect, app: &App) {
                     .fg(platform_color(*platform))
                     .add_modifier(Modifier::BOLD)
             } else if ticked {
-                Style::new().fg(theme::TEXT)
+                Style::new().fg(sk.foreground)
             } else {
-                Style::new().fg(theme::DIM)
+                Style::new().fg(sk.muted)
             };
 
             // Show which account each platform is connected to, once known.
@@ -550,7 +558,7 @@ fn draw_platforms(frame: &mut Frame, area: Rect, app: &App) {
             ListItem::new(Line::from(vec![
                 Span::styled(format!(" {marker} "), style),
                 Span::styled(platform.label(), style),
-                Span::styled(suffix, Style::new().fg(theme::DIM)),
+                Span::styled(suffix, Style::new().fg(sk.muted)),
             ]))
         })
         .collect();
@@ -558,7 +566,7 @@ fn draw_platforms(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(theme::BORDER))
+        .border_style(Style::new().fg(sk.border))
         .title(" Where are you streaming? ");
 
     frame.render_widget(List::new(items).block(block), areas[0]);
@@ -566,19 +574,19 @@ fn draw_platforms(frame: &mut Frame, area: Rect, app: &App) {
     let explanation = vec![
         Line::from(Span::styled(
             "Pick the platforms you want to broadcast to, then press Enter.",
-            Style::new().fg(theme::TEXT),
+            Style::new().fg(sk.foreground),
         )),
         Line::from(""),
         Line::from(Span::styled(
             "You will be asked to log in the first time. After that the login is \
              remembered and renews itself.",
-            Style::new().fg(theme::DIM),
+            Style::new().fg(sk.muted),
         )),
         Line::from(""),
         Line::from(Span::styled(
             "Nothing is sent to either platform until you fill in the next screen \
              and press Ctrl+G.",
-            Style::new().fg(theme::DIM),
+            Style::new().fg(sk.muted),
         )),
     ];
 
@@ -593,6 +601,7 @@ fn draw_platforms(frame: &mut Frame, area: Rect, app: &App) {
 // -- Screen 2 ---------------------------------------------------------------
 
 fn draw_form(frame: &mut Frame, area: Rect, app: &App) {
+    let sk = crate::theme::skin();
     let areas = Layout::vertical([
         Constraint::Min(0),    // the fields
         Constraint::Length(4), // help for the focused field
@@ -609,9 +618,9 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &App) {
     for (index, field) in Field::ORDER.iter().enumerate() {
         let focused = index == app.field_cursor;
         let label_style = if focused {
-            Style::new().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+            Style::new().fg(sk.accent).add_modifier(Modifier::BOLD)
         } else {
-            Style::new().fg(theme::DIM)
+            Style::new().fg(sk.muted)
         };
 
         // Hide YouTube-only fields when YouTube is not selected, so the form
@@ -636,7 +645,7 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &App) {
         let marker = if focused { "▌" } else { " " };
 
         let mut spans = vec![
-            Span::styled(format!(" {marker} "), Style::new().fg(theme::ACCENT)),
+            Span::styled(format!(" {marker} "), Style::new().fg(sk.accent)),
             Span::styled(format!("{:<24}", field.label()), label_style),
         ];
 
@@ -647,7 +656,7 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             spans.push(Span::styled(
                 field_value(app, *field),
-                Style::new().fg(theme::TEXT),
+                Style::new().fg(sk.foreground),
             ));
         }
 
@@ -656,7 +665,7 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &App) {
             let (counter, over) = app.title_counter();
             spans.push(Span::styled(
                 format!("   {counter}"),
-                Style::new().fg(if over { theme::ERROR } else { theme::DIM }),
+                Style::new().fg(if over { sk.error } else { sk.muted }),
             ));
         }
 
@@ -675,7 +684,7 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &App) {
         if unresolved {
             spans.push(Span::styled(
                 "   not selected — press Enter to pick",
-                Style::new().fg(theme::WARN),
+                Style::new().fg(sk.warning),
             ));
         }
 
@@ -685,7 +694,7 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(theme::BORDER))
+        .border_style(Style::new().fg(sk.border))
         .title(" Stream settings ");
 
     frame.render_widget(Paragraph::new(lines).block(block), areas[0]);
@@ -694,19 +703,16 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &App) {
     let help = Paragraph::new(vec![
         Line::from(Span::styled(
             app.field().label(),
-            Style::new().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            Style::new().fg(sk.accent).add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::styled(
-            app.field().help(),
-            Style::new().fg(theme::DIM),
-        )),
+        Line::from(Span::styled(app.field().help(), Style::new().fg(sk.muted))),
     ])
     .wrap(Wrap { trim: true })
     .block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(theme::BORDER)),
+            .border_style(Style::new().fg(sk.border)),
     );
     frame.render_widget(help, areas[1]);
 
@@ -758,6 +764,7 @@ fn field_value(app: &App, field: Field) -> String {
 /// own cursor, because the fields are laid out inside a `Paragraph` and there is
 /// no reliable cell coordinate to point the real cursor at.
 fn editing_spans(app: &App, field: Field, width: usize) -> Vec<Span<'static>> {
+    let sk = crate::theme::skin();
     let Some(input) = app.input(field) else {
         return vec![Span::raw("")];
     };
@@ -766,8 +773,8 @@ fn editing_spans(app: &App, field: Field, width: usize) -> Vec<Span<'static>> {
         // An empty field still needs a visible caret, otherwise it looks
         // unfocused even though typing would go into it.
         return vec![
-            Span::styled(" ", Style::new().bg(theme::ACCENT)),
-            Span::styled("  (empty)", Style::new().fg(theme::BORDER)),
+            Span::styled(" ", Style::new().bg(sk.accent)),
+            Span::styled("  (empty)", Style::new().fg(sk.border)),
         ];
     }
 
@@ -779,12 +786,9 @@ fn editing_spans(app: &App, field: Field, width: usize) -> Vec<Span<'static>> {
     let after: String = chars.iter().skip(caret + 1).collect();
 
     vec![
-        Span::styled(before, Style::new().fg(theme::TEXT)),
-        Span::styled(
-            at.to_string(),
-            Style::new().bg(theme::ACCENT).fg(Color::White),
-        ),
-        Span::styled(after, Style::new().fg(theme::TEXT)),
+        Span::styled(before, Style::new().fg(sk.foreground)),
+        Span::styled(at.to_string(), Style::new().bg(sk.accent).fg(sk.on_accent)),
+        Span::styled(after, Style::new().fg(sk.foreground)),
     ]
 }
 
@@ -798,6 +802,7 @@ fn checkbox(on: bool) -> String {
 
 /// The floating autocomplete list.
 fn draw_popup(frame: &mut Frame, area: Rect, app: &App) {
+    let sk = crate::theme::skin();
     let Some(popup) = &app.popup else {
         return;
     };
@@ -847,13 +852,13 @@ fn draw_popup(frame: &mut Frame, area: Rect, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::new().fg(theme::ACCENT))
+                .border_style(Style::new().fg(sk.accent))
                 .title(title),
         )
         .highlight_style(
             Style::new()
-                .bg(theme::ACCENT)
-                .fg(Color::White)
+                .bg(sk.accent)
+                .fg(sk.on_accent)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▸ ");
@@ -869,6 +874,7 @@ fn draw_popup(frame: &mut Frame, area: Rect, app: &App) {
 // -- Screen 3 ---------------------------------------------------------------
 
 fn draw_dashboard(frame: &mut Frame, area: Rect, app: &App) {
+    let sk = crate::theme::skin();
     let areas = Layout::vertical([Constraint::Min(0), Constraint::Length(8)])
         .horizontal_margin(1)
         .split(area);
@@ -881,7 +887,7 @@ fn draw_dashboard(frame: &mut Frame, area: Rect, app: &App) {
 
     if live.is_empty() {
         frame.render_widget(
-            Paragraph::new("Nothing to show.").style(Style::new().fg(theme::DIM)),
+            Paragraph::new("Nothing to show.").style(Style::new().fg(sk.muted)),
             areas[0],
         );
         return;
@@ -897,17 +903,17 @@ fn draw_dashboard(frame: &mut Frame, area: Rect, app: &App) {
     let banner = if ready.is_empty() {
         Line::from(Span::styled(
             " Nothing is ready — see the errors below.",
-            Style::new().fg(theme::ERROR).add_modifier(Modifier::BOLD),
+            Style::new().fg(sk.error).add_modifier(Modifier::BOLD),
         ))
     } else {
         Line::from(vec![
             Span::styled(
                 format!(" {} ready. ", ready.join(" and ")),
-                Style::new().fg(theme::OK).add_modifier(Modifier::BOLD),
+                Style::new().fg(sk.success).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "Press Start Streaming in OBS now.",
-                Style::new().fg(theme::TEXT),
+                Style::new().fg(sk.foreground),
             ),
         ])
     };
@@ -934,6 +940,7 @@ fn draw_dashboard(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_platform_panel(frame: &mut Frame, area: Rect, app: &App, platform: Platform) {
+    let sk = crate::theme::skin();
     let colour = platform_color(platform);
     let mut lines = Vec::new();
 
@@ -941,38 +948,38 @@ fn draw_platform_panel(frame: &mut Frame, area: Rect, app: &App, platform: Platf
         None => {
             lines.push(Line::from(Span::styled(
                 "Not submitted yet.",
-                Style::new().fg(theme::DIM),
+                Style::new().fg(sk.muted),
             )));
         }
         Some(result) => match &result.outcome {
             Err(err) => {
                 lines.push(Line::from(Span::styled(
                     "FAILED",
-                    Style::new().fg(theme::ERROR).add_modifier(Modifier::BOLD),
+                    Style::new().fg(sk.error).add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(""));
                 for chunk in err.lines() {
                     lines.push(Line::from(Span::styled(
                         chunk.to_string(),
-                        Style::new().fg(theme::ERROR),
+                        Style::new().fg(sk.error),
                     )));
                 }
             }
             Ok(outcome) => {
                 lines.push(Line::from(Span::styled(
                     "READY — you can start streaming in OBS",
-                    Style::new().fg(theme::OK).add_modifier(Modifier::BOLD),
+                    Style::new().fg(sk.success).add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(""));
 
                 if let Some(url) = &outcome.watch_url {
-                    lines.push(field_line("Watch", url, theme::TEXT));
+                    lines.push(field_line("Watch", url, sk.foreground));
                 }
                 if let Some(url) = &outcome.manage_url {
-                    lines.push(field_line("Manage", url, theme::DIM));
+                    lines.push(field_line("Manage", url, sk.muted));
                 }
                 if let Some(url) = &outcome.ingest_url {
-                    lines.push(field_line("Ingest", url, theme::DIM));
+                    lines.push(field_line("Ingest", url, sk.muted));
                 }
                 if let Some(key) = &outcome.stream_key {
                     // Masked by default: this window is frequently on screen
@@ -982,15 +989,15 @@ fn draw_platform_panel(frame: &mut Frame, area: Rect, app: &App, platform: Platf
                     // program only by being copied to the clipboard (y / Y),
                     // so it cannot be read off a shared screen or a recording.
                     let masked = "•".repeat(key.chars().count().min(24));
-                    lines.push(field_line("Key", &masked, theme::WARN));
+                    lines.push(field_line("Key", &masked, sk.warning));
                 }
 
                 lines.push(Line::from(""));
                 for note in &outcome.notes {
                     let style = if note.starts_with("Warning") {
-                        Style::new().fg(theme::WARN)
+                        Style::new().fg(sk.warning)
                     } else {
-                        Style::new().fg(theme::DIM)
+                        Style::new().fg(sk.muted)
                     };
                     lines.push(Line::from(Span::styled(format!("• {note}"), style)));
                 }
@@ -1009,21 +1016,21 @@ fn draw_platform_panel(frame: &mut Frame, area: Rect, app: &App, platform: Platf
         if let Some(error) = &stats.error {
             lines.push(Line::from(Span::styled(
                 format!("stats unavailable: {error}"),
-                Style::new().fg(theme::WARN),
+                Style::new().fg(sk.warning),
             )));
         } else {
             let status = if stats.live { "live" } else { "offline" };
-            let status_colour = if stats.live { theme::OK } else { theme::DIM };
+            let status_colour = if stats.live { sk.success } else { sk.muted };
             lines.push(field_line("Status", status, status_colour));
 
             if let Some(viewers) = stats.viewers {
-                lines.push(field_line("Viewers", &viewers.to_string(), theme::TEXT));
+                lines.push(field_line("Viewers", &viewers.to_string(), sk.foreground));
             }
             if let Some(started) = stats.started_at {
-                lines.push(field_line("Uptime", &uptime(started), theme::TEXT));
+                lines.push(field_line("Uptime", &uptime(started), sk.foreground));
             }
             for stat in &stats.extra {
-                lines.push(field_line(&stat.label, &stat.value, theme::DIM));
+                lines.push(field_line(&stat.label, &stat.value, sk.muted));
             }
         }
     }
@@ -1045,8 +1052,9 @@ fn draw_platform_panel(frame: &mut Frame, area: Rect, app: &App, platform: Platf
 
 /// A `label: value` line with aligned labels.
 fn field_line(label: &str, value: &str, colour: Color) -> Line<'static> {
+    let sk = crate::theme::skin();
     Line::from(vec![
-        Span::styled(format!("{label:<9}"), Style::new().fg(theme::DIM)),
+        Span::styled(format!("{label:<9}"), Style::new().fg(sk.muted)),
         Span::styled(value.to_string(), Style::new().fg(colour)),
     ])
 }
@@ -1071,6 +1079,7 @@ pub fn uptime(since: chrono::DateTime<chrono::Utc>) -> String {
 
 /// The activity log panel, shared by the form and the dashboard.
 fn draw_log(frame: &mut Frame, area: Rect, app: &App) {
+    let sk = crate::theme::skin();
     let visible = area.height.saturating_sub(2) as usize;
 
     // Show the newest lines, which is what matters while something is happening,
@@ -1085,15 +1094,15 @@ fn draw_log(frame: &mut Frame, area: Rect, app: &App) {
         .take(visible)
         .map(|entry| {
             let colour = match entry.level {
-                LogLevel::Info => theme::DIM,
-                LogLevel::Success => theme::OK,
-                LogLevel::Warning => theme::WARN,
-                LogLevel::Error => theme::ERROR,
+                LogLevel::Info => sk.muted,
+                LogLevel::Success => sk.success,
+                LogLevel::Warning => sk.warning,
+                LogLevel::Error => sk.error,
             };
             Line::from(vec![
                 Span::styled(
                     entry.at.format("%H:%M:%S ").to_string(),
-                    Style::new().fg(theme::BORDER),
+                    Style::new().fg(sk.border),
                 ),
                 Span::styled(entry.message.clone(), Style::new().fg(colour)),
             ])
@@ -1103,7 +1112,7 @@ fn draw_log(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(theme::BORDER))
+        .border_style(Style::new().fg(sk.border))
         .title(" Activity ");
 
     frame.render_widget(Paragraph::new(lines).block(block), area);
@@ -1119,12 +1128,22 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
+    /// Serialises the tests that render.
+    ///
+    /// Drawing publishes the frame's palette into one shared skin, so two
+    /// tests rendering at the same time on different threads would each see
+    /// the other's colours. Production never has this problem — it has a
+    /// single interface drawing a single frame at a time — so the lock lives
+    /// here in the tests rather than in the drawing code.
+    static RENDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Render one frame into an in-memory terminal and return it as plain text.
     ///
     /// This exercises the real layout code, which is where an off-by-one in a
     /// `Rect` or a shadowed variable would otherwise go unnoticed until a human
     /// happened to look at the screen.
     fn render(app: &App, width: u16, height: u16) -> String {
+        let _guard = RENDER_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let mut terminal = Terminal::new(TestBackend::new(width, height))
             .expect("the test backend never fails to initialise");
         terminal
@@ -1549,5 +1568,53 @@ mod tests {
             "the view should stay on the same lines"
         );
         assert_eq!(render(&app, 120, 40), before);
+    }
+
+    /// The whole point of a theme is that changing it changes what is on
+    /// screen. This renders the same frame under two very different palettes
+    /// and checks the colours actually differ, which no amount of testing the
+    /// palette table on its own would prove.
+    #[test]
+    fn changing_the_theme_changes_the_colours_that_reach_the_screen() {
+        fn tab_bar_colours(app: &App) -> Vec<ratatui::style::Color> {
+            let _guard = RENDER_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+            let mut terminal = Terminal::new(TestBackend::new(80, 24))
+                .expect("the test backend never fails to initialise");
+            terminal
+                .draw(|frame| draw(frame, app))
+                .expect("drawing must not fail");
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, 0)].style().fg.unwrap_or(Color::Reset))
+                .collect()
+        }
+
+        let mut app = app();
+        app.palette = crate::theme::presets()["nord"].clone();
+        let nord = tab_bar_colours(&app);
+
+        app.palette = crate::theme::presets()["gruvbox-light"].clone();
+        let gruvbox = tab_bar_colours(&app);
+        assert_ne!(nord, gruvbox);
+
+        // Putting the first palette back reproduces the first frame exactly,
+        // so nothing has cached a colour from a theme that is no longer in
+        // use.
+        app.palette = crate::theme::presets()["nord"].clone();
+        assert_eq!(tab_bar_colours(&app), nord);
+    }
+
+    /// An unreadable theme is worse than no theme: whatever the palette, the
+    /// label on the selected tab has to be legible against the colour drawn
+    /// behind it.
+    #[test]
+    fn the_selected_tab_stays_legible_under_every_built_in_theme() {
+        for (name, palette) in crate::theme::presets() {
+            let skin = crate::theme::Skin::from_palette(&palette);
+            assert_ne!(
+                skin.on_accent, skin.accent,
+                "theme {name} draws the selected tab label in its own background colour"
+            );
+        }
     }
 }

@@ -32,8 +32,125 @@ pub struct Config {
     pub general: GeneralConfig,
     /// Chat pane settings.
     pub chat: ChatConfig,
+    /// Colours, motion, and the optional interface extras.
+    pub appearance: AppearanceConfig,
     /// The saved stream settings the form starts from.
     pub preset: PresetConfig,
+}
+
+/// How the interface looks and how much it moves.
+///
+/// Everything here is cosmetic: nothing in this section can stop a stream
+/// going live, and every value falls back to a sensible default rather than
+/// refusing to start, because being locked out of your own stream by a
+/// mistyped colour would be an absurd trade.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppearanceConfig {
+    /// Which palette to draw with: one of the 57 built-in names, or `custom`
+    /// to use the `[appearance.custom_theme]` colours below.
+    ///
+    /// Run `msm profile themes` to list every name. An unrecognised name
+    /// falls back to the default palette.
+    pub theme: String,
+
+    /// The nine colours used when `theme = "custom"`.
+    ///
+    /// Any role left blank falls back to the default palette's colour for
+    /// that role, so a custom theme can override one colour without having to
+    /// restate the other eight.
+    pub custom_theme: CustomTheme,
+
+    /// React to mouse clicks and the scroll wheel.
+    ///
+    /// Turning this off gives the terminal back its own text selection, which
+    /// some people would rather have than clickable tabs.
+    pub mouse: bool,
+
+    /// Show the process telemetry segment (cpu, memory, frame rate) in the
+    /// status bar.
+    pub telemetry: bool,
+
+    /// Show pop-up notifications for things that happen while you are looking
+    /// elsewhere.
+    pub toasts: bool,
+
+    /// How long a pop-up notification stays on screen, in seconds.
+    pub toast_seconds: u64,
+
+    /// Repaint the terminal emulator's own background to match the theme.
+    ///
+    /// This uses an escape sequence (OSC 11) that changes the colour of the
+    /// whole window rather than only the cells this program draws, and it is
+    /// undone on exit. Turn it off if your terminal's own background is
+    /// deliberately transparent or blurred, because the override replaces
+    /// that with a solid colour.
+    pub terminal_background: bool,
+}
+
+impl Default for AppearanceConfig {
+    fn default() -> Self {
+        Self {
+            theme: crate::theme::DEFAULT_PRESET.to_string(),
+            custom_theme: CustomTheme::default(),
+            mouse: true,
+            telemetry: false,
+            toasts: true,
+            toast_seconds: 5,
+            terminal_background: false,
+        }
+    }
+}
+
+/// A hand-written palette, one `#rrggbb` value per role.
+///
+/// Every field is optional — an empty string means "use the default
+/// palette's colour for this role".
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomTheme {
+    pub background: String,
+    pub foreground: String,
+    pub accent: String,
+    pub muted: String,
+    pub border: String,
+    pub surface: String,
+    pub warning: String,
+    pub error: String,
+    pub success: String,
+}
+
+impl CustomTheme {
+    /// Fill the blanks from the default palette and return a complete one.
+    pub fn to_palette(&self) -> crate::theme::Palette {
+        let base = crate::theme::default_palette();
+        let pick = |value: &str, fallback: &str| {
+            if value.trim().is_empty() {
+                fallback.to_string()
+            } else {
+                value.trim().to_string()
+            }
+        };
+        crate::theme::Palette {
+            background: pick(&self.background, &base.background),
+            foreground: pick(&self.foreground, &base.foreground),
+            accent: pick(&self.accent, &base.accent),
+            muted: pick(&self.muted, &base.muted),
+            border: pick(&self.border, &base.border),
+            surface: pick(&self.surface, &base.surface),
+            warning: pick(&self.warning, &base.warning),
+            error: pick(&self.error, &base.error),
+            success: pick(&self.success, &base.success),
+        }
+    }
+}
+
+impl AppearanceConfig {
+    /// The palette to draw with, plus whether the configured name was
+    /// recognised. A `false` here is worth logging, not worth failing on.
+    pub fn palette(&self) -> (crate::theme::Palette, bool) {
+        crate::theme::resolve(&self.theme, &self.custom_theme.to_palette())
+    }
 }
 
 /// Twitch application credentials, from <https://dev.twitch.tv/console/apps>.

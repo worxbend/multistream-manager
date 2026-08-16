@@ -1096,12 +1096,13 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &ChatTabState, config: &Config
 }
 
 fn connection_color(status: ConnectionStatus) -> Color {
+    let sk = crate::theme::skin();
     match status {
-        ConnectionStatus::Connected => Color::Green,
-        ConnectionStatus::Connecting | ConnectionStatus::Reconnecting => Color::Yellow,
-        ConnectionStatus::QuotaPaused => Color::Magenta,
-        ConnectionStatus::Closed | ConnectionStatus::Disconnected => Color::DarkGray,
-        ConnectionStatus::Failed => Color::Red,
+        ConnectionStatus::Connected => sk.success,
+        ConnectionStatus::Connecting | ConnectionStatus::Reconnecting => sk.warning,
+        ConnectionStatus::QuotaPaused => sk.accent,
+        ConnectionStatus::Closed | ConnectionStatus::Disconnected => sk.muted,
+        ConnectionStatus::Failed => sk.error,
     }
 }
 
@@ -1112,11 +1113,12 @@ fn draw_pane(
     config: &Config,
     platform: Platform,
 ) {
+    let sk = crate::theme::skin();
     let focused = state.focus == platform;
     let border_style = if focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(sk.accent)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(sk.muted)
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1152,6 +1154,7 @@ fn draw_pane(
 }
 
 fn draw_account_strip(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: Platform) {
+    let sk = crate::theme::skin();
     let accounts = state.accounts_for(platform);
     let selected = *state.selected.get(&platform).unwrap_or(&0);
     let mut spans = Vec::new();
@@ -1176,11 +1179,11 @@ fn draw_account_strip(frame: &mut Frame, area: Rect, state: &ChatTabState, platf
         };
         let style = if index == selected {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(sk.on_accent)
+                .bg(sk.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(sk.muted)
         };
         spans.push(Span::styled(label, style));
         spans.push(Span::raw(" "));
@@ -1189,6 +1192,7 @@ fn draw_account_strip(frame: &mut Frame, area: Rect, state: &ChatTabState, platf
 }
 
 fn draw_chat_strip(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: Platform) {
+    let sk = crate::theme::skin();
     let Some(account) = state.selected_account(platform) else {
         return;
     };
@@ -1207,7 +1211,7 @@ fn draw_chat_strip(frame: &mut Frame, area: Rect, state: &ChatTabState, platform
         let style = if index == active {
             Style::default().add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(sk.muted)
         };
         spans.push(Span::styled(chat.title.clone(), style));
         spans.push(Span::raw("  "));
@@ -1222,19 +1226,19 @@ fn draw_chat_strip(frame: &mut Frame, area: Rect, state: &ChatTabState, platform
         if !detail.is_empty() {
             spans.push(Span::styled(
                 format!(" — {detail}"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(sk.muted),
             ));
         }
         if chat.state.filters.any() {
             spans.push(Span::styled(
                 format!(" · filter: {}", chat.state.filters.summary()),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(sk.warning),
             ));
         }
         if !chat.state.search.is_empty() {
             spans.push(Span::styled(
                 format!(" · /{}", chat.state.search),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(sk.warning),
             ));
         }
     }
@@ -1244,10 +1248,11 @@ fn draw_chat_strip(frame: &mut Frame, area: Rect, state: &ChatTabState, platform
 /// One activity line for a message, if it is activity at all. A projection
 /// of history (yc activity.go): no second data store to drift or clear.
 fn activity_line(msg: &ChatMessage) -> Option<Line<'static>> {
+    let sk = crate::theme::skin();
     let (glyph, color, text) = if msg.deleted {
         (
             "✖",
-            Color::Red,
+            sk.error,
             format!("a message by {} was removed", msg.author.display_name),
         )
     } else {
@@ -1260,24 +1265,24 @@ fn activity_line(msg: &ChatMessage) -> Option<Line<'static>> {
                     .unwrap_or_default();
                 (
                     "◈",
-                    Color::Yellow,
+                    sk.warning,
                     format!("{} {amount}", msg.author.display_name),
                 )
             }
             (MessageKind::Membership, _) => (
                 "★",
-                Color::Cyan,
+                sk.accent,
                 format!("{} — {}", msg.author.display_name, msg.text),
             ),
             (_, Some(PlatformMeta::Twitch(meta))) if meta.bits > 0 => (
                 "◈",
-                Color::Yellow,
+                sk.warning,
                 format!("{} cheered {} bits", msg.author.display_name, meta.bits),
             ),
             (_, Some(PlatformMeta::Twitch(meta))) if !meta.system_event.is_empty() => {
-                ("★", Color::Cyan, msg.text.clone())
+                ("★", sk.accent, msg.text.clone())
             }
-            (MessageKind::Notice, _) => ("·", Color::Gray, msg.text.clone()),
+            (MessageKind::Notice, _) => ("·", sk.muted, msg.text.clone()),
             _ => return None,
         }
     };
@@ -1286,7 +1291,7 @@ fn activity_line(msg: &ChatMessage) -> Option<Line<'static>> {
         .map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string())
         .unwrap_or_else(|| "--:--".into());
     Some(Line::from(vec![
-        Span::styled(timestamp, Style::default().fg(Color::DarkGray)),
+        Span::styled(timestamp, Style::default().fg(sk.muted)),
         Span::raw(" "),
         Span::styled(glyph.to_string(), Style::default().fg(color)),
         Span::raw(" "),
@@ -1298,6 +1303,7 @@ fn activity_line(msg: &ChatMessage) -> Option<Line<'static>> {
 /// newest at the bottom, scanning at most the newest 400 messages (yc's
 /// bound) and showing at most 200 rows.
 fn draw_activity(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: Platform) {
+    let sk = crate::theme::skin();
     let Some(key) = state.active_key(platform) else {
         return;
     };
@@ -1317,7 +1323,7 @@ fn draw_activity(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: 
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
             "No activity yet — cheers, Super Chats, memberships and removals land here.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(sk.muted),
         )));
     }
     lines.reverse();
@@ -1329,17 +1335,18 @@ fn draw_activity(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: 
 /// — the words never reappear, not even here (these terminals are often on
 /// stream).
 fn draw_inspect(frame: &mut Frame, area: Rect, state: &ChatTabState) {
+    let sk = crate::theme::skin();
     let Some(msg) = state.selected_message() else {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "Nothing selected — j/k picks a message to inspect.",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(sk.muted),
             ))),
             area,
         );
         return;
     };
-    let label = |text: &str| Span::styled(format!("{text:<10}"), Style::default().fg(Color::Cyan));
+    let label = |text: &str| Span::styled(format!("{text:<10}"), Style::default().fg(sk.accent));
     let mut lines = vec![
         Line::from(vec![label("id"), Span::raw(msg.id.clone())]),
         Line::from(vec![label("kind"), Span::raw(format!("{:?}", msg.kind))]),
@@ -1415,7 +1422,7 @@ fn draw_inspect(frame: &mut Frame, area: Rect, state: &ChatTabState) {
         None => {}
     }
     let text = if msg.deleted {
-        Span::styled("removed", Style::default().fg(Color::DarkGray))
+        Span::styled("removed", Style::default().fg(sk.muted))
     } else {
         Span::raw(msg.text.clone())
     };
@@ -1423,16 +1430,17 @@ fn draw_inspect(frame: &mut Frame, area: Rect, state: &ChatTabState) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "K or esc closes the inspector.",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(sk.muted),
     )));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
 fn draw_messages(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: Platform) {
+    let sk = crate::theme::skin();
     let Some(key) = state.active_key(platform) else {
         let hint = Paragraph::new(Line::from(Span::styled(
             "No chat open — press space then c to join one.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(sk.muted),
         )));
         frame.render_widget(hint, area);
         return;
@@ -1497,7 +1505,7 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: 
             // The selection is a background wash over the whole message so
             // reply/moderation targets are unmistakable.
             for line in &mut rendered {
-                line.style = line.style.bg(Color::Rgb(45, 55, 75));
+                line.style = line.style.bg(sk.selection);
             }
         }
         rendered.reverse();
@@ -1516,47 +1524,48 @@ fn draw_composer(
     platform: Platform,
     focused: bool,
 ) {
+    let sk = crate::theme::skin();
     let line = if focused {
         match &state.mode {
             ChatFocus::Join(buffer) => Line::from(vec![
-                Span::styled("join: ", Style::default().fg(Color::Cyan)),
+                Span::styled("join: ", Style::default().fg(sk.accent)),
                 Span::raw(buffer.clone()),
-                Span::styled("▏", Style::default().fg(Color::Cyan)),
+                Span::styled("▏", Style::default().fg(sk.accent)),
             ]),
             ChatFocus::EmojiPicker { query: buffer, .. } => {
                 let mut spans = vec![
-                    Span::styled("emoji: ", Style::default().fg(Color::Cyan)),
+                    Span::styled("emoji: ", Style::default().fg(sk.accent)),
                     Span::raw(buffer.clone()),
-                    Span::styled("▏ ", Style::default().fg(Color::Cyan)),
+                    Span::styled("▏ ", Style::default().fg(sk.accent)),
                 ];
                 for entry in crate::chat::emoji::search(buffer, 6) {
                     spans.push(Span::raw(format!("{} ", entry.emoji)));
                 }
                 spans.push(Span::styled(
                     " enter inserts the first",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(sk.muted),
                 ));
                 Line::from(spans)
             }
             ChatFocus::Search(buffer) => Line::from(vec![
-                Span::styled("/", Style::default().fg(Color::Yellow)),
+                Span::styled("/", Style::default().fg(sk.warning)),
                 Span::raw(buffer.clone()),
-                Span::styled("▏", Style::default().fg(Color::Yellow)),
+                Span::styled("▏", Style::default().fg(sk.warning)),
                 Span::styled(
                     "  enter keeps the query for n/N",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(sk.muted),
                 ),
             ]),
             ChatFocus::TimeoutPrompt(buffer) => Line::from(vec![
                 Span::styled(
                     "timeout for: ",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    Style::default().fg(sk.error).add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(buffer.clone()),
-                Span::styled("▏", Style::default().fg(Color::Red)),
+                Span::styled("▏", Style::default().fg(sk.error)),
                 Span::styled(
                     "  (45s / 5m / 2h, max 24h — enter applies, esc cancels)",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(sk.muted),
                 ),
             ]),
             ChatFocus::Compose => {
@@ -1568,12 +1577,12 @@ fn draw_composer(
                 if let Some((_, name)) = chat.and_then(|c| c.state.reply_to.as_ref()) {
                     spans.push(Span::styled(
                         format!("↳ {name} "),
-                        Style::default().fg(Color::Magenta),
+                        Style::default().fg(sk.accent),
                     ));
                 }
-                spans.push(Span::styled("> ", Style::default().fg(Color::Cyan)));
+                spans.push(Span::styled("> ", Style::default().fg(sk.accent)));
                 spans.push(Span::raw(draft));
-                spans.push(Span::styled("▏", Style::default().fg(Color::Cyan)));
+                spans.push(Span::styled("▏", Style::default().fg(sk.accent)));
                 Line::from(spans)
             }
             ChatFocus::Normal => {
@@ -1583,12 +1592,12 @@ fn draw_composer(
                             "press the same key again to {} — any other key cancels",
                             action.label()
                         ),
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        Style::default().fg(sk.error).add_modifier(Modifier::BOLD),
                     ))
                 } else {
                     Line::from(Span::styled(
                         "i compose · j/k select · r reply · / search · 1-4 filters · d/t/b moderate · [ ] chats · space-c join",
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(sk.muted),
                     ))
                 }
             }
@@ -1596,7 +1605,7 @@ fn draw_composer(
     } else {
         Line::from(Span::styled(
             "h/l to focus this pane",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(sk.muted),
         ))
     };
     frame.render_widget(Paragraph::new(line), area);
@@ -1606,6 +1615,7 @@ fn draw_composer(
 /// it. The commands are the real ones this repository ships — discovered in
 /// recon, not invented.
 fn draw_empty_state(frame: &mut Frame, area: Rect, config: &Config, platform: Platform) {
+    let sk = crate::theme::skin();
     let slug = platform.slug();
     let credentials_ready = config.check_credentials(&[platform]).is_ok();
 
@@ -1639,7 +1649,7 @@ fn draw_empty_state(frame: &mut Frame, area: Rect, config: &Config, platform: Pl
     lines.push(Line::from("each appears here as its own sub-tab."));
 
     let paragraph = Paragraph::new(lines)
-        .style(Style::default().fg(Color::Gray))
+        .style(Style::default().fg(sk.muted))
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }

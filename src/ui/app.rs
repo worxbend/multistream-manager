@@ -225,6 +225,14 @@ pub struct App {
     pub should_quit: bool,
     /// A transient one-line message shown at the bottom.
     pub toast: Option<String>,
+    /// The theme picker, while it is open.
+    pub theme_picker: Option<super::theme_picker::ThemePicker>,
+    /// The palette every surface is drawn from.
+    ///
+    /// Held here as well as in the shared skin because the theme picker needs
+    /// the colours as text — to show a swatch, to name what is selected, and
+    /// to put back what was there if the picker is cancelled.
+    pub palette: crate::theme::Palette,
     /// How many lines the activity log is scrolled back from its newest line.
     ///
     /// Zero means "show the tail", which is what a running session wants. Any
@@ -288,7 +296,21 @@ impl App {
             setup_inputs.insert(field, TextInput::new(existing));
         }
 
+        // Resolve the theme up front. Publishing it is `draw`'s job — it does
+        // that once per frame from whatever palette this `App` holds — so
+        // there is exactly one place in the program that changes the colours
+        // anything is drawn with. An unrecognised name is worth a line in the
+        // log but not worth refusing to start over.
+        let (palette, recognised) = config.appearance.palette();
+        if !recognised {
+            tracing::warn!(
+                theme = %config.appearance.theme,
+                "unknown theme name; using the default palette"
+            );
+        }
         Self {
+            theme_picker: None,
+            palette,
             tab: Tab::StreamInfo,
             chat: super::chat_tab::ChatTabState::new(&config),
             combined_focus: CombinedFocus::Chat,
@@ -620,6 +642,22 @@ impl App {
         // Ctrl+C always quits, on every screen, even mid-request.
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
             self.should_quit = true;
+            return vec![];
+        }
+
+        // The theme picker takes the whole screen and every key while it is
+        // open, so it is handled before anything else can claim a key. It is
+        // checked ahead of the text fields deliberately: ctrl+t has to work
+        // while a message is half-typed, and a control-modified key is never
+        // text anyway.
+        if self.theme_picker.is_some() {
+            return self.key_theme_picker(key);
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('t')) {
+            self.theme_picker = Some(super::theme_picker::ThemePicker::open(
+                &self.config.appearance.theme,
+                &self.palette,
+            ));
             return vec![];
         }
 
@@ -1093,6 +1131,86 @@ impl App {
             .copied()
             .filter(|platform| self.config.check_credentials(&[*platform]).is_ok())
             .collect()
+    }
+
+    /// Keys while the theme picker is open.
+    ///
+    /// Every movement applies the theme under the cursor immediately, which is
+    /// what makes this a preview rather than a list of names. `Enter` keeps
+    /// it and writes it to the config file; `Esc` restores whatever was in use
+    /// before the picker opened.
+    fn key_theme_picker(&mut self, key: KeyEvent) -> Vec<Command> {
+        let Some(picker) = self.theme_picker.as_mut() else {
+            return vec![];
+        };
+        match key.code {
+            KeyCode::Esc => {
+                let palette = picker.original_palette.clone();
+                self.theme_picker = None;
+                self.apply_palette(palette);
+                return vec![];
+            }
+            KeyCode::Enter => return self.save_theme(),
+            KeyCode::Up | KeyCode::Char('k') => picker.move_by(-1),
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => picker.move_by(1),
+            KeyCode::PageUp => picker.move_by(-10),
+            KeyCode::PageDown => picker.move_by(10),
+            KeyCode::Home => picker.move_to(0),
+            KeyCode::End => {
+                let last = picker.last_index();
+                picker.move_to(last);
+            }
+            _ => return vec![],
+        }
+        self.preview_selected_theme();
+        vec![]
+    }
+
+    /// Apply the palette under the picker's cursor, without saving it.
+    fn preview_selected_theme(&mut self) {
+        let Some(picker) = self.theme_picker.as_ref() else {
+            return;
+        };
+        let custom = self.config.appearance.custom_theme.to_palette();
+        let (palette, _) = crate::theme::resolve(&picker.selected_name(), &custom);
+        self.apply_palette(palette);
+    }
+
+    /// Make `palette` the one every subsequent frame is drawn from.
+    ///
+    /// Storing it is all that is needed: the next frame publishes it.
+    fn apply_palette(&mut self, palette: crate::theme::Palette) {
+        self.palette = palette;
+    }
+
+    /// Keep the previewed theme: write the name into the config file and close
+    /// the picker.
+    ///
+    /// A failed write leaves the picker open showing why. Closing it on a
+    /// failure would look exactly like success and then quietly forget the
+    /// choice at the next start-up.
+    fn save_theme(&mut self) -> Vec<Command> {
+        let Some(picker) = self.theme_picker.as_mut() else {
+            return vec![];
+        };
+        let chosen = picker.selected_name();
+        let previous = self.config.appearance.theme.clone();
+        self.config.appearance.theme = chosen.clone();
+        match self.config.save() {
+            Ok(()) => {
+                self.theme_picker = None;
+                self.push_log(LogLevel::Info, format!("Theme saved: {chosen}"));
+                // The worker holds its own copy of the config, so it has to be
+                // told as well or the next thing it writes would put the old
+                // theme name back.
+                vec![Command::ReloadConfig(Box::new(self.config.clone()))]
+            }
+            Err(err) => {
+                self.config.appearance.theme = previous;
+                picker.save_error = Some(format!("{err:#}"));
+                vec![]
+            }
+        }
     }
 
     fn key_login(&mut self, key: KeyEvent) -> Vec<Command> {
