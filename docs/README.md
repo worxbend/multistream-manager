@@ -5,6 +5,9 @@ live broadcast from one form, so that afterwards you press **Start Streaming**
 in OBS once and go out on both. It does not control OBS, and it does not send
 video anywhere itself.
 
+It has no command line. You run `msm`, a terminal interface opens with five
+tabs, and everything the program can do is somewhere in it.
+
 The project [README](../README.md) is the short tour. These pages are the long
 version: they explain *why* each piece behaves the way it does, so that when
 something goes wrong you can reason about it rather than guess.
@@ -14,8 +17,8 @@ something goes wrong you can reason about it rather than guess.
 | Page | What it covers |
 |---|---|
 | [Getting started](getting-started.md) | Installing, registering a Twitch application, registering a Google OAuth client, logging in, and running your first stream. |
-| [Configuration](configuration.md) | Every key in `config.toml` with its type and default, a full worked example, and the "edit the file, run `msm go`" preset workflow. |
-| [Commands](commands.md) | Every subcommand and every flag, with what each one prints and when you would reach for it. |
+| [Configuration](configuration.md) | Every key in `config.toml` with its type and default, a full worked example, and the preset workflow that makes a repeat stream two keystrokes. |
+| [Keys and actions](keys.md) | Every tab, every default binding, the action names for the `[keys]` section, and where each of the old subcommands now lives. |
 | [OBS and Aitum](obs-and-aitum.md) | How this fits an existing OBS + Aitum multistream setup, why your stream keys stay put, and the order to do things in. |
 | [How it works](how-it-works.md) | The architecture: one `StreamPlan` fanned out to platform backends, why Twitch needs one API call and YouTube needs four, and how partial success is handled. |
 | [Troubleshooting](troubleshooting.md) | The errors you are realistically going to hit, each with its cause and its fix. |
@@ -26,9 +29,9 @@ something goes wrong you can reason about it rather than guess.
   that page are the ones people lose an evening to — Google's *Test users* list
   and YouTube's 24-hour wait before a channel may stream at all — so they are
   called out in boxes rather than buried in prose.
-* **Set up already, want to script it**: [Commands](commands.md) for
-  `msm go --json`, and [Configuration](configuration.md) for keeping one preset
-  file per kind of stream.
+* **Set up already, want to go faster**: [Keys and actions](keys.md) for the
+  bindings and how to change them, and [Configuration](configuration.md) for
+  the `[preset]` section that makes starting a stream two keystrokes.
 * **Something failed**: [Troubleshooting](troubleshooting.md).
 * **Curious how it is put together, or thinking of contributing**:
   [How it works](how-it-works.md).

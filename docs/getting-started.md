@@ -6,12 +6,16 @@ require you to register your own "application" with them before their APIs will
 talk to you at all. There is no way around that, and every tool of this kind has
 to ask you for the same thing.
 
-You do it once. After that, going live is one command and one keystroke.
+You do it once. After that, going live is one keystroke.
+
+`msm` has no command line: you run `msm`, a terminal interface opens, and
+everything below happens inside it. There is nothing to type at a shell prompt
+except the three letters of the program's name.
 
 **Contents**
 
 1. [Install](#1-install)
-2. [Write a config file](#2-write-a-config-file)
+2. [Open it for the first time](#2-open-it-for-the-first-time)
 3. [Twitch credentials](#3-twitch-credentials)
 4. [Google and YouTube credentials](#4-google-and-youtube-credentials)
 5. [Enable live streaming on the channel](#5-enable-live-streaming-on-the-channel)
@@ -65,35 +69,43 @@ cd multistream-manager
 cargo install --path .
 ```
 
-That places a binary called `msm` in `~/.cargo/bin`. Check it is on your path:
-
-```bash
-msm --version
-```
-
-If the shell cannot find it, add `~/.cargo/bin` to your `PATH`.
+That places a binary called `msm` in `~/.cargo/bin`. If the shell cannot find it
+afterwards, add `~/.cargo/bin` to your `PATH`.
 
 ---
 
-## 2. Write a config file
+## 2. Open it for the first time
 
 ```bash
-msm init
+msm
 ```
 
-This writes a commented starter `config.toml` and prints where it put it. On
-Linux that is `~/.config/multistream-manager/config.toml`; on macOS it is under
-`~/Library/Application Support/`, and on Windows under `%APPDATA%`. `msm paths`
-prints the location at any time, along with the token and log file paths.
+With nothing configured yet, the interface opens on a screen headed **Set up API
+access**: one box for each platform's client id and client secret, and the
+redirect URL you are about to register printed above them.
 
-The file is written with owner-only permissions (`0600` on Unix), because it is
-about to hold two client secrets.
+Leave it open on one side of the screen. The next two steps are about getting
+those four values out of Twitch's and Google's developer consoles, and you will
+come back here to paste each one in.
 
-If the file already exists, `msm init` leaves it alone and says so rather than
-overwriting your credentials.
+Two things worth knowing while you are there:
 
-Open it in an editor and keep it open — the next two steps fill it in. Every key
-in the file is described in [Configuration](configuration.md).
+* **Secrets are drawn as dots even while you type them.** This window is
+  frequently on screen while somebody streams, and a client secret is a
+  credential.
+* **One platform is enough.** An empty pair of boxes is skipped rather than
+  treated as an error, so you can set Twitch up today and YouTube next week.
+
+<kbd>Tab</kbd> and the arrow keys move between boxes; <kbd>Enter</kbd> saves.
+Saving writes `config.toml` for you, with owner-only permissions (`0600` on
+Unix) because it now holds two client secrets. On Linux it lands in
+`~/.config/multistream-manager/config.toml`; on macOS under `~/Library/
+Application Support/`, and on Windows under `%APPDATA%`. The **Files** section of
+the Config tab (<kbd>Alt</kbd>+<kbd>5</kbd>) shows the exact paths at any time.
+
+You can also write that file by hand if you would rather — every key in it is
+described in [Configuration](configuration.md), and the setup screen picks up
+whatever is already there.
 
 ---
 
@@ -115,13 +127,14 @@ your account password.
    * **Category** — *Application Integration*.
    * **Client Type** — *Confidential*.
 4. Click **Create**, then **Manage** on the application you created.
-5. Copy the **Client ID** into `client_id` under `[twitch]` in your config file.
-6. Click **New Secret**, confirm, and copy the value into `client_secret`.
+5. Copy the **Client ID** into the **Twitch client id** box on the setup screen.
+6. Click **New Secret**, confirm, and copy the value into **Twitch client
+   secret**.
 
 The secret is displayed once. If you lose it, generate a new one — old secrets
-stop working when you do, so update the config at the same time.
+stop working when you do, so paste the replacement in at the same time.
 
-Your `[twitch]` section should now look like this, with real values:
+What that saves into `config.toml` is this, with real values:
 
 ```toml
 [twitch]
@@ -167,7 +180,9 @@ Google's console is the more involved of the two. Work through it in order.
    * Name it anything, then **Create**.
    * Add `http://localhost:8017/callback` as an authorised redirect URI, the
      same value you gave Twitch.
-6. Copy the **Client ID** and **Client secret** into `[youtube]` in the config:
+6. Copy the **Client ID** and **Client secret** into the two YouTube boxes on the
+   setup screen, and press <kbd>Enter</kbd> to save. In the config file that
+   becomes:
 
 ```toml
 [youtube]
@@ -189,7 +204,7 @@ worth knowing what you are agreeing to:
 | Platform | Scope | Why it is needed |
 |---|---|---|
 | Twitch | `channel:manage:broadcast` | Set the channel title, category, language and tags. Without it nothing can be changed. |
-| Twitch | `channel:read:stream_key` | Show your stream key in the dashboard and in `msm key twitch`. |
+| Twitch | `channel:read:stream_key` | Copy your stream key to the clipboard with <kbd>y</kbd>. The key is never displayed. |
 | Twitch | `moderator:read:followers` | The follower total on the statistics panel. |
 | Twitch | `channel:read:subscriptions` | The subscriber total on the statistics panel. |
 | YouTube | `https://www.googleapis.com/auth/youtube` | Create a broadcast, bind a stream to it, and update the resulting video. YouTube's live-streaming endpoints are not available under any narrower scope, so this single broad one is what has to be asked for. |
@@ -215,11 +230,20 @@ see [Troubleshooting](troubleshooting.md#youtube-livestreamingnotenabled).
 
 ## 6. Log in
 
-```bash
-msm login all
-```
+Saving the credential form takes you straight to a screen headed **Authorise your
+accounts**. (If you are coming back to this later, it is also the **Accounts**
+section of the Config tab, <kbd>Alt</kbd>+<kbd>5</kbd>.)
 
-This opens your browser twice, once per platform. What happens:
+| Key | Does |
+|---|---|
+| <kbd>j</kbd> / <kbd>k</kbd>, <kbd>↑</kbd> / <kbd>↓</kbd> | Move between the platforms |
+| <kbd>Space</kbd> | Tick or untick one |
+| <kbd>Enter</kbd> | Authorise everything ticked |
+| <kbd>c</kbd> | Back to the credential form, to fix a typo without quitting |
+| <kbd>s</kbd> | Skip, and carry on with whatever logins already exist |
+
+Tick both and press <kbd>Enter</kbd>. Your browser opens twice, once per
+platform. What happens:
 
 1. `msm` starts a small web server on `localhost:8017` and opens the platform's
    authorisation page in your browser. If no browser opens, the URL is printed
@@ -253,22 +277,21 @@ your account is not on the Test users list.
 
 ### Check it worked
 
-```bash
-msm status
-```
+Open the Config tab (<kbd>Alt</kbd>+<kbd>5</kbd>) and look at **Accounts**. Each
+platform says whether a login is saved and which account it belongs to. Pressing
+<kbd>Enter</kbd> on a row logs that platform out again if you ever need to — for
+instance to authorise a different channel.
 
-This prints, per platform, whether a login is saved and how long the current
-access token is valid for, whether credentials are configured, and where the
-config file lives. Access tokens are short-lived — Google's last about an hour —
-but a refresh token is saved alongside them and renewal happens silently, so a
-session lasting all evening keeps working.
+**Diagnostics**, in the same tab, is the fuller picture: credentials, logins,
+token expiry, clipboard, terminal and OBS, each reported as `ok`, `warn` or
+`fail`. It is the first place to look when anything misbehaves.
 
-You can log in to one platform at a time if you prefer:
+Access tokens are short-lived — Google's last about an hour — but a refresh token
+is saved alongside them and renewal happens silently, so a session lasting all
+evening keeps working.
 
-```bash
-msm login twitch
-msm login youtube
-```
+You do not have to authorise both platforms at once: tick one, press
+<kbd>Enter</kbd>, and come back to the other whenever you like.
 
 ---
 
@@ -282,25 +305,31 @@ destination. `msm` never touches OBS and never changes those settings. See
 [OBS and Aitum](obs-and-aitum.md) for the details, including where the YouTube
 stream key comes from the very first time.
 
-If it is your first YouTube broadcast, run this to see which stream keys exist
-on the channel:
+If it is your first YouTube broadcast, it is worth seeing which stream keys
+already exist on the channel: **Config → Housekeeping → *List YouTube stream
+keys***. It lists the ids, and only the ids — a key itself is never shown,
+because this window is often part of the broadcast.
 
-```bash
-msm streams
-```
+### The five tabs
 
-### Using the interface
+Once you are set up, `msm` opens on the Stream Info tab. The five tabs are
+<kbd>Alt</kbd>+<kbd>1</kbd> Stream Info, <kbd>Alt</kbd>+<kbd>2</kbd> Chat,
+<kbd>Alt</kbd>+<kbd>3</kbd> Combined, <kbd>Alt</kbd>+<kbd>4</kbd> OBS and
+<kbd>Alt</kbd>+<kbd>5</kbd> Config. Press <kbd>space</kbd> and pause at any point
+and a popup lists every key that can follow it; <kbd>Ctrl</kbd>+<kbd>P</kbd>
+searches every action by name. The whole set is in
+[Keys and actions](keys.md).
 
-```bash
-msm
-```
+### Screen 1 — platforms
 
-**Screen 1 — platforms.** <kbd>↑</kbd>/<kbd>↓</kbd> to move, <kbd>Space</kbd> to
-tick, <kbd>a</kbd> to tick everything, <kbd>Enter</kbd> to connect. Connecting
-verifies both logins and prints which account each resolved to, so streaming to
-the wrong channel is caught before anything is changed.
+<kbd>↑</kbd>/<kbd>↓</kbd> to move, <kbd>Space</kbd> to tick, <kbd>a</kbd> to tick
+everything, <kbd>Enter</kbd> to connect. Connecting verifies both logins and
+records which account each resolved to, so streaming to the wrong channel is
+caught before anything is changed.
 
-**Screen 2 — the form.** One set of fields for both platforms.
+### Screen 2 — the form
+
+One set of fields for both platforms.
 
 | Key | Does |
 |---|---|
@@ -327,16 +356,24 @@ The submit hint at the bottom of the form turns green only when the plan is
 genuinely sendable, so you do not discover a missing category after the API
 round trip.
 
-**Screen 3 — the dashboard.** Watch and manage URLs, ingest URL, the masked
-stream key, and live statistics for both platforms side by side.
+### Screen 3 — the dashboard
+
+Watch and manage URLs, the ingest URL, a masked stream key, and live statistics
+for both platforms side by side.
 
 | Key | Does |
 |---|---|
 | <kbd>r</kbd> | Refresh statistics now |
 | <kbd>o</kbd> | Open the watch page in your browser |
-| <kbd>k</kbd> | Show or hide the stream key |
+| <kbd>y</kbd> / <kbd>Y</kbd> | Copy the Twitch / YouTube stream key to the clipboard |
 | <kbd>e</kbd> | Back to the form to change something and submit again |
 | <kbd>q</kbd> | Quit |
+
+> [!WARNING]
+> A stream key is **copied, never shown** — there is no reveal key anywhere in
+> the program. The value goes from the API straight to the system clipboard
+> inside a background task, so nothing that could end up on screen, in a
+> recording or in the log file ever holds it.
 
 ### Now start OBS
 
@@ -348,25 +385,21 @@ by itself as soon as it sees the incoming feed, so you never open YouTube
 Studio. With it off, you have to press **Go live** there yourself once OBS is
 connected.
 
-### Doing it without the interface
+### Making the next time faster
 
-Once the `[preset]` section of your config says what you usually stream, you can
-skip the form entirely:
-
-```bash
-msm go          # shows a summary and asks for confirmation
-msm go --yes    # no prompt
-```
-
-That workflow, including keeping one preset file per kind of stream, is covered
-in [Configuration](configuration.md#the-preset-workflow).
+Press <kbd>Ctrl</kbd>+<kbd>S</kbd> in the form and everything you typed is saved
+into the `[preset]` section of `config.toml`, including the Twitch category id it
+resolved for you. Next time, the form opens already filled in and going live is
+<kbd>Ctrl</kbd>+<kbd>G</kbd> and nothing else. That workflow, and how to keep
+more than one preset, is covered in
+[Configuration](configuration.md#the-preset-workflow).
 
 ---
 
 ## Where to go next
 
 * [Configuration](configuration.md) — every setting, explained.
-* [Commands](commands.md) — the full command reference.
+* [Keys and actions](keys.md) — every binding, and how to change one.
 * [OBS and Aitum](obs-and-aitum.md) — how this slots into your existing setup.
 * [Troubleshooting](troubleshooting.md) — when a step above did not work.
 * [Back to the documentation index](README.md).

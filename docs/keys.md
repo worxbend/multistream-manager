@@ -1,660 +1,633 @@
-# Command reference
+# Keys and actions
 
-The terminal interface is the way `msm` is meant to be used. The subcommands
-exist for the things a full-screen interface is bad at: one-off logins, scripted
-go-lives, printing a stream key, and housekeeping.
+`msm` has no command line. There are no subcommands and no flags: you run `msm`,
+the interface opens, and everything the program can do is somewhere inside it.
+This page is the reference for reaching those things from the keyboard, and for
+changing which key reaches what.
 
-**Every command at a glance**
+If you type an option anyway — `msm --help`, `msm login`, anything at all — the
+program prints a short note saying there are no options and where each tab is,
+then exits without opening the interface. That is deliberate: starting up as
+though nothing had been typed would look like the argument had been understood.
 
-| Command | Purpose |
-|---|---|
-| [`msm`](#msm--msm-tui) | Open the interface. This is the default. |
-| [`msm tui`](#msm--msm-tui) | The same thing, named explicitly. |
-| [`msm login <PLATFORM>`](#msm-login-platform) | Authorise a platform in your browser. |
-| [`msm logout <PLATFORM>`](#msm-logout-platform) | Forget a saved login. |
-| [`msm status`](#msm-status) | Which platforms are logged in, and where the config lives. |
-| [`msm go`](#msm-go) | Apply the config preset without opening the interface. |
-| [`msm key <PLATFORM>`](#msm-key-platform) | Print a stream key. |
-| [`msm categories <QUERY>`](#msm-categories-query) | Search Twitch's category list. |
-| [`msm streams`](#msm-streams) | List the stream keys on your YouTube channel. |
-| [`msm cleanup`](#msm-cleanup) | Find, and optionally delete, YouTube broadcasts that never went live. |
-| [`msm obs`](#msm-obs) | Control OBS Studio. |
-| [`msm doctor`](#msm-doctor) | Check the setup and report anything that would stop a stream. |
-| [`msm setup <PLATFORM>`](#msm-setup-platform) | Fill in one platform's API credentials from the command line. |
-| [`msm profile`](#msm-profile) | Look at and change the colour theme. |
-| [`msm init`](#msm-init) | Write a commented starter config file. |
-| [`msm paths`](#msm-paths) | Show where config, tokens and logs live. |
+**Contents**
 
-`msm --help` prints the same list; `msm <command> --help` prints the long
-description of one command.
+* [The shape of the keys](#the-shape-of-the-keys)
+* [The which-key popup](#the-which-key-popup)
+* [The five tabs](#the-five-tabs)
+* [Everywhere](#everywhere)
+* [Stream Info](#stream-info)
+* [Chat](#chat)
+* [OBS](#obs)
+* [Config](#config)
+* [The setup and login screens](#the-setup-and-login-screens)
+* [Rebinding a key](#rebinding-a-key)
+* [How a key is written](#how-a-key-is-written)
+* [Every action name](#every-action-name)
+* [Where the old subcommands went](#where-the-old-subcommands-went)
 
 ---
 
-## The global flag
+## The shape of the keys
 
-```
--c, --config <FILE>
-```
+The defaults are shaped the way [AstroNvim](https://astronvim.com) shapes
+Neovim's, because that is a shape a great many people who live in a terminal
+already have in their fingers. In practice that means five things.
 
-Use a specific config file instead of the default one. Accepted before or after
-any subcommand, and by every subcommand.
+* **A leader key**, <kbd>space</kbd> by default, in front of everything
+  memorable.
+* **Two-letter mnemonic groups** after it. <kbd>&lt;Leader&gt;</kbd> then
+  <kbd>o</kbd> is the OBS group, so <kbd>&lt;Leader&gt;</kbd> <kbd>o</kbd>
+  <kbd>s</kbd> is "OBS → stream" and <kbd>&lt;Leader&gt;</kbd> <kbd>o</kbd>
+  <kbd>m</kbd> is "OBS → mute". The first letter names a subject and the second
+  names a verb, so neither has to be remembered as a whole.
+* **A which-key popup.** Press the leader, wait, and the choices appear.
+* **<kbd>]</kbd> and <kbd>[</kbd> for next and previous** over whatever the
+  current thing is: <kbd>]</kbd><kbd>t</kbd> for tabs, <kbd>]</kbd> on its own
+  for the next chat.
+* **vim's own movement keys left alone.** <kbd>j</kbd>, <kbd>k</kbd>,
+  <kbd>g</kbd>, <kbd>G</kbd> and their friends mean here what they mean
+  everywhere else, so they are not hidden behind a leader.
 
-```bash
-msm --config ~/streams/coding.toml go
-msm status --config ~/streams/coding.toml
-```
+A handful of control chords sit outside all of that, for the two or three things
+you might want regardless of where you are: <kbd>Ctrl</kbd>+<kbd>P</kbd> for the
+command palette and <kbd>Ctrl</kbd>+<kbd>C</kbd> to quit.
 
-Two commands accept it but do not act on it: `msm init` always writes to the
-default location, and `msm paths` always prints the default location.
+> [!NOTE]
+> The tabs are on <kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>5</kbd> rather than
+> <kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>5</kbd>. A terminal cannot tell
+> <kbd>Ctrl</kbd>+<kbd>1</kbd> apart from a plain <kbd>1</kbd> — the two send
+> the same bytes — so a control-digit binding could not be detected at all.
 
-Also available:
+---
 
-| Flag | Where | Effect |
+## The which-key popup
+
+Press <kbd>space</kbd> and pause. A popup lists every key that can follow it,
+each with what it does. Keys that open a further group are shown as `+obs`,
+`+chat` and so on; keys that finish a binding show the action's description.
+Keep pressing and the popup narrows to what is still reachable.
+
+Two other ways to find something:
+
+* <kbd>&lt;Leader&gt;</kbd> <kbd>?</kbd> lists **every** binding in force,
+  including the ones you have changed yourself.
+* <kbd>Ctrl</kbd>+<kbd>P</kbd> opens the **command palette**: every action in
+  the program, filtered as you type, each row showing the key that runs it. Using
+  the palette teaches you the key you could have pressed, so over time you stop
+  needing it.
+
+When an action has several bindings, the one shown beside it is the one worth
+learning — the fewest keys, and among equals the fewest modifiers. That is why
+the Stream Info tab advertises <kbd>y</kbd> rather than
+<kbd>&lt;Leader&gt;</kbd> <kbd>s</kbd> <kbd>y</kbd>, even though both copy the
+Twitch key.
+
+---
+
+## The five tabs
+
+| Key | Tab | What lives there |
 |---|---|---|
-| `-h`, `--help` | Everywhere | Short help. On a subcommand, `--help` gives the long form and `-h` the summary. |
-| `-V`, `--version` | Root command only | Print the version. It is **not** accepted after a subcommand — `msm streams --version` is an error. Use `msm --version`. |
+| <kbd>Alt</kbd>+<kbd>1</kbd> | **Stream Info** | The title, description, tags, category and language; going live; the watch and ingest URLs; live statistics; the activity log |
+| <kbd>Alt</kbd>+<kbd>2</kbd> | **Chat** | Twitch chat and YouTube live chat, one account sub-tab each |
+| <kbd>Alt</kbd>+<kbd>3</kbd> | **Combined** | Both chats plus whatever else you have arranged, for a second monitor |
+| <kbd>Alt</kbd>+<kbd>4</kbd> | **OBS** | Scenes, audio inputs, and OBS's streaming and recording state |
+| <kbd>Alt</kbd>+<kbd>5</kbd> | **Config** | Layout, appearance, keys, OBS connection, accounts, housekeeping, diagnostics, file paths |
+
+<kbd>]</kbd><kbd>t</kbd> and <kbd>[</kbd><kbd>t</kbd> walk through them in
+order, and the same two tabs are also under <kbd>&lt;Leader&gt;</kbd>
+<kbd>b</kbd> (`b` for buffers, which is AstroNvim's word for the thing you
+switch between).
 
 ---
 
-## Naming a platform
+## Everywhere
 
-`login` and `logout` act on every platform you name. **`key` does not**: it reads
-the first platform in the list and ignores the rest, so give it exactly one —
-`msm key twitch`, never `msm key twitch,youtube`.
+These apply on every tab. A tab may give one of these keys a local meaning, and
+where it does, the tab wins.
 
-Commands that take a `<PLATFORM>` argument accept:
+### Control chords
 
-| You can write | Meaning |
-|---|---|
-| `twitch` or `ttv` | Twitch |
-| `youtube` or `yt` | YouTube |
-| `all` | Both |
-| `twitch,youtube` | A comma-separated list; spaces around the commas are fine |
-
-Case does not matter. An unrecognised name is refused with a message naming what
-you typed and what was expected.
-
----
-
-## `msm` / `msm tui`
-
-```bash
-msm
-msm tui
-```
-
-Opens the terminal interface: pick platforms, fill in the form once, submit to
-both, then watch the statistics. The three screens and their keys are described
-in [Getting started](getting-started.md#7-your-first-stream).
-
-Running `msm` with no arguments is identical to `msm tui`. The explicit form
-exists so that scripts and shell aliases can say what they mean.
-
----
-
-## `msm login <PLATFORM>`
-
-```bash
-msm login all
-msm login twitch
-msm login youtube
-```
-
-Runs the browser authorisation for each named platform in turn and saves the
-resulting tokens to `tokens.json`.
-
-What happens, and why it is shaped this way, is described in
-[Getting started, step 6](getting-started.md#6-log-in). In brief: a listener is
-started on the configured `oauth_port` first, then your browser is opened; you
-sign in on the platform's own site; the platform redirects back to
-`http://localhost:<port>/callback`; the code that arrives there is exchanged for
-tokens. If no browser opens, the URL is printed for you to paste in.
-
-The login waits up to five minutes, so a forgotten browser tab cannot leave the
-command hanging forever.
-
-Run this again whenever a saved login stops working, or when an update adds a
-permission your existing token does not carry.
-
----
-
-## `msm logout <PLATFORM>`
-
-```bash
-msm logout youtube
-msm logout all
-```
-
-Deletes the saved tokens for each named platform. It prints whether there was
-anything to forget, so running it twice is harmless and honest about it.
-
-This removes the local copy only. To withdraw the authorisation at the platform
-end as well, do that in your Twitch or Google account settings.
-
----
-
-## `msm status`
-
-```bash
-msm status
-```
-
-Prints three things:
-
-* **Logins** — per platform, whether tokens are saved, how long the current
-  access token is valid for, and whether a refresh token is present so renewal
-  can happen without you.
-* **Credentials configured** — whether the client id and secret are filled in.
-* **Ready to stream to** — the platforms that are actually usable right now,
-  plus the config file path.
-
-This is the first thing to run when something is not working, because it
-separates "the credentials are missing" from "the login has expired" without
-touching the network.
-
----
-
-## `msm go`
-
-```
-msm go [--platforms <LIST>] [-y|--yes] [--json]
-```
-
-Applies the `[preset]` section of your config to the selected platforms without
-opening the interface. This is the scriptable path: edit the file, run the
-command.
-
-| Flag | Effect |
-|---|---|
-| `--platforms <LIST>` | Override which platforms to use, e.g. `--platforms twitch` or `--platforms twitch,youtube`. Without it, the `platforms` key from `[preset]` is used. |
-| `-y`, `--yes` | Skip the confirmation prompt. |
-| `--json` | Print the result as JSON on stdout instead of the human report. Implies `--yes`. No short form. |
-
-The sequence is: connect to each platform and print which account it resolved
-to; resolve the Twitch category name to an id if the config has no id yet; check
-the plan for problems detectable without an API call; show a summary and ask;
-then submit.
-
-```bash
-msm go
-msm go --yes
-msm go --platforms twitch --yes
-msm --config ~/streams/gaming.toml go --yes
-```
-
-Problems found during the check are printed as `error:` (which stops the run) or
-`note:` (which does not). An over-long title is an error for Twitch but only a
-note for YouTube, because it can be shortened for YouTube alone rather than
-failing everything.
-
-**Exit status.** Non-zero when *every* platform failed, so a wrapper script can
-tell without parsing the output. If one platform succeeded and another did not,
-the exit status is zero: the platform that worked is genuinely ready and you can
-stream to it. See [How it works](how-it-works.md#partial-success).
-
-**Stream keys are never printed.** Where a key exists, the human report shows a
-`Key:` line saying it is hidden and pointing at `msm key`. Use
-[`msm key`](#msm-key-platform) when you actually need one.
-
-### `--json`
-
-```bash
-msm go --json > result.json
-```
-
-Emits a pretty-printed JSON array with one object per platform, in the canonical
-Twitch-then-YouTube order. Every progress line is routed to stderr, so stdout
-holds the document and nothing else — redirecting it produces a file a parser
-will accept.
-
-Every field is present on every object, with `null` where the platform supplied
-nothing, so a consumer can read `.watch_url` without first checking that it
-exists. Keys come out in alphabetical order.
-
-| Field | Type | Meaning |
+| Key | Action name | What it does |
 |---|---|---|
-| `error` | string or `null` | Why this platform failed. `null` on success. |
-| `ingest_url` | string or `null` | The RTMP address OBS pushes to. |
-| `manage_url` | string or `null` | Your own management page: Twitch Stream Manager, or YouTube Studio's live control room. |
-| `notes` | array of strings | Human-readable remarks, such as which stream key was reused. Empty on failure. |
-| `ok` | boolean | Whether this platform is ready. |
-| `platform` | string | `"twitch"` or `"youtube"`. |
-| `watch_url` | string or `null` | Where viewers watch. |
+| <kbd>Ctrl</kbd>+<kbd>C</kbd> | `app.quit` | Quit |
+| <kbd>Ctrl</kbd>+<kbd>P</kbd> | `app.command_palette` | Command palette |
+| <kbd>Alt</kbd>+<kbd>1</kbd> … <kbd>Alt</kbd>+<kbd>5</kbd> | `tab.stream_info`, `tab.chat`, `tab.combined`, `tab.obs`, `tab.config` | Go to that tab |
+| <kbd>Alt</kbd>+<kbd>W</kbd> | `tab.swap_focus` | Swap which half of the Combined tab has the keyboard |
+| <kbd>Alt</kbd>+<kbd>M</kbd> | `app.messages` | Message history — vim's `:messages` |
+| <kbd>]</kbd><kbd>t</kbd> / <kbd>[</kbd><kbd>t</kbd> | `tab.next` / `tab.previous` | Next / previous tab |
 
-```json
-[
-  {
-    "error": null,
-    "ingest_url": "rtmp://live.twitch.tv/app",
-    "manage_url": "https://dashboard.twitch.tv/u/yourname/stream-manager",
-    "notes": [
-      "Channel updated. Twitch has no separate \"create broadcast\" step — start streaming in OBS whenever you are ready."
-    ],
-    "ok": true,
-    "platform": "twitch",
-    "watch_url": "https://twitch.tv/yourname"
-  }
-]
-```
+### Straight after the leader
 
-The stream key is deliberately absent from this document. Output like this gets
-piped into other programs, redirected into files and pasted into bug reports,
-and unlike a password there is no prompt standing in front of a stream key.
+| Key | Action name | What it does |
+|---|---|---|
+| <kbd>&lt;Leader&gt;</kbd> <kbd>q</kbd> | `app.quit` | Quit |
+| <kbd>&lt;Leader&gt;</kbd> <kbd>?</kbd> | `app.which_key` | Show every binding |
+| <kbd>&lt;Leader&gt;</kbd> <kbd>/</kbd> | `chat.search` | Search chat |
 
----
+### <kbd>&lt;Leader&gt;</kbd> <kbd>b</kbd> — tabs
 
-## `msm key <PLATFORM>`
+| Key | Action name | What it does |
+|---|---|---|
+| <kbd>b</kbd> <kbd>s</kbd> | `tab.stream_info` | Stream Info tab |
+| <kbd>b</kbd> <kbd>c</kbd> | `tab.chat` | Chat tab |
+| <kbd>b</kbd> <kbd>b</kbd> | `tab.combined` | Combined tab |
+| <kbd>b</kbd> <kbd>o</kbd> | `tab.obs` | OBS tab |
+| <kbd>b</kbd> <kbd>g</kbd> | `tab.config` | Config tab |
+| <kbd>b</kbd> <kbd>n</kbd> / <kbd>b</kbd> <kbd>p</kbd> | `tab.next` / `tab.previous` | Next / previous tab |
 
-```bash
-msm key twitch
-```
+### <kbd>&lt;Leader&gt;</kbd> <kbd>f</kbd> — find
 
-Prints one stream key on stdout and nothing else, so it can be piped or copied.
-It is a separate command precisely so that no other command ever prints a key by
-accident.
+| Key | Action name | What it does |
+|---|---|---|
+| <kbd>f</kbd> <kbd>f</kbd> | `app.command_palette` | Command palette |
+| <kbd>f</kbd> <kbd>m</kbd> | `app.messages` | Message history |
+| <kbd>f</kbd> <kbd>c</kbd> | `chat.search` | Search chat |
+| <kbd>f</kbd> <kbd>k</kbd> | `app.which_key` | Show every binding |
 
-```bash
-msm key twitch | wl-copy      # Wayland
-msm key twitch | pbcopy       # macOS
-```
+### <kbd>&lt;Leader&gt;</kbd> <kbd>u</kbd> — interface toggles
 
-**YouTube behaves differently.** A YouTube stream key belongs to a stream object
-that is bound to a particular broadcast, and this command has no broadcast in
-hand, so `msm key youtube` does not print a key. It tells you the two places one
-can be read instead: the dashboard after `msm go`, and YouTube Studio. To list
-the keys on the channel with their ids, use [`msm streams`](#msm-streams).
+| Key | Action name | What it does |
+|---|---|---|
+| <kbd>u</kbd> <kbd>c</kbd> | `tab.config` | Config tab |
+| <kbd>u</kbd> <kbd>t</kbd> | `ui.theme` | Choose a theme |
+| <kbd>u</kbd> <kbd>a</kbd> | `ui.animations` | Cycle animations: fast, reduced, off |
+| <kbd>u</kbd> <kbd>y</kbd> | `ui.telemetry` | Show or hide cpu, memory and frame rate |
+| <kbd>u</kbd> <kbd>n</kbd> | `app.messages` | Message history |
 
-If Twitch reports no key, the usual cause is a saved login that predates the
-`channel:read:stream_key` permission. Run `msm login twitch` again.
+`u` is AstroNvim's letter for interface toggles, and `uc` opens the Config tab
+because that is where the rest of them can also be reached by anyone who would
+rather read a list than remember a letter.
 
----
+### <kbd>&lt;Leader&gt;</kbd> <kbd>s</kbd> — the stream
 
-## `msm categories <QUERY>`
+| Key | Action name | What it does |
+|---|---|---|
+| <kbd>s</kbd> <kbd>g</kbd> | `stream.go_live` | Go live |
+| <kbd>s</kbd> <kbd>e</kbd> | `stream.edit` | Edit the stream info |
+| <kbd>s</kbd> <kbd>r</kbd> | `stream.refresh` | Refresh statistics |
+| <kbd>s</kbd> <kbd>y</kbd> | `stream.copy_twitch_key` | Copy the Twitch stream key |
+| <kbd>s</kbd> <kbd>Y</kbd> | `stream.copy_youtube_key` | Copy the YouTube stream key |
+| <kbd>s</kbd> <kbd>o</kbd> | `stream.open_watch_page` | Open the watch page in a browser |
 
-```bash
-msm categories chess
-msm categories "software"
-```
+AstroNvim puts search on `s`. This program's whole subject is streaming, so the
+letter goes to that and find keeps `f`.
 
-Searches Twitch's category list and prints the matches as an id and name table.
-Twitch's search is fuzzy, so `software` finds *Software and Game Development*.
+### <kbd>&lt;Leader&gt;</kbd> <kbd>c</kbd> — chat
 
-```
-ID             NAME
-1469308723     Software and Game Development
-509658         Just Chatting
-```
+| Key | Action name | What it does |
+|---|---|---|
+| <kbd>c</kbd> <kbd>c</kbd> | `chat.compose` | Write a message |
+| <kbd>c</kbd> <kbd>j</kbd> | `chat.join` | Join a channel |
+| <kbd>c</kbd> <kbd>r</kbd> | `chat.reconnect` | Reconnect chat |
+| <kbd>c</kbd> <kbd>s</kbd> | `chat.search` | Search chat |
+| <kbd>c</kbd> <kbd>e</kbd> | `chat.emoji` | Emoji picker |
+| <kbd>c</kbd> <kbd>a</kbd> | `chat.activity` | Toggle the activity view |
+| <kbd>c</kbd> <kbd>i</kbd> | `chat.inspect` | Toggle the inspect panel |
+| <kbd>c</kbd> <kbd>0</kbd> | `chat.clear_filters` | Clear the message filters |
 
-Put the **name** into `twitch_category` in your config; the id is filled in
-automatically the first time it is used. The command exists because Twitch's
-update endpoint accepts only the numeric id, and getting the name exactly right
-in a hand-edited file is otherwise guesswork.
+### <kbd>&lt;Leader&gt;</kbd> <kbd>o</kbd> — OBS
 
-Requires Twitch credentials and a Twitch login, since the search is an
-authenticated API call.
+| Key | Action name | What it does |
+|---|---|---|
+| <kbd>o</kbd> <kbd>s</kbd> | `obs.stream` | Start or stop streaming |
+| <kbd>o</kbd> <kbd>r</kbd> | `obs.record` | Start or stop recording |
+| <kbd>o</kbd> <kbd>p</kbd> | `obs.pause_recording` | Pause or resume a recording |
+| <kbd>o</kbd> <kbd>m</kbd> | `obs.mute` | Toggle mute on the selected input |
+| <kbd>o</kbd> <kbd>M</kbd> | `obs.mute_all` | Mute everything — the panic key |
+| <kbd>o</kbd> <kbd>P</kbd> | `obs.next_profile` | Next OBS profile |
+| <kbd>o</kbd> <kbd>C</kbd> | `obs.next_collection` | Next scene collection |
+| <kbd>o</kbd> <kbd>R</kbd> | `obs.reconnect` | Reconnect to OBS |
+| <kbd>o</kbd> <kbd>u</kbd> | `obs.refresh` | Refresh everything from OBS |
 
----
-
-## `msm streams`
-
-```
-msm streams [--show-keys]
-```
-
-Lists the stream objects — the RTMP ingest endpoints, one per stream key — that
-exist on your YouTube channel.
-
-| Flag | Effect |
-|---|---|
-| `--show-keys` | Also print the key itself. No short form, on purpose. |
-
-```bash
-msm streams
-```
-
-```
-YouTube channel: Your Channel
-
-ID                         PINNED  TITLE
-Vy8dQ...oqA                yes     Default stream key
-9tRk2...LmX                        multistream-manager (reusable)
-
-Stream keys are hidden. Pass --show-keys to print them — anyone holding a key
-can broadcast to your channel, so think twice on a shared screen.
-```
-
-The `ID` column is the point of the command: that value is what goes into
-`stream_id` under `[youtube]` in your config, pinning one key so that every
-broadcast binds to the same one and your OBS or Aitum settings never need
-changing. `PINNED` marks the one your config currently names.
-
-The listing also warns you when:
-
-* **`stream_id` names a stream that is not on the channel.** Left uncorrected
-  this makes every go-live fail, and the error at that point is much harder to
-  interpret than a warning here.
-* **Several keys exist and none is pinned.** Whichever one YouTube lists first
-  is the one that gets bound, and that ordering is not yours to control.
-
-Keys are hidden by default because a key is enough on its own to broadcast to
-your channel and this output lands in terminal scrollback, where it stays. A
-stream whose key the API did not report is shown as `(not reported)` rather than
-as a blank column.
-
-If the channel has no streams at all, the command says so and explains that the
-first one is created the first time you run `msm go` with YouTube selected.
+These work from any tab, which is the point of them: muting a microphone should
+not require first finding the OBS tab.
 
 ---
 
-## `msm cleanup`
+## Stream Info
 
-```
-msm cleanup [-y|--yes]
-```
+<kbd>Alt</kbd>+<kbd>1</kbd>. The tab that holds the title, the category, going
+live, and the live statistics afterwards.
 
-Finds YouTube broadcasts that were created but never received a video feed, and
-optionally deletes them.
+| Key | Action name | What it does |
+|---|---|---|
+| <kbd>r</kbd> | `stream.refresh` | Refresh statistics now |
+| <kbd>e</kbd> | `stream.edit` | Edit the stream info |
+| <kbd>o</kbd> | `stream.open_watch_page` | Open the watch page |
+| <kbd>y</kbd> | `stream.copy_twitch_key` | Copy the Twitch stream key |
+| <kbd>Y</kbd> | `stream.copy_youtube_key` | Copy the YouTube stream key |
+| <kbd>q</kbd> | `app.quit` | Quit |
 
-| Flag | Effect |
-|---|---|
-| `-y`, `--yes` | Delete the broadcasts listed instead of only showing them. |
-
-Why these accumulate: submitting a plan a second time creates a **new** YouTube
-broadcast rather than editing the previous one — that is how YouTube's API
-works. A session where you fixed a typo and resubmitted leaves the earlier
-attempt behind, and nothing removes it by itself, so YouTube Studio's list of
-upcoming streams fills up with abandoned entries.
-
-```bash
-msm cleanup
-```
-
-```
-YouTube channel: Your Channel
-
-2 broadcasts were created but never went live:
-
-ID                         STATUS    SCHEDULED          TITLE
-kR4...Q1                   created   2026-08-01 19:04   Friday coding
-mT9...Zz                   ready     2026-08-03 20:15   Friday coding
-
-Nothing was deleted. Run `msm cleanup --yes` to delete the broadcasts above.
-Anything that has ever been live is neither listed here nor deleted.
-```
-
-Scheduled times are shown in your own time zone, because that is the one you
-would have been streaming in and so the one that makes a broadcast
-recognisable.
-
-**What can be selected.** The rule is deliberately cautious, because deleting a
-broadcast that holds a recording somebody wanted cannot be undone while leaving
-an orphan behind costs nothing but clutter. A broadcast is listed only when
-**both** hold:
-
-* YouTube reports neither an `actualStartTime` nor an `actualEndTime`. Either of
-  those means a feed reached it at some point.
-* Its lifecycle status is still `created` (made, not yet bound and validated) or
-  `ready` (bound, waiting). Everything else — `live`, `testing`, `complete`,
-  `revoked`, and the transitional states — is left alone.
-
-Anything that has ever received a feed is never listed and never deleted. A
-broadcast whose details are missing from YouTube's reply is treated as *not*
-stale, because there is then no evidence either way and the safe answer is to
-keep it.
-
-With `--yes`, each deletion is reported individually and one that refuses to be
-deleted does not stop the rest. The command fails only if none of them could be
-deleted.
-
----
-
-## `msm obs`
-
-```bash
-msm obs status
-msm obs scenes | msm obs audio
-msm obs scene <TARGET>
-msm obs mute <TARGET> | unmute <TARGET> | toggle-mute <TARGET>
-msm obs volume <TARGET> <PERCENT>
-msm obs stream | record | pause-recording
-msm obs profiles [NAME] | collections [NAME]
-```
-
-Drives OBS Studio. The interface's OBS tab (<kbd>Alt</kbd>+<kbd>4</kbd>) is the
-comfortable way to do all of this; these exist for a stream deck hotkey, a
-shell alias, or a scene change fired from another program.
-
-`<TARGET>` is a scene or input named any of three ways: its OBS name, an alias
-from `[obs.scene_aliases]` / `[obs.audio_aliases]`, or a shortcut. A name that
-matches nothing is refused with a list of what would have worked.
-
-Each invocation opens its own connection, does one thing and exits — which is
-why there is no background daemon to start or manage.
-
-**Reading**
-
-`status` prints everything at once: versions, the current scene, profile and
-collection, whether streaming and recording are running and for how long, every
-audio input with its mute state and level, and OBS's own performance figures
-including frames lost at the encoder and frames dropped on the way out.
-
-`scenes`, `audio`, `profiles` and `collections` list just that, marking the
-current one with `*`.
-
-**Changing**
-
-Every changing command prints what it produced, read back from OBS rather than
-assumed:
-
-```
-$ msm obs stream
-Streaming: on
-$ msm obs volume mic 40
-Mic/Aux: 40%
-```
-
-`stream`, `record` and `pause-recording` are toggles, and `toggle-mute` is the
-one to bind to a key: a toggle cannot act on a stale idea of which way round
-something currently is, which matters when it may also have been changed in OBS
-itself a moment earlier.
-
-`volume` takes a percentage of unity gain and is capped at 100. Amplifying past
-unity is a deliberate act with real consequences for how a stream sounds, and
-not something to reach by mistyping a number.
-
-**When OBS is not there**
-
-The command fails with a non-zero status and says what to check, rather than
-retrying — a command line has somebody waiting for it, and silently retrying
-for thirty seconds would look like a hang. (The *interface* does retry, because
-nobody is waiting on it.)
-
-```
-$ msm obs status
-Error: could not reach OBS: connecting to OBS at ws://127.0.0.1:4455: Connection refused
-
-Is OBS running, with its WebSocket server turned on under Tools → WebSocket Server Settings?
-```
-
----
-
-## `msm doctor`
-
-```bash
-msm doctor
-```
-
-Checks everything that has to be right for a stream to start, and says what is
-not. Run it first when something is not working.
-
-```
-msm doctor
-
-  [ ok ]  config file: /home/you/.config/msm/config.toml
-  [ ok ]  Twitch credentials configured
-  [warn]  YouTube has no client id and secret
-          Run `msm setup youtube`, or fill them in on the interface's first
-          screen. Skip this if you do not stream to YouTube.
-  [ ok ]  Twitch — token valid for 3 hours
-  [ ok ]  clipboard: wl-copy will copy the stream key
-  [ ok ]  theme: nord
-  [ ok ]  terminal: 24-bit colour
-  [ ok ]  log file: /home/you/.config/msm/msm.log
-
-Nothing is broken.
-```
-
-The checks run in the order things matter in — a missing client id makes the
-login question moot, and a login you do not have makes the stream key question
-moot — so the first `[FAIL]` is usually the only one worth acting on. Every
-warning says what to *do*, not only what is wrong.
-
-**`[warn]` and `[FAIL]` mean different things.** A fresh install with no logins
-yet is unfinished, not broken, and a tool that reports that in red teaches you
-to ignore red. Only a `[FAIL]` is counted in the closing summary.
-
-Two checks are worth explaining:
-
-* **clipboard** — stream keys are copied, never displayed, so this reports
-  which helper program will do it. It distinguishes "not installed" from
-  "installed but with no display to talk to", which is the normal state over
-  ssh; in that case nothing needs installing and copying falls back to a
-  terminal escape sequence (OSC 52), answered by the terminal on your own desk.
-* **terminal** — themes are written as exact 24-bit colours. A terminal that
-  does not advertise `COLORTERM=truecolor` will approximate them.
-
-The exit status is `0` when nothing failed and non-zero when something did, so
-this works in a script — `msm doctor && msm go` will not go live on a setup
-that has just been reported as broken. Warnings do not affect it, for the same
-reason they are not printed as failures.
-
----
-
-## `msm setup <PLATFORM>`
-
-```bash
-msm setup twitch
-msm setup youtube
-msm setup twitch --client-id "abc123"
-```
-
-Fills in one platform's API credentials and saves them to `config.toml`. It
-prints the developer-console URL and the exact redirect URL to register before
-asking for anything.
-
-The interface asks for these itself on first run and that remains the easier
-path. This exists for the times a full-screen interface is not available at
-all: a headless machine over ssh, a container, or a scripted install.
-
-One platform at a time — `all` is meaningful for `login` and `logout`, but a
-single pair of credentials cannot belong to two platforms.
+Going live is <kbd>Ctrl</kbd>+<kbd>G</kbd> from inside the form, and
+<kbd>&lt;Leader&gt;</kbd> <kbd>s</kbd> <kbd>g</kbd> from anywhere.
 
 > [!WARNING]
-> `--client-secret` exists for scripting, but a secret passed as an argument
-> ends up in your shell history and in the process list, where anyone on the
-> machine can read it. Leaving the flag off and typing it at the prompt does
-> not: the prompt hides what you type.
+> <kbd>y</kbd> and <kbd>Y</kbd> **copy** a stream key; nothing anywhere
+> **shows** one. The value travels from the API to the system clipboard inside a
+> background task, so it never passes through anything that could end up on
+> screen, in a recording, or in the log file.
 
-Where terminal echo cannot be turned off (`stty` is unavailable), the prompt
-says so before you type rather than silently showing the secret.
+### The form
 
----
+The form is where you type what the stream is. It replaces what used to be
+`msm go` on a command line.
 
-## `msm profile`
+| Key | Does |
+|---|---|
+| <kbd>Tab</kbd>, <kbd>↑</kbd> / <kbd>↓</kbd> | Move between fields |
+| <kbd>Enter</kbd> | Open the search list on a category or language field |
+| <kbd>Space</kbd> | Flip a yes/no field |
+| <kbd>←</kbd> / <kbd>→</kbd> | Change a selector such as Privacy |
+| <kbd>Ctrl</kbd>+<kbd>W</kbd> | Delete the previous word |
+| <kbd>Ctrl</kbd>+<kbd>U</kbd> | Clear the field |
+| <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save what you have typed as your new defaults, in `[preset]` |
+| <kbd>Ctrl</kbd>+<kbd>G</kbd> | Go live |
+| <kbd>Esc</kbd> | Close the search list, or go back a screen |
 
-```bash
-msm profile list
-msm profile show [NAME]
-msm profile set <NAME> [--accent "#rrggbb" ...]
-```
-
-The colour theme, from the command line. The interface half is
-<kbd>Ctrl</kbd>+<kbd>T</kbd>, which previews each palette live.
-
-**`list`** prints all 57 built-in names plus `custom`, marking the one in use:
-
-```
-  nord
-* gruvbox
-  dracula
-```
-
-**`show`** prints a theme's nine colours. With no name it shows the one in use.
-
-```
-$ msm profile show nord
-nord
-  background  #2e3440
-  foreground  #eceff4
-  accent      #88c0d0
-  ...
-```
-
-**`set`** switches theme, or writes your own colours:
-
-```bash
-msm profile set gruvbox                       # a built-in one
-msm profile set custom --accent "#ff0055"     # one colour, keeping the rest
-```
-
-Any colour flag writes into `[appearance.custom_theme]`, so you can change one
-role and inherit the other eight from the default palette.
-
-Two things are refused rather than quietly accepted:
-
-* **a name that is not a real theme**, because writing it to the config file
-  would produce a setup that falls back to the default at every start-up
-  without ever explaining why;
-* **a colour flag on a built-in theme**, because the built-ins are fixed —
-  `custom` is the one that takes overrides.
-
-A value that is not a `#rrggbb` colour is refused too, naming the role it was
-given for.
+The Twitch category field is a search rather than free text: Twitch's update
+endpoint accepts a numeric category id and nothing else, so a typed-but-unpicked
+name could not be sent. Press <kbd>Enter</kbd> and choose a match.
 
 ---
 
-## `msm init`
+## Chat
 
-```bash
-msm init
-```
+<kbd>Alt</kbd>+<kbd>2</kbd>, and the same keys apply inside the chat panes of the
+Combined tab.
 
-Writes a commented starter `config.toml` with every setting present and
-explained, then prints the next three steps. The file is created with owner-only
-permissions.
+| Key | Action name | What it does |
+|---|---|---|
+| <kbd>j</kbd> / <kbd>k</kbd>, <kbd>↓</kbd> / <kbd>↑</kbd> | `chat.scroll_down` / `chat.scroll_up` | Move the selection |
+| <kbd>PgDn</kbd> / <kbd>PgUp</kbd> | `chat.page_down` / `chat.page_up` | Page forward / back |
+| <kbd>g</kbd> / <kbd>G</kbd> | `chat.oldest` / `chat.newest` | Jump to the oldest / newest message |
+| <kbd>h</kbd> / <kbd>l</kbd>, <kbd>Tab</kbd> | `chat.previous_pane` / `chat.next_pane` | Focus the other pane |
+| <kbd>[</kbd> / <kbd>]</kbd> | `chat.previous` / `chat.next` | Previous / next open chat in this account |
+| <kbd>{</kbd> / <kbd>}</kbd> | `chat.previous_account` / `chat.next_account` | Previous / next account sub-tab |
+| <kbd>i</kbd> | `chat.compose` | Write a message. <kbd>Enter</kbd> sends, <kbd>Esc</kbd> keeps the draft |
+| <kbd>r</kbd> | `chat.reply` | Reply to the selected message |
+| <kbd>/</kbd> | `chat.search` | Search messages as you type |
+| <kbd>n</kbd> / <kbd>N</kbd> | `chat.search_next` / `chat.search_previous` | Walk newer / older matches |
+| <kbd>&lt;</kbd> / <kbd>&gt;</kbd> / <kbd>=</kbd> | `chat.widen` / `chat.narrow` / `chat.reset_panes` | Resize the split, or put it back |
+| <kbd>Ctrl</kbd>+<kbd>R</kbd> | `chat.reconnect` | Reconnect — this also overrides a YouTube quota pause |
+| <kbd>Ctrl</kbd>+<kbd>E</kbd> | `chat.emoji` | Emoji picker |
+| <kbd>q</kbd> | `app.quit` | Quit |
 
-If the file already exists it is left alone and the command says so — your
-credentials are not going to be overwritten by a stray `msm init`. Delete the
-file first if you genuinely want a fresh one.
+Joining another chat is <kbd>&lt;Leader&gt;</kbd> <kbd>c</kbd> <kbd>j</kbd>: give
+it a Twitch channel name, or for YouTube a video id, an `@handle`, a channel id
+or a plain youtube.com / youtu.be URL.
 
-This always writes to the default location. `--config` does not redirect it.
-
----
-
-## `msm paths`
-
-```bash
-msm paths
-```
-
-```
-Config: /home/you/.config/multistream-manager/config.toml
-Tokens: /home/you/.config/multistream-manager/tokens.json
-Log:    /home/you/.config/multistream-manager/msm.log
-```
-
-Useful on its own, and useful in a pipeline when you want to watch the log:
-
-```bash
-MSM_LOG=debug msm                                    # in one terminal
-tail -f "$(msm paths | awk '/^Log:/{print $2}')"     # in another
-```
-
-This always prints the default location, whatever `--config` says.
+The moderation keys (<kbd>d</kbd> delete, <kbd>b</kbd> ban, <kbd>t</kbd> time
+out), the view filters (<kbd>1</kbd>–<kbd>4</kbd>, <kbd>0</kbd> to reset) and the
+display toggles are handled by the chat pane itself rather than through the
+keymap, so they are not rebindable and do not appear in the table above.
 
 ---
 
-* [Configuration](configuration.md) — every key in the file the commands read.
-* [How it works](how-it-works.md) — what happens between `msm go` and "Ready".
-* [Troubleshooting](troubleshooting.md) — when a command fails.
+## OBS
+
+<kbd>Alt</kbd>+<kbd>4</kbd>. Scenes on the left, audio inputs on the right.
+
+| Key | Action name | What it does |
+|---|---|---|
+| <kbd>j</kbd> / <kbd>k</kbd>, <kbd>↓</kbd> / <kbd>↑</kbd> | `obs.down` / `obs.up` | Move within the focused list |
+| <kbd>h</kbd> / <kbd>l</kbd>, <kbd>Tab</kbd> | `obs.swap_pane` | Swap between scenes and audio |
+| <kbd>Enter</kbd> | `obs.activate` | Switch to the scene, or toggle the input's mute |
+| <kbd>m</kbd> | `obs.mute` | Mute or unmute the selected input, from either list |
+| <kbd>M</kbd> | `obs.mute_all` | **Mute everything** — the panic key |
+| <kbd>+</kbd> / <kbd>=</kbd> / <kbd>-</kbd> | `obs.volume_up` / `obs.volume_down` | Nudge the selected input's level |
+| <kbd>s</kbd> / <kbd>r</kbd> | `obs.stream` / `obs.record` | Start or stop streaming / recording |
+| <kbd>p</kbd> | `obs.pause_recording` | Pause or resume a recording |
+| <kbd>P</kbd> / <kbd>C</kbd> | `obs.next_profile` / `obs.next_collection` | Cycle profiles / scene collections |
+| <kbd>R</kbd> | `obs.reconnect` | Reconnect now |
+| <kbd>u</kbd> | `obs.refresh` | Refresh everything from OBS |
+| <kbd>q</kbd> | `app.quit` | Quit |
+
+Scene and audio **shortcuts** from `[obs.scene_shortcuts]` and
+`[obs.audio_shortcuts]` also act on this tab, so <kbd>3</kbd> can be "switch to
+Be Right Back". Those take precedence over the tab's own keys, so pick keys the
+table above does not already use — see
+[Configuration](configuration.md#aliases-and-shortcuts).
+
+---
+
+## Config
+
+<kbd>Alt</kbd>+<kbd>5</kbd>, or <kbd>&lt;Leader&gt;</kbd> <kbd>u</kbd>
+<kbd>c</kbd>. A list of sections on the left, the chosen section on the right.
+
+| Section | What it is for |
+|---|---|
+| **Layout** | Arrange the Combined tab |
+| **Appearance** | Theme, motion, notifications |
+| **Keys** | Every binding, and what it runs |
+| **OBS** | Connection to OBS Studio |
+| **Accounts** | Twitch and YouTube logins |
+| **Housekeeping** | Tidy up and export |
+| **Diagnostics** | What is working and what is not |
+| **Files** | Where everything is kept |
+
+Getting around the tab:
+
+| Key | Does |
+|---|---|
+| <kbd>j</kbd> / <kbd>k</kbd>, <kbd>↓</kbd> / <kbd>↑</kbd> | Move — through the sections on the left, or through the rows on the right |
+| <kbd>h</kbd> / <kbd>l</kbd>, <kbd>Tab</kbd> | Move the keyboard between the section list and the section's contents |
+| <kbd>Enter</kbd> | Run the selected row, in Accounts and Housekeeping |
+| <kbd>Esc</kbd> | Leave the tab |
+
+### Accounts
+
+One row per platform, saying whether it is logged in. <kbd>Enter</kbd> logs in if
+it is not and logs out if it is, so this one row is where `msm login`,
+`msm logout` and `msm status` all ended up. Logging in opens your browser.
+
+### Housekeeping
+
+Three jobs; <kbd>Enter</kbd> runs the selected one, and the results go to the
+activity log rather than into the pane.
+
+| Job | What it does |
+|---|---|
+| Find abandoned broadcasts | YouTube keeps every broadcast that was set up and never used. The first <kbd>Enter</kbd> **lists** them; a second <kbd>Enter</kbd> deletes the ones listed. Anything that has ever been live is neither listed nor touched. |
+| Export paid events to CSV | Every Super Chat, sticker and gift from the chat logs, written beside them as a spreadsheet. Needs `chat_logging` to have been on. |
+| List YouTube stream keys | The **ids** of the reusable stream keys on the channel, for `stream_id` under `[youtube]`. |
+
+> [!NOTE]
+> Cleanup lists before it deletes because deleting things you made, without
+> showing them to you first, would be asking for a kind of trust this program has
+> no way to earn. And the stream listing shows ids only, never keys — this window
+> is often part of the broadcast.
+
+### Layout
+
+The layout editor: a live preview of the arrangement above the list of panels
+that make it up. The preview is drawn by the same code the real Combined tab
+uses, so it cannot disagree with the result.
+
+| Key | Does |
+|---|---|
+| <kbd>j</kbd> / <kbd>k</kbd> | Select a panel in the list |
+| <kbd>+</kbd> / <kbd>-</kbd> | Give the selected panel a larger or smaller share of the space |
+| <kbd>a</kbd> | Add the first panel that is not on the layout yet |
+| <kbd>d</kbd> | Remove the selected panel. The last one cannot be removed — a blank tab is indistinguishable from a broken one |
+| <kbd>r</kbd> | Rotate: turn rows into columns and back |
+| <kbd>p</kbd> | Cycle through the four presets |
+| <kbd>s</kbd> | Save. Until you press this, nothing is applied |
+
+Leaving the tab with an unsaved edit throws the edit away and says so, rather
+than leaving it half applied. The eight panels and the file format behind all of
+this are in [Configuration](configuration.md#layout).
+
+### Diagnostics
+
+What used to be `msm doctor`. Each check reports `ok`, `warn` or `fail`, and
+every warning says what to do about it rather than only what is wrong: config
+file, credentials, saved logins, the clipboard tool, the terminal's
+capabilities, and the OBS connection.
+
+### Files
+
+What used to be `msm paths`: where the config file, the token file, the log file
+and the chat logs are kept. See
+[Configuration](configuration.md#other-files-in-the-same-directory).
+
+---
+
+## The setup and login screens
+
+On a first run the interface opens on these two rather than on a tab, because
+there is nothing to show until credentials exist.
+
+**Set up API access** — one box per credential: the client id and client secret
+from each developer console. Secrets are drawn as dots even while you type them,
+because this window is often on screen while you stream.
+
+| Key | Does |
+|---|---|
+| <kbd>Tab</kbd>, <kbd>↑</kbd> / <kbd>↓</kbd> | Move between boxes |
+| <kbd>←</kbd> / <kbd>→</kbd>, <kbd>Backspace</kbd> | Edit within a box |
+| <kbd>Enter</kbd> or <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save to `config.toml` and go on |
+| <kbd>Esc</kbd> | Back to the login screen, or quit if nothing is configured yet |
+
+Filling in one platform is fine — an empty pair is skipped rather than treated as
+an error.
+
+**Authorise your accounts** — tick what you want to stream to and press
+<kbd>Enter</kbd>; your browser opens for each in turn.
+
+| Key | Does |
+|---|---|
+| <kbd>j</kbd> / <kbd>k</kbd>, <kbd>↑</kbd> / <kbd>↓</kbd> | Move |
+| <kbd>Space</kbd> | Tick or untick a platform |
+| <kbd>Enter</kbd> | Authorise everything ticked |
+| <kbd>c</kbd> | Back to the credential form, to fix a typo without quitting |
+| <kbd>s</kbd> | Skip, carrying on with whatever logins already exist |
+| <kbd>q</kbd> or <kbd>Esc</kbd> | Quit |
+
+Later on, the Accounts section of the Config tab does the same job.
+
+---
+
+## Rebinding a key
+
+Every binding above can be changed in the `[keys]` section of `config.toml`. The
+built-in bindings are the starting point and your file is applied on top, so you
+only write the ones you want to be different.
+
+```toml
+[keys]
+# The key every mnemonic sequence starts with. Changing it moves every
+# <Leader>… binding at once, including the built-in ones.
+leader = "<Space>"
+
+[keys.global]
+"<C-g>" = "stream.go_live"     # go live from anywhere
+"<Leader>q" = ""               # an empty action removes a binding
+
+[keys.chat]
+"<C-j>" = "chat.next"
+
+[keys.stream_info]
+"R" = "stream.refresh"
+
+[keys.obs]
+"<F1>" = "obs.mute_all"
+```
+
+The four tables are the four **contexts** a binding can belong to:
+
+| Table | Where it applies |
+|---|---|
+| `[keys.global]` | Everywhere |
+| `[keys.stream_info]` | The Stream Info tab |
+| `[keys.chat]` | The chat panes, on either the Chat or the Combined tab |
+| `[keys.obs]` | The OBS tab |
+
+A key is looked up in the active tab's context first and in `global` second, so a
+tab can give a key a local meaning without you having to restate everything else.
+That is why <kbd>j</kbd> scrolls chat on one tab and moves down a scene list on
+another.
+
+Something wrong in `[keys]` — a key that cannot be parsed, an action that does
+not exist — is **reported and skipped**, not treated as a reason to refuse to
+start. Being locked out of your own stream by a mistyped binding would be an
+absurd trade. The Keys section of the Config tab lists what is actually in force,
+which is where to look when a change did not take.
+
+---
+
+## How a key is written
+
+The notation is vim's, because anyone who would want to rebind keys in a
+terminal program already knows it, and inventing a second notation would mean
+learning something new to say something you can already say.
+
+| Written | Means |
+|---|---|
+| `j` | the letter j |
+| `J` | shift+j |
+| `<Space>` | the space bar |
+| `<Leader>` | whatever the leader is set to (space by default) |
+| `<C-p>` | ctrl+p |
+| `<A-4>` or `<M-4>` | alt+4 |
+| `<S-Tab>` | shift+tab |
+| `<CR>` or `<Enter>` | return |
+| `<Esc>`, `<Tab>`, `<BS>`, `<Up>`, `<Down>`, `<Left>`, `<Right>` | those keys |
+| `<PageUp>`, `<PageDown>`, `<Home>`, `<End>`, `<Del>` | those keys |
+| `<F1>` … `<F12>` | the function keys |
+| `<lt>` | a literal `<`, which cannot be written on its own |
+
+Several of them in a row make a **chord**: `<Leader>os` is three key presses —
+the leader, then `o`, then `s`. A chord that is the beginning of a longer one
+waits for the rest rather than doing nothing, which is what makes the which-key
+popup appear after `<Leader>o`.
+
+---
+
+## Every action name
+
+These are the names `[keys]` accepts on the right-hand side. The part before the
+dot is the group the action appears under in the which-key popup.
+
+### Getting around
+
+| Name | What it does |
+|---|---|
+| `tab.stream_info` | Stream Info tab |
+| `tab.chat` | Chat tab |
+| `tab.combined` | Combined tab |
+| `tab.obs` | OBS tab |
+| `tab.config` | Configuration tab |
+| `tab.next` | Next tab |
+| `tab.previous` | Previous tab |
+| `tab.swap_focus` | Swap combined halves |
+
+### The program itself
+
+| Name | What it does |
+|---|---|
+| `app.quit` | Quit |
+| `app.command_palette` | Command palette |
+| `app.messages` | Message history |
+| `app.which_key` | Show every binding |
+| `ui.theme` | Choose a theme |
+| `ui.animations` | Cycle animations |
+| `ui.telemetry` | Toggle telemetry |
+
+### Streaming
+
+| Name | What it does |
+|---|---|
+| `stream.go_live` | Go live |
+| `stream.edit` | Edit stream info |
+| `stream.refresh` | Refresh statistics |
+| `stream.copy_twitch_key` | Copy Twitch stream key |
+| `stream.copy_youtube_key` | Copy YouTube stream key |
+| `stream.open_watch_page` | Open watch page |
+
+### Chat
+
+| Name | What it does |
+|---|---|
+| `chat.compose` | Write a message |
+| `chat.search` | Search chat |
+| `chat.search_next` | Next match |
+| `chat.search_previous` | Previous match |
+| `chat.join` | Join a channel |
+| `chat.reconnect` | Reconnect chat |
+| `chat.next` | Next chat |
+| `chat.previous` | Previous chat |
+| `chat.next_account` | Next account |
+| `chat.previous_account` | Previous account |
+| `chat.scroll_up` | Scroll back |
+| `chat.scroll_down` | Scroll forward |
+| `chat.page_up` | Page back |
+| `chat.page_down` | Page forward |
+| `chat.oldest` | Oldest message |
+| `chat.newest` | Newest message |
+| `chat.next_pane` | Next pane |
+| `chat.previous_pane` | Previous pane |
+| `chat.widen` | Widen left pane |
+| `chat.narrow` | Narrow left pane |
+| `chat.reset_panes` | Reset pane sizes |
+| `chat.activity` | Toggle activity view |
+| `chat.inspect` | Toggle inspect panel |
+| `chat.emoji` | Emoji picker |
+| `chat.reply` | Reply to selection |
+| `chat.clear_filters` | Clear message filters |
+
+### OBS
+
+| Name | What it does |
+|---|---|
+| `obs.up` | Move up |
+| `obs.down` | Move down |
+| `obs.swap_pane` | Swap scenes/audio |
+| `obs.activate` | Switch scene or toggle mute |
+| `obs.mute` | Toggle mute |
+| `obs.mute_all` | Mute everything |
+| `obs.volume_up` | Volume up |
+| `obs.volume_down` | Volume down |
+| `obs.stream` | Start/stop streaming |
+| `obs.record` | Start/stop recording |
+| `obs.pause_recording` | Pause/resume recording |
+| `obs.next_profile` | Next profile |
+| `obs.next_collection` | Next scene collection |
+| `obs.reconnect` | Reconnect to OBS |
+| `obs.refresh` | Refresh from OBS |
+
+---
+
+## Where the old subcommands went
+
+Earlier versions had fifteen subcommands. They are all still here, as places in
+the interface rather than as things to type. The reason for the change is that a
+streaming setup is driven with one hand while the other is doing something else,
+and the moment you want to mute a microphone or fix a title is never a moment you
+would choose to leave what you are looking at, find a terminal, and remember a
+subcommand.
+
+| Used to be | Now |
+|---|---|
+| `msm login`, `msm logout`, `msm status` | Config → Accounts |
+| `msm go` | The Stream Info form, <kbd>Ctrl</kbd>+<kbd>G</kbd> |
+| `msm key twitch` / `msm key youtube` | <kbd>y</kbd> / <kbd>Y</kbd> on Stream Info — copied to the clipboard, never printed |
+| `msm categories` | The category field in the form searches Twitch's list as you type |
+| `msm streams` | Config → Housekeeping → *List YouTube stream keys* |
+| `msm cleanup` | Config → Housekeeping → *Find abandoned broadcasts* |
+| `msm export superchats` | Config → Housekeeping → *Export paid events to CSV* |
+| `msm doctor` | Config → Diagnostics |
+| `msm setup`, `msm init` | The first-run **Set up API access** screen |
+| `msm profile list` / `set` | <kbd>&lt;Leader&gt;</kbd> <kbd>u</kbd> <kbd>t</kbd>, the theme picker, and Config → Appearance |
+| `msm paths` | Config → Files |
+| `msm obs …` | The OBS tab (<kbd>Alt</kbd>+<kbd>4</kbd>) and <kbd>&lt;Leader&gt;</kbd> <kbd>o</kbd> |
+| `msm --config <FILE>` | Gone. See [Configuration](configuration.md#keeping-more-than-one-preset) for what to do instead |
+
+---
+
+* [Configuration](configuration.md) — every setting in `config.toml`.
+* [Getting started](getting-started.md) — credentials, first login, first stream.
+* [Troubleshooting](troubleshooting.md) — when something does not work.
 * [Back to the documentation index](README.md).

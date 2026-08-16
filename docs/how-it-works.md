@@ -118,8 +118,8 @@ One trait, implemented once per platform:
 The last five have defaults on purpose. Twitch has no stream objects and no
 broadcast objects, so its answers to those questions are genuinely "nothing"
 rather than "not implemented" — and returning an empty list is a truthful
-answer, not a stub. That is what lets `msm streams` and `msm cleanup` be written
-without either of them naming YouTube.
+answer, not a stub. That is what lets the housekeeping jobs — listing stream ids,
+finding abandoned broadcasts — be written without either of them naming YouTube.
 
 Adding a third platform means writing one file that implements this trait and
 adding a variant to `Platform`. The interface does not change.
@@ -180,7 +180,8 @@ Two details in the request body are worth knowing:
 
 **`game_id`, never a name.** Twitch's API accepts only the numeric category id,
 which is why the form makes you select a match rather than accepting typed text,
-and why `msm categories` exists at all.
+and why the field searches Twitch's live catalogue rather than accepting
+whatever you typed.
 
 **Empty tags are omitted, not sent as `[]`.** Twitch documents an empty array as
 "remove every tag from this channel". Sending one when the user had merely not
@@ -286,9 +287,9 @@ Concretely:
 * **The interface says so explicitly**, rather than leaving you to infer it from
   one panel looking different: *"Some platforms are ready and some are not. The
   ones marked Ready will work if you start streaming now."*
-* **`msm go` exits non-zero only when *every* platform failed**, so a wrapper
-  script can distinguish "nothing worked" from "one of two worked" without
-  parsing output.
+* **Nothing is rolled back.** A platform that succeeded stays configured, so
+  you can start streaming to it immediately and deal with the other one
+  afterwards.
 * **Statistics keep working the same way.** A failed poll records the error in
   that platform's snapshot and the dashboard marks the numbers as stale, instead
   of the whole refresh loop dying.
@@ -318,8 +319,8 @@ either blocking or advisory.
 | Language that is not a two-letter code | Blocking when Twitch is selected, advisory otherwise. |
 
 The form uses this live: the submit hint turns green only when nothing blocking
-remains. `msm go` prints the same issues as `error:` and `note:` lines and stops
-on the first kind.
+remains, and the advisory issues are listed beside it so you can see what will
+be adapted rather than refused.
 
 ---
 
@@ -398,8 +399,8 @@ is currently displayed.
 ## Finding abandoned broadcasts
 
 Submitting a plan a second time creates a *new* YouTube broadcast rather than
-editing the previous one, so abandoned attempts accumulate. `msm cleanup` finds
-them by listing `liveBroadcasts` with `mine=true` and `part=id,snippet,status`,
+editing the previous one, so abandoned attempts accumulate. **Config →
+Housekeeping → *Find abandoned broadcasts*** finds them by listing `liveBroadcasts` with `mine=true` and `part=id,snippet,status`,
 following YouTube's page tokens — 50 per page, with a page cap, because each
 page costs quota and an unexpected reply that kept handing back a token would
 otherwise loop forever.
@@ -426,19 +427,18 @@ keep it.
   open time so there is no window in which the file exists with looser
   permissions.
 * Stream keys are held in memory only. They are never written to the config,
-  never written to the log, and never included in `msm go --json`.
-* `msm go`'s human report prints a `Key:` line saying the key is hidden and
-  naming `msm key`, rather than the key itself.
-* `msm streams` hides keys unless `--show-keys` is passed, because that output
-  stays in terminal scrollback.
-* The dashboard masks the key until <kbd>k</kbd> is pressed, and says so when
-  you reveal it, since that window is often on screen while you stream.
+  never written to the log, and never written to the screen.
+* **Nothing displays a key, anywhere — there is no reveal.** <kbd>y</kbd> and
+  <kbd>Y</kbd> copy one to the system clipboard from inside the background task
+  that fetched it, so the value never reaches anything that draws.
+* The stream listing under Config → Housekeeping shows stream **ids** only, for
+  the same reason: that window is often part of the broadcast.
 * Passwords are never seen by the program at all: authorisation happens on the
   platform's own site and only a token comes back.
 
 ---
 
-* [Commands](commands.md) — the user-facing surface of all this.
+* [Keys and actions](keys.md) — the user-facing surface of all this.
 * [OBS and Aitum](obs-and-aitum.md) — the practical consequences of the
   stream/broadcast split.
 * [Troubleshooting](troubleshooting.md) — what the resulting errors mean.

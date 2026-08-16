@@ -21,8 +21,9 @@ description: |
   Stream keys are copy-only: they are never drawn on screen, because the
   window running this is often part of the broadcast itself.
 
-  Run `msm` with no arguments to open the interface. `msm doctor` checks the
-  setup and says what is missing.
+  `msm` takes no arguments and has no subcommands: run it and the interface
+  opens. Configuration, accounts and the diagnostics that say what is missing
+  are all on its Config tab (alt+5).
 
 # `git` reads the version from the most recent tag, so a release is tagged
 # rather than having its number written here and forgotten.
@@ -48,18 +49,19 @@ apps:
       - network
       - network-bind
       # Opening the consent page in your browser during login. Without this,
-      # `msm login` can only print the URL for you to paste yourself.
+      # logging in can only print the URL for you to paste yourself.
       - desktop
-      # Reading a config file you keep somewhere of your own with
-      # `msm --config`. The snap's own config lives in its private directory
-      # and needs no interface.
+      # Reading a config directory you keep somewhere of your own, by pointing
+      # MSM_CONFIG_DIR at it. The snap's own config lives in its private
+      # directory and needs no interface.
       - home
     environment:
       # Inside a snap, `$HOME` is the snap's own private directory, so the
       # config, tokens and log land there by default:
       #   ~/snap/msm/current/.config/msm
       # Naming it explicitly means the location is stated rather than
-      # inherited, and `msm paths` prints somewhere that actually exists.
+      # inherited, and the Config tab's Files section shows somewhere that
+      # actually exists.
       MSM_CONFIG_DIR: $SNAP_USER_DATA/.config/msm
 
 parts:

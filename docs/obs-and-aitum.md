@@ -59,11 +59,10 @@ A Twitch channel is permanently there. Its stream key belongs to the channel, is
 stable, and going live means no more than pointing OBS at it. `msm` changes the
 channel's title, category, language and tags, which has no effect on the key.
 
-You can read the key at any time:
-
-```bash
-msm key twitch
-```
+You can copy the key to your clipboard at any time with <kbd>y</kbd> on the
+Stream Info tab. It is copied, never displayed — the value goes from the API
+straight to the clipboard, so nothing that could end up on screen or in a
+recording ever holds it.
 
 ### YouTube
 
@@ -93,8 +92,8 @@ So `msm` does not create one. With `reuse_stream = true` (the default) it looks
 for a stream that already exists on your channel and binds the new broadcast to
 that. The key is untouched, and your encoder configuration goes on working.
 
-The dashboard and `msm go` both say which branch was taken, in words, so you are
-never left guessing:
+The dashboard says which branch was taken, in words, so you are never left
+guessing:
 
 > *Reused your existing stream key "Default stream key" — OBS and Aitum need no changes.*
 
@@ -138,11 +137,8 @@ YouTube lists them in, and that ordering is not yours to control. The key you
 have configured in Aitum might not be the one the broadcast is bound to, and the
 symptom is a stream that appears to go nowhere.
 
-List them:
-
-```bash
-msm streams
-```
+List them with **Config → Housekeeping → *List YouTube stream keys***
+(<kbd>Alt</kbd>+<kbd>5</kbd>). The results go to the activity log:
 
 ```
 ID                         PINNED  TITLE
@@ -158,13 +154,14 @@ stream_id = "Vy8dQ...oqA"
 ```
 
 From then on every broadcast binds to that stream and nothing else. If the id
-stops existing — you deleted the stream in Studio, for instance — `msm streams`
+stops existing — you deleted the stream in Studio, for instance — that listing
 warns you about it and going live fails with a clear message rather than
 silently binding something else.
 
-`msm streams --show-keys` prints the keys themselves, so you can confirm which
-row matches what is in Aitum. Keys are hidden without that flag because this
-output stays in your scrollback.
+Only ids are ever listed; a key itself is never shown anywhere in the program,
+because this window is often part of the broadcast. To get the key of the stream
+your current broadcast is actually bound to, press <kbd>Y</kbd> on the Stream
+Info tab after going live and paste it wherever you need it.
 
 ---
 
@@ -193,12 +190,8 @@ both platforms side by side, refreshed on a timer, so neither website needs to
 be open. Press <kbd>o</kbd> to open the watch page in a browser when you want to
 see what viewers see.
 
-The scripted equivalent of steps 1 to 4, for when your preset already says what
-you want:
-
-```bash
-msm go --yes && echo "now press Start Streaming in OBS"
-```
+When your `[preset]` already says what you usually stream, steps 2 to 4 collapse
+into pressing <kbd>Ctrl</kbd>+<kbd>G</kbd> on a form that is already filled in.
 
 ---
 
@@ -213,11 +206,12 @@ configured. Resolve it like this:
    [Getting started](getting-started.md#trap-2-a-channel-that-has-never-streamed-cannot-stream-for-24-hours).
 2. Set up credentials and log in, as in
    [Getting started](getting-started.md).
-3. Run `msm streams`. If it lists nothing, the channel has no stream key yet.
-4. Run `msm go --yes`, or submit once from the interface. This creates a
+3. Open **Config → Housekeeping → *List YouTube stream keys***. If it lists
+   nothing, the channel has no stream key yet.
+4. Submit the form once with <kbd>Ctrl</kbd>+<kbd>G</kbd>. This creates a
    reusable stream and tells you a new key was made.
-5. Reveal the key — <kbd>k</kbd> on the dashboard, or `msm streams --show-keys`
-   — and paste it, with the ingest URL, into Aitum's YouTube destination.
+5. Copy the key with <kbd>Y</kbd> on the Stream Info tab and paste it, with the
+   ingest URL, into Aitum's YouTube destination.
 6. Optionally pin it with `stream_id`, so nothing else can ever be chosen.
 
 From session two onwards, none of this recurs.
@@ -230,8 +224,10 @@ From session two onwards, none of this recurs.
 dashboard, changing the title and going live again updates your Twitch channel
 in place, but on YouTube it creates a *second* broadcast with a *new* watch URL.
 That is how YouTube's API works — a broadcast is an event, not a mutable
-setting. The first one is left behind unstarted; `msm cleanup` finds and removes
-those. See [Commands](commands.md#msm-cleanup).
+setting. The first one is left behind unstarted; **Config → Housekeeping →
+*Find abandoned broadcasts*** finds and removes those — the first
+<kbd>Enter</kbd> lists them and a second deletes the ones listed. See
+[Keys and actions](keys.md#housekeeping).
 
 **The watch URL changes between sessions.** Each YouTube broadcast is a distinct
 video with its own id, so any link you shared for last week's stream points at

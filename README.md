@@ -73,33 +73,28 @@ written up in [docs/how-it-works.md](docs/how-it-works.md).
 
 ## 💬 Chat
 
-The window has four top-level tabs, switched with <kbd>Alt</kbd>+<kbd>1</kbd> /
-<kbd>Alt</kbd>+<kbd>2</kbd> / <kbd>Alt</kbd>+<kbd>3</kbd> / <kbd>Alt</kbd>+<kbd>4</kbd>: **Stream Info**
-(everything above), **Chat** — Twitch chat on the left, YouTube live chat on the
-right, always side by side — and **Combined**, which puts a compact line of
-channel state (connected account, live or not, viewers, uptime) above those same
-two chat panes for a second monitor. On the combined tab <kbd>Alt</kbd>+<kbd>w</kbd>
-swaps which half the keyboard talks to, since both halves want the same letters.
-The divider is resizable. Chat behavior is ported from
+The window has five top-level tabs, switched with <kbd>Alt</kbd>+<kbd>1</kbd> to
+<kbd>Alt</kbd>+<kbd>5</kbd>: **Stream Info** (everything above), **Chat** —
+Twitch chat on the left, YouTube live chat on the right, always side by side —
+**Combined**, which is the second-monitor view and whose arrangement you choose
+yourself, **OBS**, and **Config**. On the combined tab
+<kbd>Alt</kbd>+<kbd>w</kbd> swaps which half the keyboard talks to, since both
+halves want the same letters. The divider is resizable. Chat behavior is ported
+from
 [twi](https://github.com/worxbend/twi) and [yc](https://github.com/worxbend/yc);
 `PLAN.md` tracks the feature-parity matrix.
 
 **Multiple accounts.** The account you stream with is also your first chat
-account. Add more identities any time — each becomes its own sub-tab inside
-its platform's pane:
-
-```console
-$ msm login twitch --add     # authorise a second Twitch account in the browser
-$ msm login youtube --add    # same for another YouTube channel
-$ msm logout twitch:thatlogin  # forget one added account again
-```
+account. Add more identities from **Config → Accounts**
+(<kbd>Alt</kbd>+<kbd>5</kbd>) — each becomes its own sub-tab inside its
+platform's pane, and logging one out again is the same key.
 
 Entering the Chat tab connects every logged-in account's **own** chat (lazily —
 nothing connects until you open the tab for the first time; accounts whose
 sub-tab is off screen still collect messages, so their unread counts are
 truthful). Each pane keeps its own message box, so a half-written Twitch
 message survives switching to the YouTube side and back. Press <kbd>space</kbd>
-then <kbd>c</kbd> to join any other chat through that account: a Twitch
+then <kbd>c</kbd> <kbd>j</kbd> to join any other chat through that account: a Twitch
 channel name, or for YouTube a video id, `@handle`, channel id or a plain
 youtube.com/youtu.be URL.
 
@@ -116,7 +111,7 @@ youtube.com/youtu.be URL.
 | <kbd>r</kbd> | reply to the selected message |
 | <kbd>d</kbd> / <kbd>b</kbd> | delete the message / ban its author (YouTube; press twice to confirm) |
 | <kbd>t</kbd> | time the author out — prompts for a duration (45s / 5m / 2h, max 24h) |
-| <kbd>space</kbd> <kbd>c</kbd> / <kbd>space</kbd> <kbd>x</kbd> / <kbd>space</kbd> <kbd>a</kbd> | join a chat / close it / toggle the activity view |
+| <kbd>space</kbd> <kbd>c</kbd> <kbd>j</kbd> / <kbd>space</kbd> <kbd>c</kbd> <kbd>a</kbd> | join a chat / toggle the activity view |
 | <kbd>/</kbd>, <kbd>n</kbd> / <kbd>N</kbd> | search messages incrementally; walk older/newer matches |
 | <kbd>1</kbd>–<kbd>4</kbd>, <kbd>0</kbd> | view filters (mentions / roles / paid+membership / notices); reset |
 | <kbd>K</kbd> | inspect the selected message's normalized fields |
@@ -150,8 +145,12 @@ chat_log_dir = ""              # empty = chatlog/ under the config directory
 
 Composer commands: `/me` (Twitch action), `/clip` (clip your own live Twitch
 stream — answers with the edit URL), `/chats [target]` (join prompt or direct
-join). With `chat_logging` on, `msm export superchats` turns the logs into a
-CSV of every paid event — integer-exact amounts, zero API quota.
+join). With `chat_logging` on, **Config → Housekeeping → *Export paid events to
+CSV*** turns the logs into a spreadsheet of every paid event — integer-exact
+amounts, zero API quota.
+
+Every key above can be changed. See [docs/keys.md](docs/keys.md) for the whole
+set and the `[keys]` section that rebinds them.
 
 ## 🤔 Why
 
@@ -189,11 +188,16 @@ cd multistream-manager
 cargo install --path .
 ```
 
-Either way you end up with a binary called `msm`. Check it:
+Either way you end up with a binary called `msm`. Run it and the interface
+opens:
 
 ```bash
-msm --help
+msm
 ```
+
+There are no options to pass it. If you type one anyway, it prints a short note
+saying so and where each tab is, rather than starting up as though it had been
+understood.
 
 **Container** — no toolchain needed; the image compiles from source and ships one
 binary on a bare Debian base (about 140MB):
@@ -205,8 +209,9 @@ docker run -it -v msm-config:/home/msm/.config/msm msm
 
 Authorising an account inside a container is the awkward part, because the OAuth
 redirect goes to localhost and that means the *container*. The simplest answer is
-to run `msm login all` on your own machine first and mount the config directory
-it produced; the `Dockerfile` documents the alternative.
+to authorise on your own machine first — run `msm`, log in on its **Accounts**
+screen — and mount the config directory that produced; the `Dockerfile` documents
+the alternative.
 
 **Snap** — strictly confined, asking only for network, browser and home access:
 
@@ -230,13 +235,14 @@ click-by-click walkthrough, including the Google settings that are easy to miss,
 is in **[docs/getting-started.md](docs/getting-started.md)**.
 
 ```bash
-msm               # open the interface — it walks you through the rest
+msm               # that is the whole command — it walks you through the rest
 ```
 
 On a fresh install the interface opens on a **Set up API access** form: paste
 the client id and client secret each developer console gave you (secrets are
 shown as dots while you type, because this window is often on screen while you
-stream) and press <kbd>Enter</kbd>. It saves them to `config.toml` for you.
+stream) and press <kbd>Enter</kbd>. It saves them to `config.toml` for you, which
+is the only file this program keeps.
 
 Next comes **Authorise your accounts** — tick Twitch, YouTube or both and press
 <kbd>Enter</kbd>. Your browser opens for each in turn; approve the access and
@@ -245,67 +251,49 @@ live, how many people are watching, and the stream info that would be applied.
 Press <kbd>e</kbd> to edit that info, <kbd>Ctrl</kbd>+<kbd>G</kbd> to apply it,
 then "Start Streaming" in OBS.
 
-The command line can still do all of it, if you prefer — and `msm setup` exists
-for the times a terminal interface is not available at all, such as a headless
-box over ssh:
+### 🚫 There is no command line
 
-```bash
-msm setup twitch  # prompts for the client id and secret and saves them
-msm login all     # authorise Twitch and Google in your browser
-msm status        # confirm both are logged in
-```
+`msm` takes no subcommands and no flags. Everything it can do is inside the
+interface, and that is a decision rather than an omission: a streaming setup is
+driven with one hand while the other is doing something else, and the moment you
+want to mute a microphone or fix a title is never a moment you would choose to
+leave what you are looking at, find a terminal, and remember a subcommand.
 
-If something is not working, start here:
+Earlier versions had fifteen subcommands. Nothing was dropped on the way — each
+one now has a place in the interface, which is also where you would look for it.
 
-```bash
-msm doctor        # checks config, credentials, logins, clipboard, terminal
-```
-
-It reports each check as `[ ok ]`, `[warn]` or `[FAIL]`, and every warning says
-what to do about it rather than only what is wrong.
-
-Prefer to stay on the command line? The `[preset]` section of the config file
-holds the same fields the form does, so you can skip the interface entirely:
-
-```bash
-msm go            # shows a summary and asks for confirmation
-msm go --yes      # no prompt
-msm go --json     # machine-readable result on stdout, never the stream key
-```
-
-Keep one file per kind of stream and choose between them:
-
-```bash
-msm --config ~/streams/coding.toml go
-msm --config ~/streams/gaming.toml go
-```
-
-<details>
-<summary><b>📋 The whole command set</b></summary>
-
-| Command | What it does |
+| Used to be | Now |
 |---|---|
-| `msm` / `msm tui` | Open the terminal interface (the default) |
-| `msm login <twitch\|youtube\|all>` | Authorise a platform in your browser |
-| `msm logout <twitch\|youtube\|all>` | Forget a saved login |
-| `msm status` | Show which platforms are logged in |
-| `msm go [--platforms <LIST>] [-y] [--json]` | Apply the preset without the interface |
-| `msm key <twitch\|youtube>` | Print one stream key — a separate command so a key is never printed by accident (inside the interface, <kbd>y</kbd>/<kbd>Y</kbd> copy it to the clipboard instead) |
-| `msm categories <QUERY>` | Search Twitch's category list |
-| `msm streams [--show-keys]` | List the stream objects on your YouTube channel |
-| `msm cleanup [-y]` | List (and with `-y`, delete) broadcasts that never went live |
-| `msm obs <status\|scene\|mute\|volume\|stream\|record\|…>` | Control OBS Studio |
-| `msm doctor` | Check the setup and say what would stop a stream |
-| `msm setup <twitch\|youtube>` | Fill in one platform's API credentials from the command line |
-| `msm profile list\|show\|set` | Look at and change the colour theme |
-| `msm init` | Write a commented starter config file |
-| `msm paths` | Show where config, tokens and logs live |
+| `msm login`, `msm logout`, `msm status` | Config → Accounts |
+| `msm go` | The Stream Info form, <kbd>Ctrl</kbd>+<kbd>G</kbd> |
+| `msm key twitch` / `youtube` | <kbd>y</kbd> / <kbd>Y</kbd> on Stream Info — copied, never printed |
+| `msm categories` | The form's category field searches Twitch as you type |
+| `msm streams`, `msm cleanup`, `msm export` | Config → Housekeeping |
+| `msm doctor` | Config → Diagnostics |
+| `msm setup`, `msm init`, `msm profile` | The setup screen, and Config → Appearance |
+| `msm paths` | Config → Files |
+| `msm obs …` | The OBS tab, and <kbd>space</kbd> <kbd>o</kbd> from anywhere |
 
-`-c, --config <FILE>` works on every subcommand. Full flag-by-flag detail,
-including the shape of the `--json` document, is in
-[docs/commands.md](docs/commands.md).
+Type an option anyway and the program says there are none and where each tab is,
+rather than opening as though the argument had been understood.
 
-</details>
+### ⌨️ Finding your way around
+
+The keys are shaped the way [AstroNvim](https://astronvim.com) shapes Neovim's,
+because that is a shape a great many people who live in a terminal already have
+in their fingers: a <kbd>space</kbd> leader, two-letter mnemonic groups after it
+(<kbd>space</kbd> <kbd>o</kbd> <kbd>s</kbd> is "OBS → stream"),
+<kbd>]</kbd><kbd>t</kbd> and <kbd>[</kbd><kbd>t</kbd> for next and previous tab,
+and vim's own movement keys left alone.
+
+You do not have to remember any of it. Press <kbd>space</kbd> and pause: a
+**which-key** popup lists everything that can follow it. <kbd>space</kbd>
+<kbd>?</kbd> lists every binding at once, and <kbd>Ctrl</kbd>+<kbd>P</kbd>
+searches them all by name.
+
+Every key is rebindable through the `[keys]` section of `config.toml`, written in
+vim's own notation — `"<C-g>" = "stream.go_live"`. The full reference is
+[docs/keys.md](docs/keys.md).
 
 ---
 
@@ -319,10 +307,6 @@ nothing that could end up on screen, in a recording, or in `msm.log` ever holds
 it. Copying uses `wl-copy`/`xclip`/`xsel`/`pbcopy`/`clip` when one is installed
 and falls back to the OSC 52 terminal escape sequence, which is what makes it
 work over SSH.
-
----
-
----
 
 ---
 
@@ -350,6 +334,10 @@ this program exists to avoid.
 | <kbd>P</kbd> / <kbd>C</kbd> | Cycle profiles / scene collections |
 | <kbd>R</kbd> | Reconnect now |
 
+The same actions are on <kbd>space</kbd> <kbd>o</kbd> from **any** tab, which is
+the point of them: <kbd>space</kbd> <kbd>o</kbd> <kbd>M</kbd> mutes everything
+while you are reading chat, without going to look for the OBS tab first.
+
 Anything given a shortcut in the config is one key away, so <kbd>3</kbd> can be
 "switch to Be Right Back" and <kbd>m</kbd> can be "mute the microphone".
 
@@ -366,7 +354,7 @@ port = 4455
 # Better than putting the password in this file:
 password_env = "OBS_WEBSOCKET_PASSWORD"
 
-# Short names, so `msm obs scene brb` and the pane both say "brb".
+# Short names, so the pane says "brb" rather than the full scene name.
 [obs.scene_aliases]
 brb = "Be Right Back"
 cam = "Main Camera"
@@ -391,32 +379,90 @@ does not let anyone replay it.
 **OBS not being there is normal.** Start `msm` before OBS, or never run OBS at
 all, and nothing complains: the pane says what to turn on, and the connection
 retries quietly in the background with a backoff that stops growing at thirty
-seconds. `msm doctor` reports it either way.
+seconds. **Config → Diagnostics** reports it either way.
 
-### From a script
-
-The tab is the comfortable way; these are for a stream deck hotkey or a shell
-alias:
-
-```bash
-msm obs status                 # everything, in one screen
-msm obs scene brb              # switch, by name, alias or shortcut
-msm obs toggle-mute mic        # prefer this to mute/unmute for a hotkey
-msm obs volume mic 40          # a percentage of unity gain
-msm obs stream                 # start if stopped, stop if started
-msm obs record
-msm obs profiles               # list; add a name to switch
-```
-
-Prefer `toggle-mute` to `mute`/`unmute` when binding a key: a toggle cannot act
-on a stale idea of which way round the input is, which matters when it may also
-have been changed in OBS itself a moment earlier.
+Note that the bindings are **toggles** rather than separate on and off actions.
+A toggle cannot act on a stale idea of which way round an input is, which matters
+when it may also have been changed in OBS itself a moment earlier.
 
 This port comes from **[obsctl-rs](https://github.com/worxbend/obsctl-rs)**. What
 it deliberately leaves behind is that project's background daemon and IPC layer:
 those exist so many short-lived `obsctl` invocations can share one OBS
 connection, and a long-running program that owns its own connection is the thing
 they were standing in for.
+
+---
+
+## 🖥️ The Combined tab is yours to arrange
+
+<kbd>Alt</kbd>+<kbd>3</kbd> is the view you put on a second monitor and leave
+there for the whole stream. What belongs on that screen is not the same for
+somebody streaming alone as for somebody with a moderator, a second camera and a
+chat they need to watch closely — so it is arrangeable rather than fixed.
+
+**Config → Layout** (<kbd>Alt</kbd>+<kbd>5</kbd>) is a live editor: eight panels
+— stream info, each chat, OBS scenes, audio and status, the activity log,
+statistics — placed in rows and columns with proportional sizes, with a preview
+above the list. The preview is drawn by the same code the real tab uses, so it
+cannot disagree with the result.
+
+| Key | Does |
+|---|---|
+| <kbd>j</kbd> / <kbd>k</kbd> | Select a panel |
+| <kbd>+</kbd> / <kbd>-</kbd> | Give it more or less of the space |
+| <kbd>a</kbd> / <kbd>d</kbd> | Add a panel / remove the selected one |
+| <kbd>r</kbd> | Rotate — rows become columns |
+| <kbd>p</kbd> | Cycle four presets: default, chat focus, OBS focus, everything |
+| <kbd>s</kbd> | Save |
+
+Sizes are **shares** rather than percentages, because shares always add up and
+adding a panel does not force you to re-edit every other number. The result is
+stored in `[layout]` in `config.toml`, in a form written to be read by a person:
+
+```toml
+[layout]
+direction = "vertical"
+
+[[layout.rows]]
+weight = 1
+panels = [{ panel = "stream_info", weight = 1 }]
+
+[[layout.rows]]
+weight = 3
+panels = [
+    { panel = "twitch_chat", weight = 1 },
+    { panel = "youtube_chat", weight = 1 },
+]
+```
+
+That example is the default, and it is exactly what the Combined tab looked like
+before it became configurable — so upgrading changes nothing for anyone who has
+not gone looking for this. A layout that cannot be read falls back to the default
+and says why, because a blank tab is indistinguishable from a broken one.
+
+---
+
+## 🎛️ The Config tab
+
+<kbd>Alt</kbd>+<kbd>5</kbd>. Eight sections, most of which used to be a
+subcommand.
+
+| Section | What it is for |
+|---|---|
+| **Layout** | Arrange the Combined tab |
+| **Appearance** | Theme, motion, notifications |
+| **Keys** | Every binding, and what it runs |
+| **OBS** | Connection to OBS Studio |
+| **Accounts** | Twitch and YouTube logins — <kbd>Enter</kbd> logs in, or out |
+| **Housekeeping** | Tidy up and export |
+| **Diagnostics** | What is working and what is not |
+| **Files** | Where everything is kept |
+
+Two behaviours worth stating. Housekeeping's cleanup **lists before it deletes**:
+the first <kbd>Enter</kbd> shows the abandoned YouTube broadcasts, a second
+removes them, because deleting things you made without showing them to you first
+would be asking for trust this program has no way to earn. And the stream listing
+shows ids only, **never keys** — that window is often part of the broadcast.
 
 ---
 
@@ -429,7 +475,7 @@ pressed, so over time you stop needing it.
 
 ### Themes
 
-<kbd>Ctrl</kbd>+<kbd>T</kbd> opens the theme picker. There are **57 built-in
+<kbd>space</kbd> <kbd>u</kbd> <kbd>t</kbd> opens the theme picker. There are **57 built-in
 palettes** — Nord, Dracula, Gruvbox, Solarized, Tokyo Night, all four
 Catppuccin flavours, and a good many more — and moving the selection applies one
 *immediately*, so you judge a theme by looking at the interface you actually use
@@ -440,22 +486,13 @@ Every built-in palette is checked, by a test rather than by eye, to keep its bod
 text at or above the 4.5:1 contrast ratio the WCAG accessibility guidelines set
 for readable text. No theme ships that cannot be read.
 
-From the command line:
-
-```bash
-msm profile list                            # every theme name, active one marked
-msm profile show nord                       # its nine colours
-msm profile set gruvbox                     # switch
-msm profile set custom --accent "#ff0055"   # write your own, one colour at a time
-```
-
 A theme is nine named roles — background, surface, foreground, muted, border,
 accent, warning, error, success — so `[appearance.custom_theme]` in `config.toml`
 lets you override one and inherit the other eight.
 
 ### Motion
 
-<kbd>Alt</kbd>+<kbd>A</kbd> cycles how much the interface animates: **fast**,
+<kbd>space</kbd> <kbd>u</kbd> <kbd>a</kbd> cycles how much the interface animates: **fast**,
 **reduced**, or **off**. `reduced` is not the same animation played slowly —
 that would make it last *longer*, which is the opposite of what asking for less
 motion means. It takes bigger steps at a slower rate, so effects finish in about
@@ -495,7 +532,7 @@ and gives your terminal its own text selection back.
 | `animations` | `fast` | `fast`, `reduced` or `off` |
 | `splash` | `true` | The animated start-up screen |
 | `mouse` | `true` | React to clicks and the wheel |
-| `telemetry` | `false` | Show cpu, memory and frame rate in the tab bar (<kbd>Alt</kbd>+<kbd>T</kbd>) |
+| `telemetry` | `false` | Show cpu, memory and frame rate in the tab bar (<kbd>space</kbd> <kbd>u</kbd> <kbd>y</kbd>) |
 | `toasts` | `true` | Pop-up notifications (the log records everything either way) |
 | `toast_seconds` | `5` | How long one stays up; warnings get double, errors triple |
 | `terminal_background` | `false` | Repaint the terminal window's own background to match the theme |
@@ -535,8 +572,8 @@ branch it took:
 
 If the bind fails, or you have no reusable stream yet, it creates one and says so
 plainly, so you know to update Aitum that one time. If your channel has several
-keys, run `msm streams` to see them and pin the one you want with `stream_id` in
-the config.
+keys, **Config → Housekeeping → *List YouTube stream keys*** shows their ids so
+you can pin the one you want with `stream_id` in the config.
 
 More on the OBS and Aitum side, including the Aitum fields to fill in:
 [docs/obs-and-aitum.md](docs/obs-and-aitum.md).
@@ -552,8 +589,8 @@ The detail lives in `docs/`, and is also published at
 |---|---|
 | 📖 [Overview](docs/README.md) | Where to start, and what each page covers |
 | 🧭 [Getting started](docs/getting-started.md) | Twitch and Google credentials, first login, first stream |
-| ⚙️ [Configuration](docs/configuration.md) | Every setting in `config.toml`, and using it as a preset |
-| ⌨️ [Commands](docs/commands.md) | Every subcommand and flag, with output examples |
+| ⚙️ [Configuration](docs/configuration.md) | Every setting in `config.toml`, including `[keys]` and `[layout]` |
+| ⌨️ [Keys and actions](docs/keys.md) | Every tab, every default binding, and the `[keys]` section that changes them |
 | 🎥 [OBS and Aitum](docs/obs-and-aitum.md) | Wiring the two destinations up once and leaving them alone |
 | 🧩 [How it works](docs/how-it-works.md) | The API calls, the platform differences, the design decisions |
 | 🩺 [Troubleshooting](docs/troubleshooting.md) | Error messages, what they mean, what to do about them |
@@ -582,6 +619,8 @@ framework and nothing to set up before running them.
 | `twitch.rs` / `youtube.rs` | The two API clients. All *platform* API calls live here — the UI never talks to Twitch or YouTube directly |
 | `engine.rs` | Fans one plan out to every platform at once, collecting a result per platform |
 | `auth/` | The OAuth flow (loopback redirect with PKCE), token storage and silent renewal |
+| `keys/` | The keymap: actions, vim-style chord parsing, and the built-in bindings |
+| `layout.rs` | The Combined tab's arrangement: the panel tree, the on-disk row form, and the arithmetic that turns one into rectangles |
 | `ui/app.rs` | All interface state and keyboard handling — pure functions, no I/O, heavily tested |
 | `ui/worker.rs` | The background task that does the slow API work, so the interface never freezes |
 | `ui/draw.rs` | Rendering. Reads state, never changes it |

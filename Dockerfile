@@ -6,9 +6,11 @@
 # second stage starts from a bare base image and copies in one binary.
 #
 # What this is for: running `msm` somewhere that is not your own machine — a
-# streaming box you reach over ssh, a server that keeps the chat log, a CI job
-# that calls `msm go`. See the notes at the bottom about logging in, which is
-# the one part that does not work the same way in a container.
+# streaming box you reach over ssh, or a server that keeps the chat log. `msm`
+# is a terminal interface and nothing else: it takes no arguments, so the
+# container always needs a terminal attached. See the notes at the bottom about
+# logging in, which is the one part that does not work the same way in a
+# container.
 
 # ---------------------------------------------------------------------------
 # Stage 1: build
@@ -83,20 +85,21 @@ ENTRYPOINT ["msm"]
 # "localhost" inside a container is the container, not your desktop. Two ways
 # round it:
 #
-# 1. Log in on your own machine first (`msm login all`) and mount the config
+# 1. Log in on your own machine first — run `msm` there and authorise both
+#    platforms on its "Authorise your accounts" screen — then mount the config
 #    directory that produced, which already holds the tokens. This is the
 #    simpler option and the one to reach for.
 #
-# 2. Publish the callback port and tell the container to listen on all
-#    interfaces, then open the printed URL in your own browser:
+# 2. Publish the callback port so the redirect can reach the container, then
+#    open the printed URL in your own browser and log in from the Accounts
+#    section of the container's Config tab:
 #
-#      docker run -it -p 8017:8017 -v msm-config:/home/msm/.config/msm msm login all
+#      docker run -it -p 8017:8017 -v msm-config:/home/msm/.config/msm msm
 #
 #    This only works if the redirect URL registered in the developer console
 #    matches the port, and it puts an OAuth callback listener on your network
 #    for the duration — so prefer option 1 unless you have a reason not to.
 #
-# Scripted go-lives need no terminal and no browser, given a config with
-# tokens already in it:
-#
-#   docker run --rm -v msm-config:/home/msm/.config/msm msm go --json
+# With a config that already holds tokens, everything else happens inside the
+# interface: alt+1 to set the title and go live, alt+5 for configuration,
+# accounts and diagnostics.

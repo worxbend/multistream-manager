@@ -4,38 +4,35 @@ Each entry below is a real failure, what causes it, and what to do about it.
 Many of them are already explained inline by `msm` itself when they happen —
 this page is the longer version, with the reasoning.
 
-**First thing to try**
+**First thing to try: Config → Diagnostics.** Press <kbd>Alt</kbd>+<kbd>5</kbd>
+for the Config tab, then move to the **Diagnostics** section. It checks the
+config file, both platforms' credentials, the saved logins, the clipboard, the
+terminal's colour support, the log location and the OBS connection in one go.
+Each line reads `ok`, `warn` or `fail`, and every warning says what to do about
+it rather than only what is wrong.
+
+**Then Config → Accounts**, which separates "the credentials are missing" from
+"the login has expired" without touching the network, and **Config → Files**,
+which tells you where the log file is.
+
+The interface owns the terminal, so nothing can be printed to the screen while it
+runs and every diagnostic goes to that log file instead. To watch it live, with
+more detail than usual:
 
 ```bash
-msm doctor
+MSM_LOG=debug msm                                  # in one terminal
+tail -f ~/.config/multistream-manager/msm.log      # in another
 ```
 
-checks the config file, both platforms' credentials, the saved logins, the
-clipboard, the terminal's colour support and the log location in one go, and
-says what to do about anything it finds. It exits non-zero only when something
-is genuinely broken, so it is safe to put in front of another command.
+(That is the Linux path. Config → Files shows the real one on your machine.)
 
-**Then**
-
-```bash
-msm status
-```
-
-separates "the credentials are missing" from "the login has expired" without
-touching the network, and
-
-```bash
-msm paths
-```
-
-tells you where the log file is. The interface owns the terminal, so nothing can
-be printed to the screen while it runs and every diagnostic goes to that file
-instead:
-
-```bash
-MSM_LOG=debug msm                                    # in one terminal
-tail -f "$(msm paths | awk '/^Log:/{print $2}')"     # in another
-```
+> [!NOTE]
+> Some error messages quoted on this page still end with wording like
+> *"Run `msm login twitch`"*. There is no command line any more, so read those as
+> **"log in again under Config → Accounts"** — press <kbd>Enter</kbd> on the
+> platform's row to log out, then <kbd>Enter</kbd> again to log back in. The
+> messages are quoted as the program prints them so you can match what you see on
+> screen against what is written here.
 
 **Contents**
 
@@ -52,7 +49,7 @@ tail -f "$(msm paths | awk '/^Log:/{print $2}')"     # in another
 * [stream_id does not exist on the channel](#stream_id-does-not-exist-on-the-channel)
 * [One platform worked and the other did not](#one-platform-worked-and-the-other-did-not)
 * [The YouTube category field will not search](#the-youtube-category-field-will-not-search)
-* [msm key youtube does not print a key](#msm-key-youtube-does-not-print-a-key)
+* [The YouTube stream key is not there to copy](#the-youtube-stream-key-is-not-there-to-copy)
 * [Copying a stream key does nothing](#copying-a-stream-key-does-nothing)
 * [The theme looks wrong, or colours are approximate](#the-theme-looks-wrong-or-colours-are-approximate)
 * [The OBS tab will not connect](#the-obs-tab-will-not-connect)
@@ -88,8 +85,8 @@ does a long series of test go-lives, since each one creates a broadcast.
 4. If you genuinely need more, request a quota increase in the Google Cloud
    console for your project. That is a review process, not a switch.
 
-**In the meantime**, Twitch is unaffected. Run `msm go --platforms twitch` and
-stream to Twitch alone while you wait.
+**In the meantime**, Twitch is unaffected. Untick YouTube on the platform screen
+and stream to Twitch alone while you wait.
 
 See [Configuration](configuration.md#general) for `poll_interval_secs`.
 
@@ -118,11 +115,12 @@ channel.
    `msm` shortens it, and retrying during the wait produces this same error.
 
 If you are certain streaming is enabled and you still see this, check you are
-logged in as the right channel: `msm status` and the "connected as" line printed
-at the start of `msm go` both name the account that will actually be used. A
-Google account with several channels can easily authorise the wrong one — if it
-did, run `msm logout youtube`, then `msm login youtube`, and pick the right
-channel on the consent screen.
+logged in as the right channel. **Config → Accounts** names the account each
+platform resolved to, and so does the "connected as" line in the activity log
+when you connect. A Google account with several channels can easily authorise the
+wrong one — if it did, press <kbd>Enter</kbd> on the YouTube row to log out,
+<kbd>Enter</kbd> again to log back in, and pick the right channel on Google's
+consent screen.
 
 ---
 
@@ -180,11 +178,9 @@ added does not gain it retrospectively. This most often happens after updating
 that a missing scope is reported as a missing scope rather than as a bare `401`
 in the middle of a go-live.
 
-**Fix.**
-
-```bash
-msm login twitch
-```
+**Fix.** Open **Config → Accounts**, press <kbd>Enter</kbd> on the Twitch row to
+log out and <kbd>Enter</kbd> again to log back in. The new token is issued with
+the current set of permissions.
 
 The scopes requested and what each is for are listed in
 [Getting started](getting-started.md#what-permissions-are-being-requested).
@@ -217,15 +213,15 @@ console to match) or stop the other program.
 
 **Cause.** The login needs to receive the browser's redirect, so it starts a
 listener on the loopback address at `oauth_port` before opening the browser.
-Another process already holds that port. The two common cases are an earlier
-`msm login` that is still waiting for a browser tab you never finished, and an
-unrelated program that happens to use 8017.
+Another process already holds that port. The two common cases are another copy of
+`msm` still waiting for a browser tab you never finished, and an unrelated
+program that happens to use 8017.
 
 **Fix, in order of preference.**
 
-1. **Find the earlier login and finish or stop it.** If a terminal is still
-   sitting at "Opening your browser to authorise…", press <kbd>Ctrl</kbd>+<kbd>C</kbd>
-   there and try again. A login that is never completed gives up after five
+1. **Find the earlier login and finish or stop it.** If another `msm` window is
+   still waiting for the browser, finish the login there or press
+   <kbd>Ctrl</kbd>+<kbd>C</kbd> to quit it, then try again. A login that is never completed gives up after five
    minutes on its own.
 2. **Find out what holds the port:**
 
@@ -276,7 +272,7 @@ authorises listed accounts only, and your own account is not listed by default.
 
 **Fix.** Google Cloud console → **APIs & Services** → **OAuth consent screen**
 → **Test users** → **Add users** → add the Google account that owns your YouTube
-channel. Then run `msm login youtube` again.
+channel. Then log in to YouTube again under **Config → Accounts**.
 
 This is the trap most people lose an evening to. It is described in full in
 [Getting started](getting-started.md#trap-1-google-refuses-the-login-unless-you-are-on-the-test-users-list).
@@ -305,11 +301,8 @@ situation.
 * **In the form**: type part of the name, wait for the list, and press
   <kbd>Enter</kbd> to select an entry. Typing over a previously selected
   category clears the selection, so re-select after editing.
-* **In the config**: find the exact spelling first.
-
-  ```bash
-  msm categories software
-  ```
+* **In the config**: find the exact spelling first, by typing part of it into
+  the form's category field and reading the matches back:
 
   ```
   ID             NAME
@@ -322,7 +315,7 @@ situation.
 Twitch's search is fuzzy, so a partial query is usually enough — but it is a
 search over Twitch's real catalogue, and a category you invented will not be
 found however you spell it. Twitch's non-game categories are in there too:
-`msm categories just chatting` finds *Just Chatting*.
+typing `just chatting` finds *Just Chatting*.
 
 If a stale `twitch_category_id` is left next to a changed `twitch_category`, the
 pair is treated as unresolved and looked up again, so you do not have to clear
@@ -355,8 +348,8 @@ selected platforms' limits, so with both ticked it counts against 100 and you
 can see the point where the cut would fall.
 
 **Over 140 characters is a different matter.** That is a blocking error while
-Twitch is selected, because Twitch rejects it outright. The form will not submit
-and `msm go` stops with `error:`.
+Twitch is selected, because Twitch rejects it outright. The submit hint stays
+grey and the form will not send.
 
 Description length behaves similarly: over 5000 characters is blocking for
 YouTube, and Twitch has no description field at all, so the description you type
@@ -377,7 +370,7 @@ This also appears when you authorised the wrong account out of several.
 
 **Fix.** Create the channel at <https://youtube.com>, then log in again. If the
 account is right but the channel is a brand account you switch into, make sure
-you pick that channel on Google's consent screen during `msm login youtube`.
+you pick that channel on Google's consent screen while logging in.
 
 ---
 
@@ -398,26 +391,21 @@ There are three reasons it can happen anyway, and the panel tells you which:
    into Aitum; it is a reusable stream, so this will not recur.
 3. **`reuse_stream = false` in your config.** Set it back to `true`.
 
-**To make it deterministic**, list the keys and pin the one your encoder is
-configured for:
-
-```bash
-msm streams
-```
+**To make it deterministic**, list the stream ids and pin the one your encoder
+is configured for. **Config → Housekeeping → *List YouTube stream keys*** writes
+them to the activity log; copy the id you want into the config:
 
 ```toml
 [youtube]
 stream_id = "Vy8dQ...oqA"
 ```
 
-With `stream_id` set, that stream and no other is bound, and if it is missing
-you get an explicit error instead of a silent substitution.
+With `stream_id` set, that stream and no other is bound, and if it is missing you
+get an explicit error instead of a silent substitution.
 
-Reveal the key when you need it, with <kbd>k</kbd> on the dashboard or:
-
-```bash
-msm streams --show-keys
-```
+To get at the key itself, press <kbd>Y</kbd> on the Stream Info tab after going
+live — it copies the key of the stream actually bound to your broadcast straight
+to the clipboard. Nothing in the program ever displays it.
 
 ---
 
@@ -428,7 +416,7 @@ Warning: `stream_id` in your config is "Vy8dQ...oqA", which is not on this
 channel. Going live will fail until you correct that setting or clear it.
 ```
 
-from `msm streams`, or during a go-live:
+from the housekeeping listing, or during a go-live:
 
 ```
 the stream id "Vy8dQ...oqA" set as `stream_id` in your config does not exist on
@@ -439,8 +427,8 @@ your channel. Remove that setting to let the application pick one automatically.
 mistyped, or it belongs to a different channel than the one you are logged in
 as.
 
-**Fix.** Run `msm streams`, copy an id that is actually listed, and put that in
-the config — or clear `stream_id = ""` entirely, which is the right answer when
+**Fix.** Run **Config → Housekeeping → *List YouTube stream keys***, copy an id
+that is actually listed, and put that in the config — or clear `stream_id = ""` entirely, which is the right answer when
 the channel only has one key.
 
 This is deliberately a hard failure rather than a quiet fallback. Binding some
@@ -461,15 +449,14 @@ you start streaming now.
 **What it means.** The platform marked Ready is genuinely configured. You can
 press Start Streaming and go out on it immediately. The failing platform's panel
 carries its own error and reason; fix that and press <kbd>e</kbd> on the
-dashboard to edit and resubmit, or run `msm go --platforms <the failed one>`.
+dashboard to edit and resubmit, ticking only the platform that failed.
 
 Resubmitting to Twitch updates the channel in place and is harmless to repeat.
 Resubmitting to YouTube creates a *new* broadcast with a new watch URL, leaving
-the previous attempt behind as an unstarted broadcast — `msm cleanup` finds and
-removes those. See [Commands](commands.md#msm-cleanup).
-
-`msm go` exits non-zero only when every platform failed, so a wrapper script can
-tell the two situations apart without parsing the output.
+the previous attempt behind as an unstarted broadcast. **Config → Housekeeping →
+*Find abandoned broadcasts*** finds and removes those: the first
+<kbd>Enter</kbd> lists them, a second deletes the ones listed, and anything that
+has ever been live is neither listed nor touched.
 
 ---
 
@@ -491,35 +478,23 @@ by hand.
 
 ---
 
-## msm key youtube does not print a key
+## The YouTube stream key is not there to copy
 
-```
-YouTube's stream key is shown on the dashboard after `msm go`, or at
-https://studio.youtube.com > Go live > Stream settings.
-```
+<kbd>Y</kbd> on the Stream Info tab reports that there is no YouTube key to copy.
 
-**Cause.** This is not a failure. A Twitch stream key belongs to the channel and
-can be read at any time. A YouTube stream key belongs to a *stream object*, and
-`msm key` has no broadcast in hand from which to choose one.
+**Cause.** This is usually not a failure. A Twitch stream key belongs to the
+channel and can be read at any time. A YouTube stream key belongs to a *stream
+object*, and until you have gone live there is no broadcast in hand from which to
+choose one — so before the first go-live of a session, there is nothing to copy.
 
-**What to use instead.**
+**What to do.** Go live first (<kbd>Ctrl</kbd>+<kbd>G</kbd>), then press
+<kbd>Y</kbd>. That copies the key of the stream actually bound to the broadcast
+you just created, which is the one your encoder needs.
 
-```bash
-msm streams --show-keys
-```
-
-lists every stream on the channel with its id, title and key — which is also how
-you find the id to pin as `stream_id`. Or press <kbd>k</kbd> on the dashboard
-after going live, which shows the key for the stream actually bound to the
-broadcast you have created.
-
----
-
-* [Getting started](getting-started.md) — the setup these errors come out of.
-* [Configuration](configuration.md) — the settings several fixes above refer to.
-* [Commands](commands.md) — what each command does and prints.
-* [How it works](how-it-works.md) — why the failures are shaped this way.
-* [Back to the documentation index](README.md).
+If you need it before then, it is also at <https://studio.youtube.com> under
+**Go live → Stream settings**. And **Config → Housekeeping → *List YouTube stream
+keys*** shows the *ids* of the reusable streams on the channel, which is how you
+find the value for `stream_id` — the ids only, never a key.
 
 ---
 
@@ -540,11 +515,7 @@ tries both:
    terminal doing the pasting is the one in front of you rather than the
    machine `msm` runs on.
 
-Start with:
-
-```bash
-msm doctor | grep -i clipboard
-```
+Start with the **clipboard** line in **Config → Diagnostics**.
 
 **"no clipboard helper is installed"** — install one (`wl-copy` on Wayland,
 `xclip` on X11). Copying will still try the escape sequence in the meantime.
@@ -565,9 +536,11 @@ disable by default. Turn it on:
 If you are inside tmux or screen, both the multiplexer *and* the terminal
 underneath it have to allow it — a single "no" anywhere in the chain is enough.
 
-As a last resort, `msm key twitch` prints the key to standard output, which you
-can pipe wherever you like. It is a separate command precisely so a key is
-never printed by accident; be aware that it lands in your scrollback.
+There is no last-resort "print the key" anywhere in the program, by design: a
+key on standard output lands in your scrollback, and this terminal is often on
+stream. If no clipboard route can be made to work, read the key from the
+platform's own dashboard — Twitch's is under **Settings → Stream** and YouTube's
+under **Go live → Stream settings**.
 
 ---
 
@@ -577,9 +550,7 @@ Themes are written as exact 24-bit colours. A terminal that cannot show them
 approximates each to the nearest colour it has, which can turn a carefully
 chosen palette into something muddy.
 
-```bash
-msm doctor | grep -i terminal
-```
+Check the **terminal** line in **Config → Diagnostics**.
 
 If that warns, your terminal is not advertising 24-bit colour. Most modern ones
 support it and simply need telling to say so:
@@ -598,8 +569,9 @@ set -as terminal-features ",*:RGB"
 Two related things that are *not* faults:
 
 * **A theme name that does not exist** falls back to the default palette and
-  logs a warning rather than failing to start. `msm profile list` prints every
-  valid name; `msm doctor` reports the fallback.
+  logs a warning rather than failing to start. The theme picker
+  (<kbd>&lt;Leader&gt;</kbd> <kbd>u</kbd> <kbd>t</kbd>) lists every valid name,
+  and Config → Diagnostics reports the fallback.
 * **A hand-written `[appearance.custom_theme]` can be unreadable.** Every
   built-in palette is checked by a test to keep body text at or above the 4.5:1
   contrast ratio the WCAG guidelines set for readable text; a custom one is
@@ -615,13 +587,8 @@ with a solid colour.
 
 ## The OBS tab will not connect
 
-The tab says "waiting for OBS", or `msm obs status` fails.
-
-```bash
-msm obs status
-```
-
-says which of the four usual causes it is.
+The tab says "waiting for OBS". The **OBS** section of the Config tab, and the
+OBS line in **Config → Diagnostics**, say which of the four usual causes it is.
 
 **"Connection refused"** — nothing is listening. Either OBS is not running, or
 its WebSocket server is off: **Tools → WebSocket Server Settings** in OBS, tick
@@ -657,8 +624,10 @@ Error: no scene called "brb". Try one of: Starting Soon, Main Camera
 
 The name is matched against the OBS name, the aliases in
 `[obs.scene_aliases]` / `[obs.audio_aliases]`, and the shortcuts — so this
-means none of the three matched. `msm obs scenes` and `msm obs audio` list
-exactly what OBS reports, which is the authority.
+means none of the three matched. The scene and audio lists on the OBS tab show
+exactly what OBS reports, which is the authority — the real OBS name is always
+displayed beside any alias, or the pane and the OBS window would disagree about
+what everything is called.
 
 Audio inputs are picked out of OBS's full input list by kind, so a source that
 is not an audio capture will not appear — that is deliberate, not a fault.
@@ -667,5 +636,13 @@ is not an audio capture will not appear — that is deliberate, not a fault.
 
 Shortcuts from the config take precedence over the OBS tab's built-in keys. If
 you bind `s` to a scene, `s` no longer starts the stream on that tab. The keys
-the tab uses itself are `j`, `k`, `m`, `M`, `s`, `r`, `p`, `P`, `C`, `R`, `u`
-and `q`.
+the tab uses itself are `h`, `j`, `k`, `l`, `m`, `M`, `s`, `r`, `p`, `P`, `C`,
+`R`, `u` and `q` — the full list is in [Keys and actions](keys.md#obs).
+
+---
+
+* [Getting started](getting-started.md) — the setup these errors come out of.
+* [Configuration](configuration.md) — the settings several fixes above refer to.
+* [Keys and actions](keys.md) — where each part of the interface lives.
+* [How it works](how-it-works.md) — why the failures are shaped this way.
+* [Back to the documentation index](README.md).

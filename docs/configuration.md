@@ -5,9 +5,10 @@ different kinds of thing:
 
 * **Credentials** — the client id and secret from each developer console. Set up
   once, then forgotten about.
-* **A preset** — the title, tags, category, language and so on that the form
-  starts from. This half is meant to be hand-edited, and is what makes
-  `msm go` useful without the interface at all.
+* **Everything else** — the preset the form starts from, the colours, the key
+  bindings, the layout of the Combined tab, the chat and OBS settings. All of it
+  can be changed inside the interface, and all of it can equally be hand-edited
+  here; the file is written to be read by a person.
 
 **Contents**
 
@@ -19,10 +20,12 @@ different kinds of thing:
 * [`[chat]`](#chat)
 * [`[appearance]`](#appearance)
 * [`[obs]`](#obs)
+* [`[keys]`](#keys)
+* [`[layout]`](#layout)
 * [`[preset]`](#preset)
 * [A full worked example](#a-full-worked-example)
 * [The preset workflow](#the-preset-workflow)
-* [Several presets at once](#several-presets-at-once)
+* [Keeping more than one preset](#keeping-more-than-one-preset)
 * [Environment variables](#environment-variables)
 * [Other files in the same directory](#other-files-in-the-same-directory)
 
@@ -30,12 +33,9 @@ different kinds of thing:
 
 ## Where the file lives
 
-```bash
-msm paths
-```
-
-prints the config, token and log paths. The directory follows each operating
-system's own convention:
+**Config → Files** (<kbd>Alt</kbd>+<kbd>5</kbd>, then the *Files* section) shows
+the config, token and log paths. The directory follows each operating system's
+own convention:
 
 | System | Directory |
 |---|---|
@@ -50,11 +50,15 @@ The file is written with owner-only permissions (mode `0600` on Unix) whenever
 `msm` writes it, because it contains client secrets. If you create it by hand,
 consider setting those permissions yourself.
 
+You do not have to create it at all. On a first run the interface opens on its
+**Set up API access** screen, and saving that form writes the file for you —
+which is what the old `msm init` command used to do.
+
 ---
 
 ## Shape of the file
 
-Seven sections, all optional. Anything you leave out falls back to the default
+Nine sections, all optional. Anything you leave out falls back to the default
 listed below, so a partial file is valid and a completely empty file parses.
 
 ```toml
@@ -64,6 +68,8 @@ listed below, so a partial file is valid and a completely empty file parses.
 [chat]        # the chat panes: scrollback, polling, quota, logging
 [appearance]  # colours, motion, mouse, notifications
 [obs]         # controlling OBS Studio
+[keys]        # key bindings, written the way vim writes them
+[layout]      # how the Combined tab is arranged
 [preset]      # your default stream settings
 ```
 
@@ -124,17 +130,18 @@ that gets bound, and there is nothing to disambiguate.
 
 If the channel has several, whichever one YouTube happens to list first is the
 one that gets used, and that ordering is not something you control. Pin the one
-your OBS setup is actually configured for:
-
-```bash
-msm streams
-```
+your OBS setup is actually configured for. To see the ids, open
+**Config → Housekeeping** and run *List YouTube stream keys*; the results appear
+in the activity log:
 
 ```
 ID                         PINNED  TITLE
 Vy8dQ...oqA                        Default stream key
 9tRk2...LmX                        Old backup key
 ```
+
+Only the ids are ever listed. A stream key itself is never shown, because this
+window is often part of the broadcast.
 
 Copy the id you want into the config:
 
@@ -143,7 +150,7 @@ Copy the id you want into the config:
 stream_id = "Vy8dQ...oqA"
 ```
 
-`msm streams` marks the pinned one in the `PINNED` column afterwards, and warns
+The listing marks the pinned one in the `PINNED` column afterwards, and warns
 loudly if the id in your config is not on the channel at all — that setting left
 uncorrected makes every go-live fail, and it is far easier to understand here
 than in the middle of a submission.
@@ -241,8 +248,9 @@ failures.
 
 With `chat_logging = true`, every message is appended to JSON Lines files —
 one object per line, which is a format both a script and a person can read.
-`msm export superchats` reads them back into a CSV of every paid event, with no
-network access and no API quota spent, which is what makes them worth keeping.
+**Config → Housekeeping → *Export paid events to CSV*** reads them back into a
+CSV of every paid event, with no network access and no API quota spent, which is
+what makes them worth keeping.
 Files rotate at `chat_log_max_bytes` and the oldest are pruned beyond
 `chat_log_max_files`.
 
@@ -269,12 +277,12 @@ terminal_background = false   # repaint the terminal window's own background
 
 ### `theme`
 
-`msm profile list` prints every name. A name that does not exist logs a warning
-and falls back to the default rather than failing to start, so a typo costs a
-line in the log and not your stream.
+A name that does not exist logs a warning and falls back to the default rather
+than failing to start, so a typo costs a line in the log and not your stream.
 
-The interface half of this is <kbd>Ctrl</kbd>+<kbd>T</kbd>, which previews each
-palette live — the whole screen redraws as you move the selection, because
+The interface half of this is the theme picker, <kbd>&lt;Leader&gt;</kbd>
+<kbd>u</kbd> <kbd>t</kbd>, which lists every name and previews each palette
+live — the whole screen redraws as you move the selection, because
 colours cannot be judged from a row of swatches.
 
 ### `[appearance.custom_theme]`
@@ -296,8 +304,8 @@ error      = "#e0685a"   # something is broken
 success    = "#7fbf8e"   # something worked
 ```
 
-`msm profile set custom --accent "#ff0055"` writes one of these without
-opening the file.
+The theme picker writes `theme` back here when you keep a palette, so you can
+choose in the interface and still hand-edit the result afterwards.
 
 > [!TIP]
 > Every built-in palette is checked by a test to keep its body text at or above
@@ -308,7 +316,7 @@ opening the file.
 ### `animations`
 
 `fast`, `reduced` or `off`, cycled in the interface with
-<kbd>Alt</kbd>+<kbd>A</kbd>.
+<kbd>&lt;Leader&gt;</kbd> <kbd>u</kbd> <kbd>a</kbd>.
 
 `reduced` is not the same animation played slowly — that would make effects
 last *longer*, which is the opposite of what asking for less motion means. It
@@ -321,7 +329,8 @@ the setting; things simply do not move.
 ### `telemetry`
 
 Shows the processor share, resident memory and drawn frame rate at the
-right-hand end of the tab bar (<kbd>Alt</kbd>+<kbd>T</kbd>). While it is off,
+right-hand end of the tab bar (<kbd>&lt;Leader&gt;</kbd> <kbd>u</kbd>
+<kbd>y</kbd>). While it is off,
 nothing is measured at all — reading the numbers once a second for a display
 nobody is looking at is exactly the sort of cost this is meant to expose.
 
@@ -358,8 +367,8 @@ colour. It is undone when `msm` exits.
 
 ## `[obs]`
 
-Controlling OBS Studio from the OBS tab (<kbd>Alt</kbd>+<kbd>4</kbd>) and the
-`msm obs` commands.
+Controlling OBS Studio from the OBS tab (<kbd>Alt</kbd>+<kbd>4</kbd>) and from
+the <kbd>&lt;Leader&gt;</kbd> <kbd>o</kbd> bindings, which work from any tab.
 
 OBS has a WebSocket server built in. Turn it on under **Tools → WebSocket
 Server Settings**, and note the port and password it shows you.
@@ -421,8 +430,8 @@ mic = "Mic/Aux"
 m = "Mic/Aux"
 ```
 
-An **alias** is a name you can use anywhere a scene or input is named —
-`msm obs scene brb` — and it is what the pane shows in the list. The real OBS
+An **alias** is a shorter name for a scene or an input, and it is what the pane
+shows in the list. The real OBS
 name is still displayed beside it, or the pane and the OBS window would
 disagree about what everything is called.
 
@@ -437,15 +446,183 @@ so that adding a scene can never silently change what an existing alias means.
 > [!NOTE]
 > Shortcuts take precedence over the tab's own keys, so binding `s` to a scene
 > means `s` no longer starts the stream on that tab. Bind digits and letters
-> the tab does not use: `s`, `r`, `p`, `m`, `M`, `P`, `C`, `R`, `j`, `k` and
-> `q` all already do something.
+> the tab does not use: `s`, `r`, `p`, `m`, `M`, `P`, `C`, `R`, `u`, `h`, `l`,
+> `j`, `k` and `q` all already do something — the full list is in
+> [Keys and actions](keys.md#obs).
+
+---
+
+## `[keys]`
+
+Every key in the program is configurable here. The built-in bindings are the
+starting point and this section is applied on top, so you write only what you
+want to be different — there is no need to restate the ones you are happy with.
+
+```toml
+[keys]
+# The key every mnemonic sequence starts with. Changing it moves every
+# <Leader>… binding at once, including the built-in ones, so nothing else
+# has to be rewritten.
+leader = "<Space>"
+
+[keys.global]
+"<C-g>" = "stream.go_live"     # go live from anywhere
+"<Leader>q" = ""               # an empty action removes a binding
+
+[keys.chat]
+"<C-j>" = "chat.next"
+
+[keys.obs]
+"<F1>" = "obs.mute_all"
+```
+
+### The four contexts
+
+| Table | Where its bindings apply |
+|---|---|
+| `[keys.global]` | Everywhere |
+| `[keys.stream_info]` | The Stream Info tab |
+| `[keys.chat]` | The chat panes, on either the Chat or the Combined tab |
+| `[keys.obs]` | The OBS tab |
+
+A key press is looked up in the active tab's context first and in `global`
+second. That is what lets <kbd>j</kbd> scroll chat on one tab and move down the
+scene list on another without either having to know about the other, and it
+means a tab can give a key a local meaning without you restating everything else.
+
+### How a binding is written
+
+The left-hand side is a key, or several in a row, written the way vim writes
+them: `j`, `J`, `<C-p>`, `<A-4>`, `<CR>`, `<Leader>os`. The notation is vim's
+because anyone who would want to rebind keys in a terminal program already knows
+it. The full table of forms is in
+[Keys and actions](keys.md#how-a-key-is-written).
+
+The right-hand side is an **action name** such as `obs.stream` or `chat.compose`
+— a thing the program does, named independently of whichever key happens to run
+it. That separation is the reason the keys are configurable at all. Every valid
+name is listed in [Keys and actions](keys.md#every-action-name).
+
+An empty string removes a binding: `"<Leader>q" = ""` means the leader followed
+by `q` no longer quits.
+
+> [!NOTE]
+> A binding that cannot be understood — a key that will not parse, an action
+> name that does not exist — is reported and skipped rather than treated as a
+> reason to refuse to start. Being locked out of your own stream by a mistyped
+> binding would be an absurd trade. **Config → Keys** lists every binding
+> actually in force, which is where to look when a change did not take effect.
+
+---
+
+## `[layout]`
+
+How the **Combined tab** (<kbd>Alt</kbd>+<kbd>3</kbd>) is arranged. That tab is
+the one you put on a second monitor and leave there for the whole stream, and
+what belongs on that screen is not the same for somebody streaming alone as for
+somebody with a moderator, a second camera and a chat they need to watch closely.
+
+The easiest way to change it is **Config → Layout**, which draws a live preview
+of the arrangement while you edit it — see
+[Keys and actions](keys.md#layout) for its keys. This section is what that
+editor saves.
+
+### The eight panels
+
+| Written as | On screen | What it shows |
+|---|---|---|
+| `stream_info` | Stream info | Title, category, which platforms are live |
+| `twitch_chat` | Twitch chat | Twitch chat messages |
+| `youtube_chat` | YouTube chat | YouTube live chat messages |
+| `obs_scenes` | Scenes | The OBS Studio scene list |
+| `obs_audio` | Audio | OBS audio inputs and their levels |
+| `obs_status` | OBS status | The OBS connection, and whether it is recording or streaming |
+| `activity_log` | Activity | The rolling log of what the program has been doing |
+| `stats` | Statistics | Live viewer counts and stream health |
+
+### The file format
+
+A layout is a list of rows, and each row is a list of panels:
+
+```toml
+[layout]
+# "vertical" stacks the rows top to bottom; "horizontal" makes them columns.
+direction = "vertical"
+
+[[layout.rows]]
+weight = 1
+panels = [{ panel = "stream_info", weight = 1 }]
+
+[[layout.rows]]
+weight = 3
+panels = [
+    { panel = "twitch_chat", weight = 1 },
+    { panel = "youtube_chat", weight = 1 },
+]
+```
+
+That example is the default: a strip of stream information across the top, and
+the two chats side by side taking three times as much room beneath it. It is
+also exactly what the Combined tab looked like before it was configurable, so
+upgrading changes nothing for anyone who has not gone looking for this.
+
+### `weight` is a share, not a percentage
+
+The numbers are **proportional shares**. A row of `weight = 1` next to a row of
+`weight = 3` gets a quarter of the height, because 1 out of 1 + 3 is a quarter.
+Percentages were the obvious alternative and are worse for hand editing: they
+have to add up to a hundred, so adding one panel forces you to re-edit every
+other number. Shares always add up, whatever they are.
+
+Cells are handed out by largest remainder, so the parts always add back up to the
+whole and no row is left one character short at the bottom of the screen.
+
+A weight of `0` hides a panel. If *every* panel in one split is zero the split
+would take up no space at all, so that is refused with an explanation rather than
+drawn as nothing.
+
+### Why rows rather than a tree
+
+Internally a layout is a tree of splits, which is what the arithmetic naturally
+works on. Writing that tree into TOML directly would produce something like
+`[layout.root.split.children.split]`, with the panels buried several tables down
+and indentation carrying a meaning TOML does not actually give it. People edit
+this file by hand — that is the whole point of having one — so the written form
+is chosen for the reader.
+
+The cost is that the file can express two levels: rows, and panels within a row.
+That covers the arrangements people actually want on a second monitor. Nesting
+deeper than that is refused, and a tree more than eight levels deep is refused
+outright, on the grounds that it is far more likely to be a mistake than an
+intention.
+
+### Presets
+
+Four ready-made arrangements exist as starting points, cycled with <kbd>p</kbd>
+in the layout editor. Nobody wants to design a layout from nothing on their first
+evening; pick the nearest one, save it, then move the numbers around.
+
+| Preset | What it is |
+|---|---|
+| `default` | Stream info across the top, both chats beneath |
+| `chat_focus` | Big chats, a thin strip of stream info |
+| `obs_focus` | OBS scenes and audio down one side |
+| `everything` | All eight panels at once, for a large monitor |
+
+> [!NOTE]
+> A layout that cannot be read — a panel name that does not exist, a shape the
+> file format cannot express — falls back to the default arrangement and says
+> why in the activity log. A blank tab is indistinguishable from a broken one,
+> so it never leaves you with either.
+
 
 ---
 
 ## `[preset]`
 
-The default stream settings. The form starts from these values, <kbd>Ctrl</kbd>+<kbd>S</kbd>
-in the form writes them back here, and `msm go` uses them directly.
+The default stream settings — what the form is filled in with when the interface
+opens. <kbd>Ctrl</kbd>+<kbd>S</kbd> in the form writes whatever you have typed
+back here, so you can build a preset once by hand and never retype it.
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
@@ -460,7 +637,7 @@ in the form writes them back here, and `msm go` uses them directly.
 | `made_for_kids` | boolean | `false` | YouTube requires this declaration on every broadcast. |
 | `youtube_auto_start` | boolean | `true` | Let YouTube go live by itself as soon as it sees the feed from OBS. |
 | `youtube_auto_stop` | boolean | `false` | Let YouTube end the broadcast when the feed stops. |
-| `platforms` | array of strings | `["twitch", "youtube"]` | Which platforms are ticked when the interface opens, and which `msm go` uses when `--platforms` is not given. |
+| `platforms` | array of strings | `["twitch", "youtube"]` | Which platforms are ticked when the interface opens. |
 
 ### Why there are two Twitch category keys
 
@@ -469,17 +646,15 @@ numeric `game_id` and nothing else. A human editing a file wants to write the
 name, so the file holds both: `twitch_category` is the name you type, and
 `twitch_category_id` is the id looked up for it.
 
-When you run `msm go` with a name but no id, the name is searched against
+When you go live with a name but no id, the name is searched against
 Twitch's category list first — an exact match wins, otherwise the best match
 does. Caching the id means a repeat run does not spend an API call re-resolving
 a category that has not changed. Change the name and leave the id stale and the
 pair is treated as unresolved, so it gets looked up again.
 
-To find the exact spelling and id of a category:
-
-```bash
-msm categories chess
-```
+To find the exact spelling and id of a category, use the category field in the
+form: press <kbd>Enter</kbd> on it and type. It searches Twitch's own list and
+fills in both keys for you.
 
 ### How tags are treated
 
@@ -572,8 +747,8 @@ client_secret = "GOCSPX-xxxxxxxxxxxxxxxxxxxx"
 # never need changing. Leave this on.
 reuse_stream = true
 
-# Pin one specific key. Find the id with `msm streams`. Empty is fine when the
-# channel has only one key.
+# Pin one specific key. Find the id under Config -> Housekeeping -> "List
+# YouTube stream keys". Empty is fine when the channel has only one key.
 stream_id = ""
 
 [general]
@@ -596,7 +771,8 @@ Source: https://github.com/worxbend/multistream-manager
 
 tags = ["rust", "programming", "livecoding"]
 
-# Spelled exactly as Twitch spells it. `msm categories rust` finds the name.
+# Spelled exactly as Twitch spells it. The form's category field searches
+# Twitch's own list and fills both this and the id in for you.
 twitch_category = "Software and Game Development"
 # Filled in automatically the first time the name above is used.
 twitch_category_id = ""
@@ -616,76 +792,56 @@ youtube_auto_stop = false
 platforms = ["twitch", "youtube"]
 ```
 
+The `[keys]` and `[layout]` sections are left out of this example on purpose:
+they are long, and everything in them has a working default. Add them only when
+you want something different from what the interface already does.
+
 ---
 
 ## The preset workflow
 
 The form and the file are two views of the same thing, and they feed each other.
 
-**File → stream.** Edit `[preset]`, then:
+**File → form.** Edit `[preset]`, start `msm`, and the form on the Stream Info
+tab opens already filled in. Look it over, press <kbd>Ctrl</kbd>+<kbd>G</kbd>,
+and both platforms are configured. Getting a session started is then two
+keystrokes rather than a form to retype.
 
-```bash
-msm go
-```
+Before it sends anything, the go-live step connects to each selected platform and
+records in the activity log which account it resolved to, resolves the Twitch
+category name if it has no id yet, and checks the plan for the problems it can
+find without calling an API — a missing category, a language code that is not two
+letters. The submit hint at the bottom of the form turns green only when the plan
+is genuinely sendable, so you do not discover a missing category after the round
+trip.
 
-`msm go` connects to each selected platform and prints which account it resolved
-to, resolves the Twitch category name if it has no id yet, checks the plan for
-problems it can find without calling an API, shows you a summary, and asks
-before doing anything. Answer anything other than `y` and nothing is changed.
-
-```
-Twitch   connected as yourname
-YouTube  connected as Your Channel
-
-About to apply:
-  Title:    Building a Rust TUI from scratch
-  Category: Software and Game Development (Twitch)
-  Language: en
-  Tags:     rust, programming, livecoding
-  To:       Twitch, YouTube
-
-Go ahead? [y/N]
-```
-
-Skip the prompt when there is nobody there to answer it:
-
-```bash
-msm go --yes
-```
-
-**Stream → file.** Pressing <kbd>Ctrl</kbd>+<kbd>S</kbd> in the form writes
+**Form → file.** Pressing <kbd>Ctrl</kbd>+<kbd>S</kbd> in the form writes
 whatever you have typed back into `[preset]`, including the resolved Twitch
-category id. So you can build a preset in the interface once and then use
-`msm go` from then on.
-
-Note that `msm go` reads the preset and never writes to it.
+category id. So you can build a preset in the interface once and never edit the
+file by hand at all.
 
 ---
 
-## Several presets at once
+## Keeping more than one preset
 
-The global `--config` flag points at a different file. Because the file also
-holds your credentials, keep the credential sections in each one — or copy an
-existing file and change only the `[preset]` half.
-
-```bash
-msm --config ~/streams/coding.toml go
-msm --config ~/streams/gaming.toml go --yes
-```
-
-The flag works before any subcommand, and applies to the interface too:
+Earlier versions had a `--config` flag for pointing at a different file. There is
+no command line any more, so that is gone; what remains is the `MSM_CONFIG_DIR`
+environment variable, which moves the **whole** directory — config, tokens and
+log together:
 
 ```bash
-msm --config ~/streams/coding.toml
+MSM_CONFIG_DIR=~/streams/coding msm
+MSM_CONFIG_DIR=~/streams/gaming msm
 ```
 
-Saving from the form writes back to whichever file was loaded, not to the
-default one — otherwise `--config` would quietly copy your preset, and a copy of
-your client secrets, into the wrong place.
+Two shell aliases, and each kind of stream keeps its own preset, its own theme
+and its own layout. The trade compared with the old flag is that each directory
+also holds its own logins, so you authorise once per directory rather than once
+per machine.
 
-Two commands are exceptions worth knowing about: `msm init` always writes to the
-default location, and `msm paths` always prints the default location, regardless
-of `--config`.
+If that is more separation than you want, the alternative is to keep one config
+and change the title in the form before each stream. <kbd>Ctrl</kbd>+<kbd>S</kbd>
+saves it back, so the file always reflects the last stream you set up.
 
 ---
 
@@ -703,14 +859,14 @@ of `--config`.
 | File | Contents |
 |---|---|
 | `config.toml` | This file. Credentials and preset. |
-| `tokens.json` | OAuth access and refresh tokens, written with owner-only permissions. A refresh token is as good as a password; `msm logout` deletes the entry. |
+| `tokens.json` | OAuth access and refresh tokens, written with owner-only permissions. A refresh token is as good as a password; logging out under Config → Accounts deletes the entry. |
 | `msm.log` | Diagnostics. The interface owns the terminal, so nothing can be printed to the screen while it is running. |
 
 Stream keys are never written to any of them.
 
 ---
 
-* [Commands](commands.md) — the full command reference.
+* [Keys and actions](keys.md) — every binding, and the action names for `[keys]`.
 * [OBS and Aitum](obs-and-aitum.md) — why `reuse_stream` matters.
 * [Troubleshooting](troubleshooting.md) — when a setting does not behave.
 * [Back to the documentation index](README.md).
