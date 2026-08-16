@@ -16,6 +16,8 @@ different kinds of thing:
 * [`[twitch]`](#twitch)
 * [`[youtube]`](#youtube)
 * [`[general]`](#general)
+* [`[chat]`](#chat)
+* [`[appearance]`](#appearance)
 * [`[preset]`](#preset)
 * [A full worked example](#a-full-worked-example)
 * [The preset workflow](#the-preset-workflow)
@@ -51,14 +53,16 @@ consider setting those permissions yourself.
 
 ## Shape of the file
 
-Four sections, all optional. Anything you leave out falls back to the default
+Six sections, all optional. Anything you leave out falls back to the default
 listed below, so a partial file is valid and a completely empty file parses.
 
 ```toml
-[twitch]    # Twitch application credentials
-[youtube]   # Google OAuth credentials, plus stream-key reuse settings
-[general]   # settings that belong to neither platform
-[preset]    # your default stream settings
+[twitch]      # Twitch application credentials
+[youtube]     # Google OAuth credentials, plus stream-key reuse settings
+[general]     # settings that belong to neither platform
+[chat]        # the chat panes: scrollback, polling, quota, logging
+[appearance]  # colours, motion, mouse, notifications
+[preset]      # your default stream settings
 ```
 
 A syntax error is reported with the file path and a reminder to look for a
@@ -179,6 +183,174 @@ be rejected before they start.
 The listener binds both the IPv4 and the IPv6 loopback address on this port,
 because `localhost` resolves to `127.0.0.1` on some machines and `::1` on
 others. IPv4 is required; IPv6 is used when the host has it.
+
+---
+
+## `[chat]`
+
+Everything about the chat panes. Every value has a working default, so this
+section only needs to exist if you want to change one.
+
+```toml
+[chat]
+scrollback_limit = 1000          # messages kept per chat
+poll_interval_floor_ms = 1000    # fastest the YouTube poller may ever poll
+poll_interval_ceiling_ms = 0     # 0 = no ceiling
+daily_quota_units = 10000        # your project's daily YouTube API quota
+quota_reserve_percent = 10       # stop polling below this much quota left
+notifications = true             # desktop notifications for off-screen events
+chat_logging = false             # write every message to JSON Lines files
+chat_log_dir = ""                # empty = chatlog/ under the config directory
+chat_log_max_bytes = 10485760    # rotate a log file at this size
+chat_log_max_files = 5           # keep this many rotated files
+```
+
+### `scrollback_limit`
+
+How many messages each chat keeps in memory. Older ones are discarded, which
+is what stops a chat left open for an eight-hour stream growing without bound.
+Raising it costs memory in proportion; there is no other penalty.
+
+### The polling and quota settings
+
+These four only affect YouTube. Twitch chat arrives over a connection that
+pushes messages, so it costs nothing to keep open; YouTube's live chat has to
+be *polled*, and every poll spends part of a daily quota that Google grants per
+project.
+
+`poll_interval_floor_ms` is the fastest this program will ever poll. YouTube
+sends its own preferred interval with each response and that still wins
+whenever it is higher — the server's floor is absolute and this cannot go under
+it. `poll_interval_ceiling_ms` caps the interval instead; `0` means no cap.
+Raising both stretches the quota over a longer session at the cost of chat
+arriving less promptly.
+
+`quota_reserve_percent` keeps a slice of the quota back. When the estimate
+falls below it, polling stops but *sending* still works — running out entirely
+would leave you unable to answer your own chat, which is the worse of the two
+failures.
+
+> [!NOTE]
+> `daily_quota_units` describes what Google has given your project; it does not
+> request anything. If you have applied for a higher quota, set it here so the
+> reserve is calculated against the real figure.
+
+### The chat log settings
+
+With `chat_logging = true`, every message is appended to JSON Lines files —
+one object per line, which is a format both a script and a person can read.
+`msm export superchats` reads them back into a CSV of every paid event, with no
+network access and no API quota spent, which is what makes them worth keeping.
+Files rotate at `chat_log_max_bytes` and the oldest are pruned beyond
+`chat_log_max_files`.
+
+---
+
+## `[appearance]`
+
+Colours, motion, and the optional parts of the interface. Nothing in this
+section can stop a stream going live, and every value falls back to a sensible
+default rather than refusing to start — being locked out of your own stream by
+a mistyped colour would be an absurd trade.
+
+```toml
+[appearance]
+theme = "claude"              # one of the 57 built-in names, or "custom"
+animations = "fast"           # "fast", "reduced" or "off"
+splash = true                 # the animated start-up screen
+mouse = true                  # react to clicks and the wheel
+telemetry = false             # cpu / memory / frame rate in the tab bar
+toasts = true                 # pop-up notifications
+toast_seconds = 5             # how long one stays up
+terminal_background = false   # repaint the terminal window's own background
+```
+
+### `theme`
+
+`msm profile list` prints every name. A name that does not exist logs a warning
+and falls back to the default rather than failing to start, so a typo costs a
+line in the log and not your stream.
+
+The interface half of this is <kbd>Ctrl</kbd>+<kbd>T</kbd>, which previews each
+palette live — the whole screen redraws as you move the selection, because
+colours cannot be judged from a row of swatches.
+
+### `[appearance.custom_theme]`
+
+With `theme = "custom"`, these nine colours are used. Each is a `#rrggbb`
+value, and anything left out falls back to the default palette's colour for
+that role — so you can change one and inherit the other eight.
+
+```toml
+[appearance.custom_theme]
+background = "#1a1523"   # the page behind everything
+surface    = "#241d30"   # a pane raised above that page
+foreground = "#f2ede4"   # ordinary readable text
+muted      = "#948f9c"   # text you can ignore: hints, timestamps
+border     = "#4a4358"   # the lines around panes
+accent     = "#d97757"   # the one colour that draws the eye
+warning    = "#e0a72e"   # needs attention, nothing is broken
+error      = "#e0685a"   # something is broken
+success    = "#7fbf8e"   # something worked
+```
+
+`msm profile set custom --accent "#ff0055"` writes one of these without
+opening the file.
+
+> [!TIP]
+> Every built-in palette is checked by a test to keep its body text at or above
+> the 4.5:1 contrast ratio the WCAG accessibility guidelines set for readable
+> text. A hand-written custom theme is not checked, so if text becomes hard to
+> read, that is the first thing to look at.
+
+### `animations`
+
+`fast`, `reduced` or `off`, cycled in the interface with
+<kbd>Alt</kbd>+<kbd>A</kbd>.
+
+`reduced` is not the same animation played slowly — that would make effects
+last *longer*, which is the opposite of what asking for less motion means. It
+takes bigger steps at a slower rate, so an effect finishes in about the same
+time having drawn roughly a third of the frames.
+
+`off` draws every animated element at its finished frame. Nothing is hidden by
+the setting; things simply do not move.
+
+### `telemetry`
+
+Shows the processor share, resident memory and drawn frame rate at the
+right-hand end of the tab bar (<kbd>Alt</kbd>+<kbd>T</kbd>). While it is off,
+nothing is measured at all — reading the numbers once a second for a display
+nobody is looking at is exactly the sort of cost this is meant to expose.
+
+Processor time and memory are read from `/proc` and are Linux-only; elsewhere
+the frame rate is shown by itself.
+
+### `toasts` and `toast_seconds`
+
+Notifications appear in the bottom-right corner and expire on their own. A
+warning stays up twice as long as a notice and an error three times, since an
+error is likelier to be the thing you have to act on.
+<kbd>Alt</kbd>+<kbd>M</kbd> opens the full session history, so nothing that
+flashed past while you were reading chat is lost.
+
+`toasts = false` stops them appearing. The activity log still records
+everything either way, and the history is still there.
+
+`toast_seconds` is clamped to between 1 and 60: a zero would make messages
+vanish before they could be read.
+
+### `terminal_background`
+
+A terminal window is almost always bigger than the content in it, and every
+cell this program has not drawn keeps whatever background your terminal itself
+was configured with — so a light theme ends up framed in dark. Turning this on
+asks the terminal to change its own background to match the theme, which
+reaches the parts of the window this program never draws to.
+
+It is off by default because it is not always wanted: a terminal background is
+often deliberately transparent or blurred, and this replaces that with a solid
+colour. It is undone when `msm` exits.
 
 ---
 

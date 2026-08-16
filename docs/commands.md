@@ -18,6 +18,9 @@ go-lives, printing a stream key, and housekeeping.
 | [`msm categories <QUERY>`](#msm-categories-query) | Search Twitch's category list. |
 | [`msm streams`](#msm-streams) | List the stream keys on your YouTube channel. |
 | [`msm cleanup`](#msm-cleanup) | Find, and optionally delete, YouTube broadcasts that never went live. |
+| [`msm doctor`](#msm-doctor) | Check the setup and report anything that would stop a stream. |
+| [`msm setup <PLATFORM>`](#msm-setup-platform) | Fill in one platform's API credentials from the command line. |
+| [`msm profile`](#msm-profile) | Look at and change the colour theme. |
 | [`msm init`](#msm-init) | Write a commented starter config file. |
 | [`msm paths`](#msm-paths) | Show where config, tokens and logs live. |
 
@@ -401,6 +404,141 @@ keep it.
 With `--yes`, each deletion is reported individually and one that refuses to be
 deleted does not stop the rest. The command fails only if none of them could be
 deleted.
+
+---
+
+## `msm doctor`
+
+```bash
+msm doctor
+```
+
+Checks everything that has to be right for a stream to start, and says what is
+not. Run it first when something is not working.
+
+```
+msm doctor
+
+  [ ok ]  config file: /home/you/.config/msm/config.toml
+  [ ok ]  Twitch credentials configured
+  [warn]  YouTube has no client id and secret
+          Run `msm setup youtube`, or fill them in on the interface's first
+          screen. Skip this if you do not stream to YouTube.
+  [ ok ]  Twitch — token valid for 3 hours
+  [ ok ]  clipboard: wl-copy will copy the stream key
+  [ ok ]  theme: nord
+  [ ok ]  terminal: 24-bit colour
+  [ ok ]  log file: /home/you/.config/msm/msm.log
+
+Nothing is broken.
+```
+
+The checks run in the order things matter in — a missing client id makes the
+login question moot, and a login you do not have makes the stream key question
+moot — so the first `[FAIL]` is usually the only one worth acting on. Every
+warning says what to *do*, not only what is wrong.
+
+**`[warn]` and `[FAIL]` mean different things.** A fresh install with no logins
+yet is unfinished, not broken, and a tool that reports that in red teaches you
+to ignore red. Only a `[FAIL]` is counted in the closing summary.
+
+Two checks are worth explaining:
+
+* **clipboard** — stream keys are copied, never displayed, so this reports
+  which helper program will do it. It distinguishes "not installed" from
+  "installed but with no display to talk to", which is the normal state over
+  ssh; in that case nothing needs installing and copying falls back to a
+  terminal escape sequence (OSC 52), answered by the terminal on your own desk.
+* **terminal** — themes are written as exact 24-bit colours. A terminal that
+  does not advertise `COLORTERM=truecolor` will approximate them.
+
+The exit status is `0` when nothing failed and non-zero when something did, so
+this works in a script — `msm doctor && msm go` will not go live on a setup
+that has just been reported as broken. Warnings do not affect it, for the same
+reason they are not printed as failures.
+
+---
+
+## `msm setup <PLATFORM>`
+
+```bash
+msm setup twitch
+msm setup youtube
+msm setup twitch --client-id "abc123"
+```
+
+Fills in one platform's API credentials and saves them to `config.toml`. It
+prints the developer-console URL and the exact redirect URL to register before
+asking for anything.
+
+The interface asks for these itself on first run and that remains the easier
+path. This exists for the times a full-screen interface is not available at
+all: a headless machine over ssh, a container, or a scripted install.
+
+One platform at a time — `all` is meaningful for `login` and `logout`, but a
+single pair of credentials cannot belong to two platforms.
+
+> [!WARNING]
+> `--client-secret` exists for scripting, but a secret passed as an argument
+> ends up in your shell history and in the process list, where anyone on the
+> machine can read it. Leaving the flag off and typing it at the prompt does
+> not: the prompt hides what you type.
+
+Where terminal echo cannot be turned off (`stty` is unavailable), the prompt
+says so before you type rather than silently showing the secret.
+
+---
+
+## `msm profile`
+
+```bash
+msm profile list
+msm profile show [NAME]
+msm profile set <NAME> [--accent "#rrggbb" ...]
+```
+
+The colour theme, from the command line. The interface half is
+<kbd>Ctrl</kbd>+<kbd>T</kbd>, which previews each palette live.
+
+**`list`** prints all 57 built-in names plus `custom`, marking the one in use:
+
+```
+  nord
+* gruvbox
+  dracula
+```
+
+**`show`** prints a theme's nine colours. With no name it shows the one in use.
+
+```
+$ msm profile show nord
+nord
+  background  #2e3440
+  foreground  #eceff4
+  accent      #88c0d0
+  ...
+```
+
+**`set`** switches theme, or writes your own colours:
+
+```bash
+msm profile set gruvbox                       # a built-in one
+msm profile set custom --accent "#ff0055"     # one colour, keeping the rest
+```
+
+Any colour flag writes into `[appearance.custom_theme]`, so you can change one
+role and inherit the other eight from the default palette.
+
+Two things are refused rather than quietly accepted:
+
+* **a name that is not a real theme**, because writing it to the config file
+  would produce a setup that falls back to the default at every start-up
+  without ever explaining why;
+* **a colour flag on a built-in theme**, because the built-ins are fixed —
+  `custom` is the one that takes overrides.
+
+A value that is not a `#rrggbb` colour is refused too, naming the role it was
+given for.
 
 ---
 

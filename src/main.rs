@@ -268,6 +268,12 @@ async fn main() -> Result<()> {
         Some(Commands::Logout { platform }) => return cmd_logout(platform),
         Some(Commands::Init) => return cmd_init(),
         Some(Commands::Paths) => return cmd_paths(),
+        // `doctor` is the command people are told to run when something is
+        // wrong, and a config file that cannot be read is exactly such a
+        // thing — so it must not be behind the config parse that would fail
+        // on it. It loads the config itself and reports a failure to do so as
+        // one of its checks.
+        Some(Commands::Doctor) => return cmd_doctor(cli.config.as_deref()),
         _ => {}
     }
 
@@ -280,7 +286,6 @@ async fn main() -> Result<()> {
         None | Some(Commands::Tui) => ui::run(config).await,
         Some(Commands::Login { platform, add }) => cmd_login(&config, &platform, add).await,
         Some(Commands::Status) => cmd_status(&config),
-        Some(Commands::Doctor) => cmd_doctor(&config),
         Some(Commands::Setup {
             platform,
             client_id,
@@ -297,7 +302,10 @@ async fn main() -> Result<()> {
         Some(Commands::Streams { show_keys }) => cmd_streams(&config, show_keys).await,
         Some(Commands::Cleanup { yes }) => cmd_cleanup(&config, yes).await,
         Some(Commands::Export { what, out }) => cmd_export(&config, &what, out.as_deref()),
-        Some(Commands::Logout { .. }) | Some(Commands::Init) | Some(Commands::Paths) => {
+        Some(Commands::Logout { .. })
+        | Some(Commands::Init)
+        | Some(Commands::Paths)
+        | Some(Commands::Doctor) => {
             unreachable!("dispatched before the config is parsed")
         }
     }
@@ -990,14 +998,37 @@ impl Check {
 /// login question moot, and a login you do not have makes the stream key
 /// question moot. Reporting them in that order means the first `[FAIL]` is
 /// usually the only one worth acting on.
-fn cmd_doctor(config: &Config) -> Result<()> {
+fn cmd_doctor(config_path: Option<&std::path::Path>) -> Result<()> {
     let mut checks = Vec::new();
+
+    // Load the config here rather than taking one already loaded. A file with
+    // a syntax error in it is one of the things most worth reporting, and a
+    // `doctor` that could not run in that case would be useless precisely
+    // when it is needed. Everything after this point works from the defaults
+    // when the file could not be read, so the remaining checks still run.
+    let config = match config_path {
+        Some(path) => Config::load_from(path),
+        None => Config::load(),
+    };
+    let config = match config {
+        Ok(config) => config,
+        Err(err) => {
+            checks.push(Check::Fail(
+                "the config file could not be read".to_string(),
+                format!(
+                    "{err:#}\n          Fix the file by hand, or move it aside and run \
+                     `msm init` for a fresh one. The checks below assume the defaults."
+                ),
+            ));
+            Config::default()
+        }
+    };
 
     // Where things live, and whether they can be written.
     match paths::config_file() {
         Ok(path) => {
             if path.exists() {
-                checks.push(Check::Ok(format!("config file: {}", path.display())));
+                checks.push(Check::Ok(format!("config file found: {}", path.display())));
             } else {
                 checks.push(Check::Warn(
                     format!("no config file at {}", path.display()),
@@ -1121,10 +1152,16 @@ fn cmd_doctor(config: &Config) -> Result<()> {
     println!();
     if failures == 0 {
         println!("Nothing is broken.");
-    } else {
-        println!("{failures} thing(s) need fixing before this will work.");
+        return Ok(());
     }
-    Ok(())
+
+    // Exit non-zero so this is usable in a script — `msm doctor && msm go`
+    // should not go live on a setup that has just been reported as broken.
+    // Warnings deliberately do not count: a fresh install with no logins yet
+    // is unfinished rather than broken, and failing on that would make the
+    // exit status useless for the case it exists for.
+    let plural = if failures == 1 { "" } else { "s" };
+    bail!("{failures} check{plural} above marked [FAIL]; fix those before streaming")
 }
 
 /// Fill in one platform's API credentials from the command line.
@@ -1792,5 +1829,35 @@ mod tests {
         // credentials cannot be set for two platforms at once.
         let parsed = parse_platform_arg("all").expect("all is a valid platform argument");
         assert_eq!(parsed.len(), 2, "so `msm setup all` has to be rejected");
+    }
+
+    /// `msm doctor` has to survive the very thing people run it for. A config
+    /// file that cannot be parsed must be reported as a failed check, with
+    /// the rest of the checks still running against the defaults — not turned
+    /// into an error that stops the command before it prints anything.
+    #[test]
+    fn the_doctor_runs_against_a_broken_config_file() {
+        let dir = std::env::temp_dir().join(format!("msm-doctor-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("broken.toml");
+        std::fs::write(&path, "this is not [[[ valid toml").expect("a written file");
+
+        // It fails (there is a genuine failure to report) rather than
+        // panicking or refusing to run.
+        let result = cmd_doctor(Some(&path));
+        assert!(result.is_err(), "a broken config must be reported");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A setup that is merely unfinished — no logins yet — is not a failure,
+    /// or the exit status would be useless for the case it exists for.
+    #[test]
+    fn an_unfinished_setup_is_warnings_rather_than_failures() {
+        let checks = [
+            Check::Warn("no platform is authorised".into(), "log in".into()),
+            Check::Ok("config file found".into()),
+        ];
+        assert_eq!(checks.iter().filter(|check| check.failed()).count(), 0);
     }
 }
