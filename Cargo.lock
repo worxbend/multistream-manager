@@ -1383,6 +1383,7 @@ dependencies = [
  "directories",
  "fs4",
  "futures-util",
+ "libc",
  "open",
  "rand 0.8.7",
  "ratatui",

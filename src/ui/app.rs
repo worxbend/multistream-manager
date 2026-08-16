@@ -829,7 +829,7 @@ impl App {
                     }
                 }
             }
-            Update::Snapshot(state) => {
+            Update::Snapshot(state) | Update::CommandDone(state) => {
                 let connection = self.obs.connection.clone();
                 self.obs = *state;
                 // The snapshot is built by the connection task, which knows

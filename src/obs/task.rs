@@ -79,8 +79,17 @@ pub enum Command {
 pub enum Update {
     /// The connection's state changed.
     Connection(Connection),
-    /// A complete replacement for the cached state, after a refresh.
+    /// A complete replacement for the cached state, from the periodic poll
+    /// or a refresh.
     Snapshot(Box<ObsState>),
+    /// A command finished, with the state as it stood *after* it.
+    ///
+    /// Separate from `Snapshot` because the poll runs once a second and its
+    /// snapshot can easily reach a caller between a command being sent and
+    /// its answer arriving — which would have somebody reading the state
+    /// from before their own change. Anything waiting for the result of a
+    /// command has to wait for this.
+    CommandDone(Box<ObsState>),
     /// One change, from an OBS event.
     Event(Event),
     /// A command could not be carried out. The interface shows this; it is
@@ -802,6 +811,12 @@ async fn run_command(
                 requests::set_current_program_scene(&name),
             )
             .await?;
+            // OBS answers "done" before it announces the change, and the
+            // announcement is a separate event that may arrive at any point
+            // afterwards. Recording the new scene here means the answer to
+            // "what did that do?" is right immediately, rather than right a
+            // moment later.
+            state.current_scene = Some(name);
         }
         Command::ToggleMute(target) => {
             let name = resolve_audio(state, &target)?;
@@ -813,6 +828,7 @@ async fn run_command(
                 requests::toggle_input_mute(&name),
             )
             .await?;
+            reread_input(sink, source, pending, state, &name).await;
         }
         Command::SetMute { input, muted } => {
             let name = resolve_audio(state, &input)?;
@@ -824,6 +840,7 @@ async fn run_command(
                 requests::set_input_mute(&name, muted),
             )
             .await?;
+            reread_input(sink, source, pending, state, &name).await;
         }
         Command::SetVolume { input, multiplier } => {
             let name = resolve_audio(state, &input)?;
@@ -835,6 +852,7 @@ async fn run_command(
                 requests::set_input_volume(&name, multiplier),
             )
             .await?;
+            reread_input(sink, source, pending, state, &name).await;
         }
         Command::SetProfile(name) => {
             ask(
@@ -845,6 +863,7 @@ async fn run_command(
                 requests::set_current_profile(&name),
             )
             .await?;
+            state.current_profile = Some(name);
         }
         Command::SetSceneCollection(name) => {
             ask(
@@ -859,11 +878,17 @@ async fn run_command(
             refresh_scenes(sink, source, pending, params, state).await?;
             refresh_audio(sink, source, pending, params, state).await?;
         }
+        // These are toggles, so what they produced can only be found out by
+        // asking. Polling immediately rather than waiting for the
+        // once-a-second tick is what lets `msm obs stream` report whether the
+        // stream is now on or off, rather than what it was a moment ago.
         Command::ToggleStream => {
             ask(sink, source, pending, state, requests::toggle_stream()).await?;
+            poll_status(sink, source, pending, state).await?;
         }
         Command::ToggleRecord => {
             ask(sink, source, pending, state, requests::toggle_record()).await?;
+            poll_status(sink, source, pending, state).await?;
         }
         Command::ToggleRecordPause => {
             ask(
@@ -874,6 +899,7 @@ async fn run_command(
                 requests::toggle_record_pause(),
             )
             .await?;
+            poll_status(sink, source, pending, state).await?;
         }
         Command::Refresh => {
             refresh_all(sink, source, pending, params, state).await?;
@@ -883,8 +909,51 @@ async fn run_command(
         Command::Reconnect => return Err(anyhow::Error::new(TransportGone)),
     }
 
-    let _ = updates.send(Update::Snapshot(Box::new(state.clone())));
+    let _ = updates.send(Update::CommandDone(Box::new(state.clone())));
     Ok(())
+}
+
+/// Re-read one input's mute state and level.
+///
+/// OBS does send events for both, but they arrive on their own schedule —
+/// after the response, usually, and not at all if the value did not actually
+/// change. Asking directly means the state is right the moment the command
+/// reports back, which is what anything waiting on that answer needs.
+///
+/// A failure here is deliberately ignored: the command itself succeeded, the
+/// event or the next poll will correct the cache, and turning "I could not
+/// re-read this" into "your mute failed" would be a lie.
+async fn reread_input(
+    sink: &mut Sink,
+    source: &mut Source,
+    pending: &mut HashMap<String, oneshot::Sender<Result<serde_json::Value>>>,
+    state: &mut ObsState,
+    name: &str,
+) {
+    if let Ok(mute) = ask(sink, source, pending, state, requests::get_input_mute(name)).await {
+        let muted = mute.get("inputMuted").and_then(|value| value.as_bool());
+        if let Some(input) = state.audio.iter_mut().find(|input| input.name == name) {
+            input.muted = muted;
+        }
+    }
+    if let Ok(volume) = ask(
+        sink,
+        source,
+        pending,
+        state,
+        requests::get_input_volume(name),
+    )
+    .await
+    {
+        let mul = volume
+            .get("inputVolumeMul")
+            .and_then(|value| value.as_f64());
+        let db = volume.get("inputVolumeDb").and_then(|value| value.as_f64());
+        if let Some(input) = state.audio.iter_mut().find(|input| input.name == name) {
+            input.volume_mul = mul;
+            input.volume_db = db;
+        }
+    }
 }
 
 /// Turn what somebody typed into the scene name OBS knows.
@@ -1452,5 +1521,52 @@ mod tests {
         assert!(failures >= 1, "a failure to connect should be reported");
 
         drop(handle.commands);
+    }
+
+    /// A command has to report the state *after* itself. The periodic poll
+    /// runs once a second and its snapshot can easily arrive between a
+    /// command being sent and its answer, so anything waiting on a result
+    /// must be able to tell the two apart.
+    #[tokio::test]
+    async fn a_command_reports_the_state_it_produced_not_the_one_before_it() {
+        let (url, server) = fake_obs(None).await;
+        let (tx, mut updates) = mpsc::unbounded_channel();
+        let handle = spawn(params(url, None), tx);
+
+        let before = first_snapshot(&mut updates)
+            .await
+            .expect("a first snapshot");
+        assert_eq!(before.current_scene.as_deref(), Some("Main"));
+
+        handle
+            .commands
+            .send(Command::SetScene("Break".to_string()))
+            .await
+            .expect("the command is accepted");
+
+        // Specifically the command's own result, ignoring any poll snapshot
+        // that arrives alongside it.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut done = None;
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(2), updates.recv()).await {
+                Ok(Some(Update::CommandDone(state))) => {
+                    done = Some(state);
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
+        }
+
+        let done = done.expect("the command reports its own result");
+        assert_eq!(
+            done.current_scene.as_deref(),
+            Some("Break"),
+            "the result must reflect the change that was just made"
+        );
+
+        drop(handle.commands);
+        server.abort();
     }
 }

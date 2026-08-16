@@ -99,6 +99,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 
+# One system call, and only on Unix: restoring the default handling of a
+# closed pipe. Without it, `msm obs status | head` ends in a Rust panic
+# message rather than quietly, the way every other Unix tool does. libc is
+# already in the dependency tree several times over, so naming it directly
+# costs nothing.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "test-util"] }
 

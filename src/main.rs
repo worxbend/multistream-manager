@@ -189,6 +189,16 @@ enum Commands {
         client_secret: Option<String>,
     },
 
+    /// Control OBS Studio.
+    ///
+    /// The interface's OBS tab (`alt+4`) is the comfortable way to do this.
+    /// These exist for scripting: a hotkey on a stream deck, a shell alias,
+    /// or a scene change from another program.
+    Obs {
+        #[command(subcommand)]
+        command: ObsCommand,
+    },
+
     /// Look at and change the colour theme.
     Profile {
         #[command(subcommand)]
@@ -200,6 +210,74 @@ enum Commands {
 
     /// Show where the config, token and log files live.
     Paths,
+}
+
+#[derive(Subcommand)]
+enum ObsCommand {
+    /// Show what OBS is doing.
+    Status,
+
+    /// List the scenes, marking the one on air.
+    Scenes,
+
+    /// Switch to a scene, by name, alias or shortcut.
+    Scene {
+        /// The scene to switch to.
+        target: String,
+    },
+
+    /// List the audio inputs with their mute state and level.
+    Audio,
+
+    /// Mute an audio input.
+    Mute {
+        /// The input, by name, alias or shortcut.
+        target: String,
+    },
+
+    /// Unmute an audio input.
+    Unmute {
+        /// The input, by name, alias or shortcut.
+        target: String,
+    },
+
+    /// Flip an audio input between muted and unmuted.
+    ///
+    /// Prefer this to `mute`/`unmute` for a hotkey: it cannot act on a stale
+    /// idea of which way round the input currently is.
+    ToggleMute {
+        /// The input, by name, alias or shortcut.
+        target: String,
+    },
+
+    /// Set an audio input's level, as a percentage of unity gain.
+    Volume {
+        /// The input, by name, alias or shortcut.
+        target: String,
+        /// 0 to 100.
+        percent: u8,
+    },
+
+    /// Start streaming if stopped, stop it if started.
+    Stream,
+
+    /// Start recording if stopped, stop it if started.
+    Record,
+
+    /// Pause an in-progress recording, or resume a paused one.
+    PauseRecording,
+
+    /// List profiles, or switch to one.
+    Profiles {
+        /// The profile to switch to. Omit to list them.
+        target: Option<String>,
+    },
+
+    /// List scene collections, or switch to one.
+    Collections {
+        /// The collection to switch to. Omit to list them.
+        target: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -253,8 +331,34 @@ struct ProfileColors {
     success: Option<String>,
 }
 
+/// Let a closed pipe end this program quietly.
+///
+/// Rust starts every program with the "broken pipe" signal ignored, so a
+/// write to a pipe nobody is reading returns an error instead of killing the
+/// process — and `println!` turns that error into a panic. The visible effect
+/// is that `msm obs status | head -3` prints three lines and then a panic
+/// message, where `ls | head -3` simply stops.
+///
+/// Restoring the default handling makes this behave like every other command
+/// in a pipeline. It is done before anything is printed, and only on Unix,
+/// where that is what the convention is.
+#[cfg(unix)]
+fn end_quietly_on_a_closed_pipe() {
+    // SAFETY: `signal` is safe to call here — this runs before any thread has
+    // been started, and restoring a signal's default disposition touches no
+    // memory this program owns.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn end_quietly_on_a_closed_pipe() {}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    end_quietly_on_a_closed_pipe();
+
     let cli = Cli::parse();
 
     // Keep the guard alive for the whole run so buffered log lines get flushed.
@@ -292,6 +396,7 @@ async fn main() -> Result<()> {
             client_id,
             client_secret,
         }) => cmd_setup(config, &platform, client_id, client_secret),
+        Some(Commands::Obs { command }) => cmd_obs(&config, command).await,
         Some(Commands::Profile { command }) => cmd_profile(config, command),
         Some(Commands::Go {
             platforms,
@@ -1364,6 +1469,330 @@ fn cmd_profile(mut config: Config, command: ProfileCommand) -> Result<()> {
             println!("Theme set to {}.", config.appearance.theme);
             Ok(())
         }
+    }
+}
+
+/// `msm obs …` — drive OBS from the command line.
+///
+/// Each invocation makes its own connection, does one thing and exits. That
+/// is the right shape for a hotkey or a script, and it is why this does not
+/// need the background daemon the reference implementation has: there is no
+/// long-lived state to share between invocations, because there is no
+/// long-lived invocation.
+async fn cmd_obs(config: &Config, command: ObsCommand) -> Result<()> {
+    use obs::task::{Command as Action, Update};
+
+    if !config.obs.enabled {
+        bail!("OBS control is turned off. Set `enabled = true` under `[obs]` in config.toml.");
+    }
+
+    let (updates_tx, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let handle = obs::task::spawn(
+        obs::task::Params {
+            url: config.obs.url(),
+            password: config.obs.password(),
+            scene_labels: config.obs.scene_labels(),
+            audio_labels: config.obs.audio_labels(),
+        },
+        updates_tx,
+    );
+
+    // Wait for the first snapshot, which is what "connected" means in
+    // practice: OBS has answered every question this program knows how to
+    // ask. A failure to connect is reported once rather than retried — a
+    // command-line invocation has somebody waiting for it, and silently
+    // retrying for thirty seconds would look like a hang.
+    let state = match wait_for_connection(&mut updates).await {
+        Ok(state) => state,
+        Err(err) => {
+            drop(handle.commands);
+            return Err(err);
+        }
+    };
+
+    // The commands that only read, and need nothing further.
+    let action = match &command {
+        ObsCommand::Status => {
+            print_obs_status(&state);
+            drop(handle.commands);
+            return Ok(());
+        }
+        ObsCommand::Scenes => {
+            for scene in &state.scenes {
+                let live = state.current_scene.as_deref() == Some(scene.name.as_str());
+                let marker = if live { "*" } else { " " };
+                match &scene.alias {
+                    Some(alias) => println!("{marker} {alias}  ({})", scene.name),
+                    None => println!("{marker} {}", scene.name),
+                }
+            }
+            drop(handle.commands);
+            return Ok(());
+        }
+        ObsCommand::Audio => {
+            for input in &state.audio {
+                print_audio_line(input);
+            }
+            drop(handle.commands);
+            return Ok(());
+        }
+        ObsCommand::Profiles { target: None } => {
+            print_list(&state.profiles, state.current_profile.as_deref());
+            drop(handle.commands);
+            return Ok(());
+        }
+        ObsCommand::Collections { target: None } => {
+            print_list(
+                &state.scene_collections,
+                state.current_scene_collection.as_deref(),
+            );
+            drop(handle.commands);
+            return Ok(());
+        }
+
+        // The commands that change something.
+        ObsCommand::Scene { target } => Action::SetScene(target.clone()),
+        ObsCommand::Mute { target } => Action::SetMute {
+            input: target.clone(),
+            muted: true,
+        },
+        ObsCommand::Unmute { target } => Action::SetMute {
+            input: target.clone(),
+            muted: false,
+        },
+        ObsCommand::ToggleMute { target } => Action::ToggleMute(target.clone()),
+        ObsCommand::Volume { target, percent } => Action::SetVolume {
+            input: target.clone(),
+            // Above unity gain is amplification, which is a deliberate act
+            // with real consequences for how a stream sounds. It is not
+            // something to reach by mistyping a number here.
+            multiplier: f64::from((*percent).min(100)) / 100.0,
+        },
+        ObsCommand::Stream => Action::ToggleStream,
+        ObsCommand::Record => Action::ToggleRecord,
+        ObsCommand::PauseRecording => Action::ToggleRecordPause,
+        ObsCommand::Profiles { target: Some(name) } => Action::SetProfile(name.clone()),
+        ObsCommand::Collections { target: Some(name) } => Action::SetSceneCollection(name.clone()),
+    };
+
+    handle
+        .commands
+        .send(action)
+        .await
+        .context("sending the command to OBS")?;
+
+    // Wait for the answer. A snapshot means it worked; a `CommandFailed`
+    // means OBS refused it, and that has to be an error rather than a line on
+    // stdout so a script can tell.
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(update) = updates.recv().await {
+            match update {
+                Update::CommandFailed(reason) => return Some(Err(reason)),
+                // Specifically the command's own result, not whichever
+                // periodic snapshot happens to arrive first — that one could
+                // predate the change being waited for.
+                Update::CommandDone(state) => return Some(Ok(state)),
+                _ => continue,
+            }
+        }
+        None
+    })
+    .await
+    .context("OBS did not answer within ten seconds")?;
+
+    drop(handle.commands);
+
+    match outcome {
+        Some(Ok(state)) => {
+            print_obs_change(&command, &state);
+            Ok(())
+        }
+        Some(Err(reason)) => bail!("{reason}"),
+        None => bail!("the connection to OBS ended before it answered"),
+    }
+}
+
+/// Wait for the connection to come up, or report why it did not.
+async fn wait_for_connection(
+    updates: &mut tokio::sync::mpsc::UnboundedReceiver<obs::task::Update>,
+) -> Result<Box<obs::state::ObsState>> {
+    use obs::state::Connection;
+    use obs::task::Update;
+
+    let waiting = async {
+        while let Some(update) = updates.recv().await {
+            match update {
+                Update::Snapshot(state) => return Some(Ok(state)),
+                Update::Connection(Connection::Failed(reason)) => return Some(Err(reason)),
+                _ => continue,
+            }
+        }
+        None
+    };
+
+    match tokio::time::timeout(std::time::Duration::from_secs(10), waiting).await {
+        Ok(Some(Ok(state))) => Ok(state),
+        Ok(Some(Err(reason))) => bail!(
+            "could not reach OBS: {reason}\n\nIs OBS running, with its WebSocket server \
+             turned on under Tools → WebSocket Server Settings?"
+        ),
+        Ok(None) => bail!("the connection to OBS ended before it was established"),
+        Err(_) => bail!("OBS did not answer within ten seconds"),
+    }
+}
+
+/// Say what changed, so a scripted invocation leaves a record of what it did.
+fn print_obs_change(command: &ObsCommand, state: &obs::state::ObsState) {
+    match command {
+        ObsCommand::Scene { .. } => println!(
+            "Scene: {}",
+            state.current_scene.as_deref().unwrap_or("unknown")
+        ),
+        ObsCommand::Mute { target }
+        | ObsCommand::Unmute { target }
+        | ObsCommand::ToggleMute { target } => match state.find_audio(target) {
+            Some(input) => println!(
+                "{}: {}",
+                input.label(),
+                match input.muted {
+                    Some(true) => "muted",
+                    Some(false) => "unmuted",
+                    None => "unknown",
+                }
+            ),
+            None => println!("Done."),
+        },
+        ObsCommand::Volume { target, .. } => match state.find_audio(target) {
+            Some(input) => println!(
+                "{}: {}%",
+                input.label(),
+                input
+                    .volume_percent()
+                    .map(|percent| percent.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            ),
+            None => println!("Done."),
+        },
+        ObsCommand::Stream => println!("Streaming: {}", if state.streaming { "on" } else { "off" }),
+        ObsCommand::Record | ObsCommand::PauseRecording => println!(
+            "Recording: {}",
+            match (state.recording, state.record_paused) {
+                (true, true) => "paused",
+                (true, false) => "on",
+                (false, _) => "off",
+            }
+        ),
+        ObsCommand::Profiles { .. } => println!(
+            "Profile: {}",
+            state.current_profile.as_deref().unwrap_or("unknown")
+        ),
+        ObsCommand::Collections { .. } => println!(
+            "Scene collection: {}",
+            state
+                .current_scene_collection
+                .as_deref()
+                .unwrap_or("unknown")
+        ),
+        _ => println!("Done."),
+    }
+}
+
+fn print_obs_status(state: &obs::state::ObsState) {
+    println!(
+        "OBS {} (websocket {})",
+        state.obs_version.as_deref().unwrap_or("unknown"),
+        state.websocket_version.as_deref().unwrap_or("unknown")
+    );
+    println!(
+        "  scene       {}",
+        state.current_scene.as_deref().unwrap_or("—")
+    );
+    println!(
+        "  profile     {}",
+        state.current_profile.as_deref().unwrap_or("—")
+    );
+    println!(
+        "  collection  {}",
+        state.current_scene_collection.as_deref().unwrap_or("—")
+    );
+    println!(
+        "  streaming   {}",
+        describe_output(state.streaming, false, state.stream_duration)
+    );
+    println!(
+        "  recording   {}",
+        describe_output(state.recording, state.record_paused, state.record_duration)
+    );
+
+    if !state.audio.is_empty() {
+        println!("\nAudio");
+        for input in &state.audio {
+            print!("  ");
+            print_audio_line(input);
+        }
+    }
+
+    if let Some(stats) = &state.stats {
+        println!("\nPerformance");
+        println!("  cpu         {:.1}%", stats.cpu_usage_percent);
+        println!("  memory      {:.0} MB", stats.memory_usage_mb);
+        println!(
+            "  disk free   {:.1} GB",
+            stats.available_disk_space_mb / 1024.0
+        );
+        println!("  fps         {:.0}", stats.active_fps);
+        println!(
+            "  frames      {} skipped by the encoder ({:.2}%), {} dropped on send ({:.2}%)",
+            stats.render_skipped_frames,
+            stats.render_skipped_percent(),
+            stats.output_skipped_frames,
+            stats.output_skipped_percent(),
+        );
+    }
+}
+
+fn describe_output(active: bool, paused: bool, duration: Option<std::time::Duration>) -> String {
+    if !active {
+        return "off".to_string();
+    }
+    let elapsed = duration
+        .map(|duration| {
+            let total = duration.as_secs();
+            format!(
+                " for {}:{:02}:{:02}",
+                total / 3600,
+                (total % 3600) / 60,
+                total % 60
+            )
+        })
+        .unwrap_or_default();
+    format!("{}{elapsed}", if paused { "paused" } else { "on" })
+}
+
+fn print_audio_line(input: &obs::state::AudioInput) {
+    let state = match input.muted {
+        Some(true) => "muted  ",
+        Some(false) => "live   ",
+        None => "unknown",
+    };
+    let level = input
+        .volume_percent()
+        .map(|percent| format!("{percent:>3}%"))
+        .unwrap_or_else(|| "   —".to_string());
+    match &input.alias {
+        Some(alias) => println!("{state} {level}  {alias}  ({})", input.name),
+        None => println!("{state} {level}  {}", input.name),
+    }
+}
+
+fn print_list(items: &[String], current: Option<&str>) {
+    for item in items {
+        let marker = if Some(item.as_str()) == current {
+            "*"
+        } else {
+            " "
+        };
+        println!("{marker} {item}");
     }
 }
 
