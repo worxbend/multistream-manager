@@ -260,6 +260,14 @@ pub struct App {
 
     /// What this process is costing the machine, when it is being shown.
     pub telemetry: crate::telemetry::Telemetry,
+    /// The bindings in force, built from the defaults plus `[keys]`.
+    pub keymap: crate::keys::Keymap,
+    /// Keys pressed so far towards a chord, e.g. leader then `o` while
+    /// waiting for the third key of `<Leader>os`.
+    pub pending_keys: Vec<crate::keys::Key>,
+    /// Whether the which-key popup is showing every binding at once.
+    pub which_key_all: bool,
+
     /// The command palette, while it is open.
     pub command_palette: Option<super::command_palette::CommandPalette>,
     /// The theme picker, while it is open.
@@ -333,6 +341,12 @@ impl App {
             setup_inputs.insert(field, TextInput::new(existing));
         }
 
+        // Build the keymap before anything can be pressed. A binding that
+        // cannot be read is reported and skipped rather than refusing to
+        // start: being locked out of your own interface by a typo in a key
+        // name would be a poor trade.
+        let (keymap, key_problems) = config.keys.keymap();
+
         // Resolve the theme up front. Publishing it is `draw`'s job — it does
         // that once per frame from whatever palette this `App` holds — so
         // there is exactly one place in the program that changes the colours
@@ -345,7 +359,10 @@ impl App {
                 "unknown theme name; using the default palette"
             );
         }
-        Self {
+        let mut app = Self {
+            keymap,
+            pending_keys: Vec::new(),
+            which_key_all: false,
             obs_focus: ObsFocus::Scenes,
             obs_scene_cursor: 0,
             obs_audio_cursor: 0,
@@ -390,7 +407,17 @@ impl App {
             should_quit: false,
             toasts: super::toast::Toasts::default(),
             log_scroll_back: 0,
+        };
+
+        // Anything wrong with the `[keys]` section goes in the activity log,
+        // where a problem with the config belongs. It is reported rather than
+        // fatal: a typo in a key name should cost that one binding, not the
+        // ability to start.
+        for problem in key_problems {
+            app.push_log(LogLevel::Warning, format!("Key binding: {problem}"));
         }
+
+        app
     }
 
     /// The currently focused form field.
@@ -536,111 +563,365 @@ impl App {
         self.obs.connection = crate::obs::state::Connection::Connecting;
     }
 
-    /// Keys on the OBS tab.
+    /// Whether the screen showing now claims plain keys for itself.
     ///
-    /// Vim-flavoured, like the chat panes: `j`/`k` move, `tab` swaps lists,
-    /// `enter` acts on the selection. The letters that do something to OBS
-    /// are chosen to say what they do — `s` for stream, `r` for record — and
-    /// the destructive-looking ones are all toggles, so nothing here can act
-    /// on a stale idea of which way round something is.
-    fn key_obs(&mut self, key: KeyEvent) -> Vec<Command> {
-        use crate::obs::task::Command as ObsCommand;
+    /// The keymap steps aside for unmodified keys while it does. Two kinds of
+    /// screen do:
+    ///
+    /// * **Text boxes.** A message being written, a channel being joined, a
+    ///   title being edited — a letter is a letter there, and a keymap that
+    ///   grabbed `q` would make it impossible to type the word "quiet".
+    /// * **Pickers.** These are why the leader cannot simply take the space
+    ///   bar everywhere: space ticks a checkbox on a list of tick boxes, and
+    ///   that is what somebody looking at one will press. A picker is closer
+    ///   to a modal than to a document, and vim's leader does not apply
+    ///   inside one either.
+    ///
+    /// Modified chords still reach the keymap in both cases, since
+    /// ctrl+something is never text.
+    fn screen_owns_plain_keys(&self) -> bool {
+        use super::chat_tab::ChatFocus;
 
-        // A scene or audio shortcut from the config beats the built-in keys,
-        // because somebody who bound `3` to a scene means that scene.
-        if is_typed_text(&key) {
-            if let KeyCode::Char(c) = key.code {
-                let typed = c.to_string();
-                if let Some(scene) = self
-                    .obs
-                    .scenes
-                    .iter()
-                    .find(|scene| scene.shortcut.as_deref() == Some(typed.as_str()))
-                {
-                    let name = scene.name.clone();
-                    self.obs_command(ObsCommand::SetScene(name));
-                    return vec![];
-                }
-                if let Some(input) = self
-                    .obs
-                    .audio
-                    .iter()
-                    .find(|input| input.shortcut.as_deref() == Some(typed.as_str()))
-                {
-                    let name = input.name.clone();
-                    self.obs_command(ObsCommand::ToggleMute(name));
-                    return vec![];
-                }
-            }
+        // The OBS tab is a view of OBS: the screen underneath it belongs to
+        // the streaming flow and has no bearing on which keys apply here.
+        if self.tab == Tab::Obs {
+            return false;
         }
 
-        match key.code {
-            KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Tab
-            | KeyCode::Char('h')
-            | KeyCode::Char('l')
-            | KeyCode::Left
-            | KeyCode::Right => {
+        // The chat modals: composing, searching, joining, picking an emoji,
+        // or answering the timeout prompt.
+        if self.chat_is_showing() {
+            return !matches!(self.chat.mode, ChatFocus::Normal);
+        }
+
+        match self.screen {
+            Screen::Setup | Screen::Form => true,
+            Screen::Platforms | Screen::Login => true,
+            // The dashboard is a view rather than a form, so the bindings
+            // own it.
+            Screen::Dashboard => false,
+        }
+    }
+
+    /// Which set of bindings applies where the keyboard currently is.
+    pub fn key_context(&self) -> crate::keys::Context {
+        use crate::keys::Context;
+        match self.tab {
+            Tab::Obs => Context::Obs,
+            Tab::Chat => Context::Chat,
+            Tab::Combined if self.combined_focus == CombinedFocus::Chat => Context::Chat,
+            _ => Context::StreamInfo,
+        }
+    }
+
+    /// Try to resolve a key through the keymap.
+    ///
+    /// Returns `None` when the key is not part of any binding, in which case
+    /// the caller carries on with whatever it would have done — the form
+    /// fields, the text boxes and the modal prompts all still handle their
+    /// own keys, because a letter typed into a message is a letter.
+    ///
+    /// The three outcomes that are *not* `None`:
+    ///
+    /// * the chord is complete, and its action runs;
+    /// * the chord is a prefix, so the keys are held and the which-key popup
+    ///   opens — this is what makes `<Leader>` discoverable rather than
+    ///   something you have to know;
+    /// * the chord has gone nowhere, so it is abandoned. Silently: a
+    ///   half-typed sequence is a slip, and an error message for one would be
+    ///   more annoying than the slip.
+    fn resolve_key(&mut self, key: KeyEvent) -> Option<Vec<Command>> {
+        use crate::keys::Key;
+
+        let context = self.key_context();
+        let mut chord = self.pending_keys.clone();
+        chord.push(Key::from_event(key));
+
+        if let Some(action) = self.keymap.action(context, &chord) {
+            self.pending_keys.clear();
+            return Some(self.run_action(action));
+        }
+
+        if self.keymap.is_prefix(context, &chord) {
+            self.pending_keys = chord;
+            return Some(vec![]);
+        }
+
+        // A sequence that was going somewhere and then was not: give up on
+        // it, and let the key stand on its own if it means something by
+        // itself. Otherwise `<Leader>x` would swallow a following `j`.
+        if !self.pending_keys.is_empty() {
+            self.pending_keys.clear();
+            let alone = vec![Key::from_event(key)];
+            if let Some(action) = self.keymap.action(context, &alone) {
+                return Some(self.run_action(action));
+            }
+            return Some(vec![]);
+        }
+
+        None
+    }
+
+    /// Do what an action says.
+    pub fn run_action(&mut self, action: crate::keys::Action) -> Vec<Command> {
+        use crate::keys::Action;
+        use crate::obs::task::Command as ObsCommand;
+
+        match action {
+            Action::Quit => self.should_quit = true,
+            Action::CommandPalette => {
+                self.command_palette = Some(super::command_palette::CommandPalette::default());
+            }
+            Action::MessageHistory => {
+                self.toasts.dismiss_all();
+                self.toasts.open_history();
+            }
+            Action::WhichKey => self.which_key_all = true,
+            Action::ThemePicker => {
+                self.theme_picker = Some(super::theme_picker::ThemePicker::open(
+                    &self.config.appearance.theme,
+                    &self.palette,
+                ));
+            }
+            Action::CycleAnimations => {
+                self.animation = self.animation.next();
+                self.config.appearance.animations = self.animation.name().to_string();
+                let mode = self.animation.name();
+                self.notify(super::toast::Level::Info, format!("Animations: {mode}"));
+                return self.save_appearance();
+            }
+            Action::ToggleTelemetry => {
+                self.config.appearance.telemetry = !self.config.appearance.telemetry;
+                let state = if self.config.appearance.telemetry {
+                    "on"
+                } else {
+                    "off"
+                };
+                self.notify(super::toast::Level::Info, format!("Telemetry: {state}"));
+                return self.save_appearance();
+            }
+
+            Action::TabStreamInfo => return self.go_to_tab(Tab::StreamInfo),
+            Action::TabChat => return self.go_to_tab(Tab::Chat),
+            Action::TabCombined => return self.go_to_tab(Tab::Combined),
+            Action::TabObs => return self.go_to_tab(Tab::Obs),
+            Action::TabNext => return self.cycle_tab(1),
+            Action::TabPrevious => return self.cycle_tab(-1),
+            Action::CombinedSwapFocus => {
+                if self.tab == Tab::Combined {
+                    self.combined_focus = match self.combined_focus {
+                        CombinedFocus::Chat => CombinedFocus::StreamInfo,
+                        CombinedFocus::StreamInfo => CombinedFocus::Chat,
+                    };
+                    self.chat.pending_mod = None;
+                    self.chat.pending_space = false;
+                }
+            }
+
+            Action::GoLive => return self.submit(),
+            Action::EditStreamInfo => {
+                self.go_to(Screen::Form);
+                self.ensure_field_visible();
+            }
+            Action::RefreshStats => return vec![Command::PollStats],
+            Action::CopyTwitchKey => return self.copy_stream_key(Platform::Twitch),
+            Action::CopyYouTubeKey => return self.copy_stream_key(Platform::YouTube),
+            Action::OpenWatchPage => return self.open_watch_page(),
+
+            Action::ChatCompose => self.chat_compose(),
+            Action::ChatSearch => {
+                self.chat.mode = super::chat_tab::ChatFocus::Search(String::new())
+            }
+            Action::ChatSearchNext => self.chat.search_step(true),
+            Action::ChatSearchPrevious => self.chat.search_step(false),
+            Action::ChatJoin => self.chat.mode = super::chat_tab::ChatFocus::Join(String::new()),
+            Action::ChatReconnect => self.chat.reconnect_active(),
+            Action::ChatNextChat => self.chat.cycle_chat(true),
+            Action::ChatPreviousChat => self.chat.cycle_chat(false),
+            Action::ChatNextAccount => {
+                let config = self.config.clone();
+                self.chat.cycle_account(true, &config);
+            }
+            Action::ChatPreviousAccount => {
+                let config = self.config.clone();
+                self.chat.cycle_account(false, &config);
+            }
+            Action::ChatScrollUp => self.chat.select_move(1),
+            Action::ChatScrollDown => self.chat.select_move(-1),
+            Action::ChatPageUp => self.chat.scroll_by(10),
+            Action::ChatPageDown => self.chat.scroll_by(-10),
+            Action::ChatToTop => self.chat.scroll_to_end(true),
+            Action::ChatToBottom => self.chat.scroll_to_end(false),
+            Action::ChatFocusNextPane => self.chat.focus_other(),
+            Action::ChatFocusPreviousPane => self.chat.focus_other(),
+            Action::ChatWiden => self.chat.resize(false),
+            Action::ChatNarrow => self.chat.resize(true),
+            Action::ChatResetPanes => self.chat.reset_split(),
+            Action::ChatToggleActivity => self.chat.toggle_activity(),
+            Action::ChatToggleInspect => self.chat.inspect = !self.chat.inspect,
+            Action::ChatEmojiPicker => {
+                self.chat.mode = super::chat_tab::ChatFocus::EmojiPicker {
+                    query: String::new(),
+                    // Opened on its own rather than from the message box, so
+                    // a chosen emoji is inserted into a fresh composer rather
+                    // than into text already being written.
+                    from_compose: false,
+                }
+            }
+            Action::ChatReply => {
+                self.chat.reply_to_selected();
+            }
+            Action::ChatClearFilters => self.chat.toggle_filter('0'),
+
+            Action::ObsUp => self.move_obs_cursor(-1),
+            Action::ObsDown => self.move_obs_cursor(1),
+            Action::ObsSwapPane => {
                 self.obs_focus = match self.obs_focus {
                     ObsFocus::Scenes => ObsFocus::Audio,
                     ObsFocus::Audio => ObsFocus::Scenes,
                 };
             }
-            KeyCode::Char('j') | KeyCode::Down => self.move_obs_cursor(1),
-            KeyCode::Char('k') | KeyCode::Up => self.move_obs_cursor(-1),
-
-            // Act on the selection: switch to the scene, or toggle the mute.
-            KeyCode::Enter | KeyCode::Char(' ') => match self.obs_focus {
-                ObsFocus::Scenes => {
-                    if let Some(scene) = self.obs.scenes.get(self.obs_scene_cursor) {
-                        let name = scene.name.clone();
-                        self.obs_command(ObsCommand::SetScene(name));
-                    }
-                }
-                ObsFocus::Audio => {
-                    if let Some(input) = self.obs.audio.get(self.obs_audio_cursor) {
-                        let name = input.name.clone();
-                        self.obs_command(ObsCommand::ToggleMute(name));
-                    }
-                }
-            },
-            // `m` mutes whatever audio input is selected, from either list,
-            // because reaching for the microphone should not first require
-            // moving the focus to the audio column.
-            KeyCode::Char('m') => {
+            Action::ObsActivate => self.obs_activate(),
+            Action::ObsToggleMute => {
                 if let Some(input) = self.obs.audio.get(self.obs_audio_cursor) {
                     let name = input.name.clone();
                     self.obs_command(ObsCommand::ToggleMute(name));
                 }
             }
-            // Volume, in steps of five: fine enough to be useful, coarse
-            // enough that holding the key does something visible.
-            KeyCode::Char('+') | KeyCode::Char('=') => self.nudge_obs_volume(0.05),
-            KeyCode::Char('-') | KeyCode::Char('_') => self.nudge_obs_volume(-0.05),
-
-            // Mute everything at once, or unmute everything if nothing is
-            // live. This is the panic key: saying something into an open
-            // microphone that should not have been open is the mistake with
-            // the largest consequences available here, and recovering from it
-            // should not involve finding the right row first.
-            KeyCode::Char('M') => self.mute_all_obs_audio(),
-
-            // Cycle through profiles and scene collections. Cycling rather
-            // than a picker because there are usually two or three of each,
-            // and a list to choose from would be more interface than the
-            // choice deserves.
-            KeyCode::Char('P') => self.cycle_obs(true),
-            KeyCode::Char('C') => self.cycle_obs(false),
-
-            KeyCode::Char('s') => self.obs_command(ObsCommand::ToggleStream),
-            KeyCode::Char('r') => self.obs_command(ObsCommand::ToggleRecord),
-            KeyCode::Char('p') => self.obs_command(ObsCommand::ToggleRecordPause),
-            KeyCode::Char('R') => {
+            Action::ObsMuteAll => self.mute_all_obs_audio(),
+            Action::ObsVolumeUp => self.nudge_obs_volume(0.05),
+            Action::ObsVolumeDown => self.nudge_obs_volume(-0.05),
+            Action::ObsToggleStream => self.obs_command(ObsCommand::ToggleStream),
+            Action::ObsToggleRecord => self.obs_command(ObsCommand::ToggleRecord),
+            Action::ObsPauseRecording => self.obs_command(ObsCommand::ToggleRecordPause),
+            Action::ObsNextProfile => self.cycle_obs(true),
+            Action::ObsNextCollection => self.cycle_obs(false),
+            Action::ObsReconnect => {
                 self.obs_command(ObsCommand::Reconnect);
                 self.push_log(LogLevel::Info, "Reconnecting to OBS…");
             }
-            KeyCode::Char('u') => self.obs_command(ObsCommand::Refresh),
-            _ => {}
+            Action::ObsRefresh => self.obs_command(ObsCommand::Refresh),
+        }
+        vec![]
+    }
+
+    /// Open the first watch page there is, or say there is not one.
+    fn open_watch_page(&mut self) -> Vec<Command> {
+        match self.first_watch_url() {
+            Some(url) => {
+                self.notify(super::toast::Level::Info, format!("Opening {url}"));
+                vec![Command::OpenUrl(url)]
+            }
+            None => {
+                self.notify(
+                    super::toast::Level::Warning,
+                    "No platform has a watch page yet — nothing has gone live.",
+                );
+                vec![]
+            }
+        }
+    }
+
+    /// Switch to a tab, doing whatever that tab needs on the way in.
+    fn go_to_tab(&mut self, tab: Tab) -> Vec<Command> {
+        self.chat.pending_mod = None;
+        self.chat.pending_space = false;
+
+        // Leaving the chat panes releases their connections' hold on the
+        // keyboard; entering them opens the logged-in accounts' chats.
+        if self.chat_is_showing() && tab != Tab::Chat && tab != Tab::Combined {
+            self.chat.deactivate();
+        }
+        self.tab = tab;
+        match tab {
+            Tab::Chat | Tab::Combined => {
+                if tab == Tab::Combined {
+                    self.combined_focus = CombinedFocus::Chat;
+                }
+                self.chat.activate(&self.config);
+            }
+            Tab::Obs => self.obs_command(crate::obs::task::Command::Refresh),
+            Tab::StreamInfo => {}
+        }
+        vec![]
+    }
+
+    fn cycle_tab(&mut self, delta: isize) -> Vec<Command> {
+        const ORDER: [Tab; 4] = [Tab::StreamInfo, Tab::Chat, Tab::Combined, Tab::Obs];
+        let index = ORDER.iter().position(|tab| *tab == self.tab).unwrap_or(0);
+        let next = ORDER[(index as isize + delta).rem_euclid(ORDER.len() as isize) as usize];
+        self.go_to_tab(next)
+    }
+
+    /// Focus the message box, or say why there is nowhere to type.
+    fn chat_compose(&mut self) {
+        if self.chat.active_key(self.chat.focus).is_some() {
+            self.chat.mode = super::chat_tab::ChatFocus::Compose;
+        } else {
+            let platform = self.chat.focus.label();
+            self.notify(
+                super::toast::Level::Warning,
+                format!("No {platform} chat is open to write to yet."),
+            );
+        }
+    }
+
+    /// Act on whatever the OBS tab has selected.
+    fn obs_activate(&mut self) {
+        use crate::obs::task::Command as ObsCommand;
+        match self.obs_focus {
+            ObsFocus::Scenes => {
+                if let Some(scene) = self.obs.scenes.get(self.obs_scene_cursor) {
+                    let name = scene.name.clone();
+                    self.obs_command(ObsCommand::SetScene(name));
+                }
+            }
+            ObsFocus::Audio => {
+                if let Some(input) = self.obs.audio.get(self.obs_audio_cursor) {
+                    let name = input.name.clone();
+                    self.obs_command(ObsCommand::ToggleMute(name));
+                }
+            }
+        }
+    }
+
+    /// The OBS tab's own keys.
+    ///
+    /// Only the *dynamic* ones live here: a scene or an audio input can be
+    /// given a one-key shortcut in the config, and which keys those are is
+    /// not known until OBS has said what exists. Everything else on this tab
+    /// is an ordinary binding in the keymap, which has already had its say by
+    /// the time this runs — so a shortcut cannot shadow a binding, and
+    /// rebinding or removing a key does what it says.
+    fn key_obs(&mut self, key: KeyEvent) -> Vec<Command> {
+        use crate::obs::task::Command as ObsCommand;
+
+        if !crate::keys::Key::from_event(key).is_text() {
+            return vec![];
+        }
+        let KeyCode::Char(c) = key.code else {
+            return vec![];
+        };
+        let typed = c.to_string();
+
+        if let Some(scene) = self
+            .obs
+            .scenes
+            .iter()
+            .find(|scene| scene.shortcut.as_deref() == Some(typed.as_str()))
+        {
+            let name = scene.name.clone();
+            self.obs_command(ObsCommand::SetScene(name));
+            return vec![];
+        }
+        if let Some(input) = self
+            .obs
+            .audio
+            .iter()
+            .find(|input| input.shortcut.as_deref() == Some(typed.as_str()))
+        {
+            let name = input.name.clone();
+            self.obs_command(ObsCommand::ToggleMute(name));
         }
         vec![]
     }
@@ -1069,9 +1350,20 @@ impl App {
         // when they arrive.
         self.toasts.expire(std::time::Instant::now());
 
-        // Ctrl+C always quits, on every screen, even mid-request.
+        // Ctrl+C quits from anywhere, ahead of every modal and every
+        // binding. "Stop" has to mean stop even over a screen that owns the
+        // keyboard, and it is the one key nobody should be able to rebind
+        // into uselessness.
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
             self.should_quit = true;
+            return vec![];
+        }
+
+        // The which-key listing takes every key while it is up: it covers
+        // the screen, so acting on anything underneath would act on
+        // something that cannot be seen.
+        if self.which_key_all {
+            self.which_key_all = false;
             return vec![];
         }
 
@@ -1116,6 +1408,26 @@ impl App {
                 &self.palette,
             ));
             return vec![];
+        }
+
+        // The keymap, after every modal overlay above (each of those owns the
+        // keyboard entirely while it is open) and before the per-screen
+        // handlers below, so a binding — built-in or from `[keys]` — beats a
+        // key a screen happens to use for something else.
+        //
+        // Where a screen is *itself* a text box or a picker, only modified
+        // chords are considered: a letter is a letter there, but
+        // ctrl+something never is. That is what keeps `<C-p>` working while a
+        // message is half-written, without `q` making it impossible to type
+        // the word "quiet" or the leader stealing the space bar from a
+        // checkbox.
+        let local_keys = self.screen_owns_plain_keys();
+        if !local_keys || crate::keys::is_command_key(crate::keys::Key::from_event(key)) {
+            if let Some(commands) = self.resolve_key(key) {
+                return commands;
+            }
+        } else if !self.pending_keys.is_empty() {
+            self.pending_keys.clear();
         }
 
         // Alt+digit switches top-level tabs from anywhere — including inside
@@ -2434,37 +2746,19 @@ impl App {
 
     // -- Screen 3: the dashboard --------------------------------------------
 
+    /// The dashboard's own keys.
+    ///
+    /// Everything this tab *does* — refresh, copy a key, open the watch page,
+    /// go back to the form — is an ordinary binding in the keymap, and has
+    /// already been resolved by the time this runs. What is left is scrolling
+    /// the activity log, which belongs to the panel rather than to the
+    /// program, and `esc` as a second way back to the form.
     fn key_dashboard(&mut self, key: KeyEvent) -> Vec<Command> {
         match key.code {
-            KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('r') => return vec![Command::PollStats],
-            // A stream key is never shown, only copied: this window is very
-            // often part of the broadcast, and anyone who reads the key can
-            // stream to your channel. `y` follows the vim convention for
-            // "yank"; the platform is chosen by the case rather than by a
-            // prompt so there is no mode to get stuck in.
-            KeyCode::Char('y') => return self.copy_stream_key(Platform::Twitch),
-            KeyCode::Char('Y') => return self.copy_stream_key(Platform::YouTube),
-            KeyCode::Char('o') => {
-                // Open the watch page, which is the one link you actually want
-                // in front of you once the stream is up — to check the delay, to
-                // paste into chat, or to see what viewers see.
-                match self.first_watch_url() {
-                    Some(url) => {
-                        self.notify(super::toast::Level::Info, format!("Opening {url}"));
-                        return vec![Command::OpenUrl(url)];
-                    }
-                    None => {
-                        self.notify(
-                            super::toast::Level::Warning,
-                            "No platform has a watch page yet — nothing has gone live.",
-                        );
-                    }
-                }
-            }
-            KeyCode::Char('e') | KeyCode::Esc => {
-                // Back to the form to change something and resubmit. On YouTube
-                // this creates a *new* broadcast rather than editing the old one.
+            KeyCode::Esc => {
+                // Back to the form to change something and resubmit. On
+                // YouTube this creates a *new* broadcast rather than editing
+                // the old one.
                 self.go_to(Screen::Form);
                 self.ensure_field_visible();
             }
@@ -4237,5 +4531,149 @@ mod tests {
             app.command_palette.as_ref().map(|p| p.query.as_str()),
             Some("")
         );
+    }
+
+    /// The leader opens the which-key popup rather than doing nothing, which
+    /// is what makes the bindings discoverable instead of something you have
+    /// to be told.
+    #[test]
+    fn the_leader_waits_and_then_runs_the_sequence() {
+        let mut app = app();
+        app.screen = Screen::Dashboard;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert_eq!(app.pending_keys.len(), 1, "the leader is held");
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('b')));
+        assert_eq!(app.pending_keys.len(), 2, "still waiting for the verb");
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('o')));
+        assert!(app.pending_keys.is_empty(), "the sequence completed");
+        assert_eq!(app.tab, Tab::Obs);
+    }
+
+    /// A sequence that goes nowhere is abandoned quietly — a half-typed
+    /// chord is a slip, and an error message for one would be worse than the
+    /// slip.
+    #[test]
+    fn an_unfinished_sequence_is_abandoned_rather_than_sticking() {
+        let mut app = app();
+        app.screen = Screen::Dashboard;
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert!(app.pending_keys.is_empty());
+        assert!(!app.should_quit);
+    }
+
+    /// Escape has to get out of a part-typed chord, or the only way out
+    /// would be to complete something you did not mean.
+    #[test]
+    fn escape_cancels_a_part_typed_chord() {
+        let mut app = app();
+        app.screen = Screen::Dashboard;
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(!app.pending_keys.is_empty());
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.pending_keys.is_empty());
+    }
+
+    /// The space bar ticks a checkbox on a picker. The leader must not take
+    /// it there, because a list of tick boxes is exactly where somebody will
+    /// press space meaning "tick this".
+    #[test]
+    fn the_leader_does_not_steal_the_space_bar_from_a_picker() {
+        let mut app = app();
+        app.screen = Screen::Platforms;
+        let before = app.is_selected(Platform::Twitch);
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(app.pending_keys.is_empty(), "no chord was started");
+        assert_ne!(app.is_selected(Platform::Twitch), before, "it ticked");
+    }
+
+    /// A control chord still works inside a text box, since ctrl+something
+    /// is never text — but a letter is.
+    #[test]
+    fn a_text_box_keeps_its_letters_but_not_its_control_chords() {
+        let mut app = app();
+        app.screen = Screen::Form;
+
+        // `q` is a letter here, not the quit binding.
+        app.handle_key(KeyEvent::from(KeyCode::Char('q')));
+        assert!(!app.should_quit);
+
+        // ctrl+p is not text, so the palette still opens.
+        app.handle_key(ctrl('p'));
+        assert!(app.command_palette.is_some());
+    }
+
+    /// Rebinding in the config has to actually take effect, or the section
+    /// is decorative.
+    #[test]
+    fn a_rebinding_from_the_config_replaces_the_default() {
+        let mut config = scratch_config();
+        config
+            .keys
+            .global
+            .insert("<C-y>".to_string(), "app.quit".to_string());
+        // And a default can be removed outright.
+        config.keys.obs.insert("q".to_string(), String::new());
+
+        let mut app = App::new(config);
+        app.splash_skipped = true;
+        app.tab = Tab::Obs;
+
+        app.handle_key(ctrl('y'));
+        assert!(app.should_quit, "the new binding runs");
+
+        let mut app2 = App::new({
+            let mut config = scratch_config();
+            config.keys.obs.insert("q".to_string(), String::new());
+            config
+        });
+        app2.splash_skipped = true;
+        app2.tab = Tab::Obs;
+        app2.handle_key(KeyEvent::from(KeyCode::Char('q')));
+        assert!(!app2.should_quit, "the removed binding does nothing");
+    }
+
+    /// A binding naming an action that does not exist is reported rather
+    /// than silently ignored, and does not stop the interface starting.
+    #[test]
+    fn a_broken_binding_is_reported_and_does_not_prevent_starting() {
+        let mut config = scratch_config();
+        config
+            .keys
+            .global
+            .insert("<C-y>".to_string(), "app.explode".to_string());
+        config
+            .keys
+            .global
+            .insert("<C-".to_string(), "app.quit".to_string());
+
+        let app = App::new(config);
+        let complaints: Vec<&str> = app
+            .log
+            .iter()
+            .filter(|line| line.message.contains("Key binding"))
+            .map(|line| line.message.as_str())
+            .collect();
+        assert_eq!(complaints.len(), 2, "got {complaints:?}");
+    }
+
+    /// Changing the leader has to move every leader binding with it.
+    #[test]
+    fn the_leader_can_be_changed() {
+        let mut config = scratch_config();
+        config.keys.leader = ",".to_string();
+        let mut app = App::new(config);
+        app.splash_skipped = true;
+        app.screen = Screen::Dashboard;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(',')));
+        assert_eq!(app.pending_keys.len(), 1, "comma is the leader now");
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('b')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('o')));
+        assert_eq!(app.tab, Tab::Obs);
     }
 }

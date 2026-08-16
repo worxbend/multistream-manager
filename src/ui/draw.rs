@@ -60,6 +60,25 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     draw_footer(frame, areas[3], app);
 
+    // Every binding at once, which is its own screen.
+    if app.which_key_all {
+        super::which_key::draw_all(frame, frame.area(), &app.keymap, app.key_context());
+        return;
+    }
+
+    // The which-key popup: a chord is part-typed, so show what can follow it
+    // rather than leaving somebody to remember.
+    if !app.pending_keys.is_empty() {
+        super::which_key::draw(
+            frame,
+            frame.area(),
+            &app.keymap,
+            app.key_context(),
+            &app.pending_keys,
+        );
+        return;
+    }
+
     // The start-up splash covers everything, including the picker: it is on
     // screen before either could have been opened.
     if app.splash_is_showing() {
@@ -83,6 +102,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             frame.area(),
             palette,
             app.chat.active_key(app.chat.focus).is_some(),
+            &app.keymap,
         );
         return;
     }

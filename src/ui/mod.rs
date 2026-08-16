@@ -10,6 +10,7 @@ pub mod obs_tab;
 pub mod splash;
 pub mod theme_picker;
 pub mod toast;
+pub mod which_key;
 pub mod worker;
 
 use anyhow::{Context, Result};

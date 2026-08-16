@@ -39,6 +39,13 @@ pub struct Entry {
     /// Extra words that should match this entry when searching, for the times
     /// the title uses a word you would not have thought of.
     pub keywords: &'static [&'static str],
+    /// The keymap action this entry stands for, when there is one.
+    ///
+    /// Used to show the key it is *currently* on rather than the default the
+    /// entry was written with. Entries that replay a sequence of keys with no
+    /// single action behind them leave this `None` and keep their written
+    /// hint.
+    pub action: Option<crate::keys::Action>,
     /// Whether this action needs a chat to be open before it can do anything.
     ///
     /// Recorded rather than inferred so the test that replays every entry
@@ -93,6 +100,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::alt('1')],
         shortcut: "alt+1",
         keywords: &["tab", "stream", "info", "dashboard", "settings"],
+        action: Some(crate::keys::Action::TabStreamInfo),
         needs_chat: false,
     },
     Entry {
@@ -100,6 +108,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::alt('2')],
         shortcut: "alt+2",
         keywords: &["tab", "chat", "messages", "twitch", "youtube"],
+        action: Some(crate::keys::Action::TabChat),
         needs_chat: false,
     },
     Entry {
@@ -107,6 +116,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::alt('3')],
         shortcut: "alt+3",
         keywords: &["tab", "combined", "both", "split", "everything"],
+        action: Some(crate::keys::Action::TabCombined),
         needs_chat: false,
     },
     Entry {
@@ -114,6 +124,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::alt('w')],
         shortcut: "alt+w",
         keywords: &["combined", "focus", "swap", "switch", "half", "pane"],
+        action: Some(crate::keys::Action::CombinedSwapFocus),
         needs_chat: false,
     },
     Entry {
@@ -128,6 +139,7 @@ pub const ENTRIES: &[Entry] = &[
             "toast",
             "what happened",
         ],
+        action: Some(crate::keys::Action::MessageHistory),
         needs_chat: false,
     },
     Entry {
@@ -137,6 +149,7 @@ pub const ENTRIES: &[Entry] = &[
         keywords: &[
             "tab", "obs", "studio", "scenes", "audio", "record", "stream",
         ],
+        action: Some(crate::keys::Action::TabObs),
         needs_chat: false,
     },
     Entry {
@@ -144,6 +157,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::char('r')],
         shortcut: "r",
         keywords: &["refresh", "poll", "viewers", "stats", "statistics"],
+        action: Some(crate::keys::Action::RefreshStats),
         needs_chat: false,
     },
     Entry {
@@ -151,6 +165,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::char('y')],
         shortcut: "y",
         keywords: &["key", "stream key", "clipboard", "copy", "obs", "twitch"],
+        action: Some(crate::keys::Action::CopyTwitchKey),
         needs_chat: false,
     },
     Entry {
@@ -158,6 +173,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::char('Y')],
         shortcut: "Y",
         keywords: &["key", "stream key", "clipboard", "copy", "obs", "youtube"],
+        action: Some(crate::keys::Action::CopyYouTubeKey),
         needs_chat: false,
     },
     Entry {
@@ -165,6 +181,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::char('o')],
         shortcut: "o",
         keywords: &["open", "watch", "browser", "url", "link", "page"],
+        action: Some(crate::keys::Action::OpenWatchPage),
         needs_chat: false,
     },
     Entry {
@@ -172,6 +189,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::char('e')],
         shortcut: "e",
         keywords: &["edit", "title", "category", "tags", "form", "settings"],
+        action: Some(crate::keys::Action::EditStreamInfo),
         needs_chat: false,
     },
     Entry {
@@ -179,6 +197,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::char('i')],
         shortcut: "i",
         keywords: &["chat", "compose", "write", "send", "input", "type"],
+        action: Some(crate::keys::Action::ChatCompose),
         needs_chat: false,
     },
     Entry {
@@ -186,6 +205,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::char('/')],
         shortcut: "/",
         keywords: &["chat", "search", "find", "grep"],
+        action: Some(crate::keys::Action::ChatSearch),
         needs_chat: true,
     },
     Entry {
@@ -193,13 +213,15 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::ctrl('r')],
         shortcut: "ctrl+r",
         keywords: &["chat", "reconnect", "connection", "retry", "dropped"],
-        needs_chat: false,
+        action: Some(crate::keys::Action::ChatReconnect),
+        needs_chat: true,
     },
     Entry {
         title: "Open the emoji picker",
         keys: &[Key::ctrl('e')],
         shortcut: "ctrl+e",
         keywords: &["emoji", "emote", "picker", "insert", "smiley"],
+        action: Some(crate::keys::Action::ChatEmojiPicker),
         needs_chat: false,
     },
     Entry {
@@ -207,6 +229,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::char('0')],
         shortcut: "0",
         keywords: &["filter", "filters", "reset", "clear", "all", "show"],
+        action: Some(crate::keys::Action::ChatClearFilters),
         needs_chat: true,
     },
     Entry {
@@ -214,6 +237,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::char('1')],
         shortcut: "1",
         keywords: &["filter", "mentions", "highlight", "me"],
+        action: None,
         needs_chat: true,
     },
     Entry {
@@ -221,6 +245,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::char(']')],
         shortcut: "]",
         keywords: &["chat", "next", "switch", "channel"],
+        action: Some(crate::keys::Action::ChatNextChat),
         needs_chat: true,
     },
     Entry {
@@ -228,6 +253,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::char('[')],
         shortcut: "[",
         keywords: &["chat", "previous", "back", "switch", "channel"],
+        action: Some(crate::keys::Action::ChatPreviousChat),
         needs_chat: true,
     },
     Entry {
@@ -235,6 +261,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::char('<')],
         shortcut: "<",
         keywords: &["pane", "resize", "wider", "narrower", "split", "layout"],
+        action: Some(crate::keys::Action::ChatWiden),
         needs_chat: false,
     },
     Entry {
@@ -242,6 +269,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::char('>')],
         shortcut: ">",
         keywords: &["pane", "resize", "wider", "narrower", "split", "layout"],
+        action: Some(crate::keys::Action::ChatNarrow),
         needs_chat: false,
     },
     Entry {
@@ -249,6 +277,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::char('=')],
         shortcut: "=",
         keywords: &["pane", "resize", "reset", "default", "layout"],
+        action: Some(crate::keys::Action::ChatResetPanes),
         needs_chat: false,
     },
     Entry {
@@ -266,6 +295,7 @@ pub const ENTRIES: &[Entry] = &[
             "dark",
             "light",
         ],
+        action: Some(crate::keys::Action::ThemePicker),
         needs_chat: false,
     },
     Entry {
@@ -281,6 +311,7 @@ pub const ENTRIES: &[Entry] = &[
             "still",
             "accessibility",
         ],
+        action: Some(crate::keys::Action::CycleAnimations),
         needs_chat: false,
     },
     Entry {
@@ -296,6 +327,7 @@ pub const ENTRIES: &[Entry] = &[
             "performance",
             "status",
         ],
+        action: Some(crate::keys::Action::ToggleTelemetry),
         needs_chat: false,
     },
     Entry {
@@ -311,6 +343,7 @@ pub const ENTRIES: &[Entry] = &[
             "go live",
             "broadcast",
         ],
+        action: Some(crate::keys::Action::ObsToggleStream),
         needs_chat: false,
     },
     Entry {
@@ -318,6 +351,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::alt('4'), Key::char('r')],
         shortcut: "alt+4 then r",
         keywords: &["obs", "record", "recording", "start", "stop", "capture"],
+        action: Some(crate::keys::Action::ObsToggleRecord),
         needs_chat: false,
     },
     Entry {
@@ -334,6 +368,7 @@ pub const ENTRIES: &[Entry] = &[
             "silence",
             "panic",
         ],
+        action: Some(crate::keys::Action::ObsMuteAll),
         needs_chat: false,
     },
     Entry {
@@ -341,6 +376,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::alt('4'), Key::char('R')],
         shortcut: "alt+4 then R",
         keywords: &["obs", "reconnect", "connection", "retry", "dropped"],
+        action: Some(crate::keys::Action::ObsReconnect),
         needs_chat: false,
     },
     Entry {
@@ -348,6 +384,7 @@ pub const ENTRIES: &[Entry] = &[
         keys: &[Key::ctrl('c')],
         shortcut: "q / ctrl+c",
         keywords: &["quit", "exit", "close", "leave"],
+        action: Some(crate::keys::Action::Quit),
         needs_chat: false,
     },
 ];
@@ -434,7 +471,13 @@ fn matches_for(query: &str) -> Vec<usize> {
 /// The bottom, not the middle: what you were looking at when you opened it is
 /// usually what you want the command to act on, so covering the top half would
 /// hide the thing you are about to change.
-pub fn draw(frame: &mut Frame, area: Rect, palette: &CommandPalette, chat_open: bool) {
+pub fn draw(
+    frame: &mut Frame,
+    area: Rect,
+    palette: &CommandPalette,
+    chat_open: bool,
+    keymap: &crate::keys::Keymap,
+) {
     let sk = theme::skin();
     let matches = palette.matches();
 
@@ -489,9 +532,20 @@ pub fn draw(frame: &mut Frame, area: Rect, palette: &CommandPalette, chat_open: 
         .saturating_sub(height.saturating_sub(1))
         .min(matches.len().saturating_sub(height.min(matches.len())));
 
+    // The key shown beside each entry comes from the keymap rather than from
+    // the entry's own text, so a rebound key shows the key it is actually on
+    // now. A palette that advertised the default after somebody changed it
+    // would be teaching the wrong thing.
+    let shortcut_for = |entry: &Entry| -> String {
+        entry
+            .action
+            .and_then(|action| keymap.binding_for(action))
+            .unwrap_or_else(|| entry.shortcut.to_string())
+    };
+
     let widest = matches
         .iter()
-        .map(|index| ENTRIES[*index].shortcut.chars().count())
+        .map(|index| shortcut_for(&ENTRIES[*index]).chars().count())
         .max()
         .unwrap_or(0);
 
@@ -517,7 +571,7 @@ pub fn draw(frame: &mut Frame, area: Rect, palette: &CommandPalette, chat_open: 
                     Style::new().fg(sk.accent),
                 ),
                 Span::styled(
-                    format!("{:<widest$}  ", entry.shortcut),
+                    format!("{:<widest$}  ", shortcut_for(entry)),
                     Style::new().fg(sk.accent),
                 ),
                 Span::styled(

@@ -36,6 +36,8 @@ pub struct Config {
     pub appearance: AppearanceConfig,
     /// Controlling OBS Studio from the OBS tab.
     pub obs: ObsConfig,
+    /// Key bindings. Anything left out keeps its default.
+    pub keys: KeysConfig,
     /// The saved stream settings the form starts from.
     pub preset: PresetConfig,
 }
@@ -182,6 +184,137 @@ impl AppearanceConfig {
     /// recognised. A `false` here is worth logging, not worth failing on.
     pub fn palette(&self) -> (crate::theme::Palette, bool) {
         crate::theme::resolve(&self.theme, &self.custom_theme.to_palette())
+    }
+}
+
+/// Key bindings.
+///
+/// The defaults are shaped the way AstroNvim shapes Neovim's — a space
+/// leader, two-letter mnemonic groups, a which-key popup — because that is a
+/// shape many people who live in a terminal already have in their fingers.
+/// Everything here changes that.
+///
+/// Bindings are written in vim's notation, which is the notation anyone who
+/// would want to rebind a key already knows: `<Leader>os`, `<C-p>`, `]t`,
+/// `<CR>`. A literal `<` is written `<lt>`, as in vim.
+///
+/// ```toml
+/// [keys]
+/// leader = "<Space>"
+///
+/// [keys.global]
+/// "<Leader>os" = "obs.stream"
+/// "<C-g>" = "stream.go_live"
+/// "<Leader>q" = ""              # remove a default binding
+///
+/// [keys.chat]
+/// "<C-j>" = "chat.next"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KeysConfig {
+    /// The key every mnemonic sequence starts with.
+    ///
+    /// Space, as in AstroNvim. Changing it moves every `<Leader>…` binding at
+    /// once, including the built-in ones, so nothing has to be rewritten.
+    pub leader: String,
+
+    /// Bindings that apply everywhere.
+    pub global: std::collections::BTreeMap<String, String>,
+
+    /// Bindings for the Stream Info tab.
+    pub stream_info: std::collections::BTreeMap<String, String>,
+
+    /// Bindings for the chat panes, on either the Chat or the Combined tab.
+    pub chat: std::collections::BTreeMap<String, String>,
+
+    /// Bindings for the OBS tab.
+    pub obs: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for KeysConfig {
+    fn default() -> Self {
+        Self {
+            leader: "<Space>".to_string(),
+            global: std::collections::BTreeMap::new(),
+            stream_info: std::collections::BTreeMap::new(),
+            chat: std::collections::BTreeMap::new(),
+            obs: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+impl KeysConfig {
+    /// Build the keymap: the built-in bindings, with this file's changes
+    /// applied on top.
+    ///
+    /// Returns the map and a list of anything wrong with the config. A bad
+    /// binding is reported and skipped rather than refusing to start — being
+    /// unable to open your own interface because of a typo in a key name
+    /// would be a poor trade, and the report says exactly what to fix.
+    pub fn keymap(&self) -> (crate::keys::Keymap, Vec<String>) {
+        use crate::keys::{parse_chord, parse_leader, Action, Context, Keymap};
+
+        let mut problems = Vec::new();
+
+        let leader = match parse_leader(&self.leader) {
+            Ok(leader) => leader,
+            Err(err) => {
+                problems.push(format!("leader {err}; using the default"));
+                crate::keys::default_leader()
+            }
+        };
+
+        let mut keymap = Keymap::defaults(leader);
+
+        // Every context, in a fixed order, so a binding that appears in two
+        // of them resolves the same way every run.
+        for context in Context::ALL {
+            let table = match context {
+                Context::Global => &self.global,
+                Context::StreamInfo => &self.stream_info,
+                Context::Chat => &self.chat,
+                Context::Obs => &self.obs,
+            };
+            for (written, action_name) in table {
+                let chord = match parse_chord(written, leader) {
+                    Ok(chord) => chord,
+                    Err(err) => {
+                        problems.push(format!("[keys.{}] {err}", context.name()));
+                        continue;
+                    }
+                };
+                // An empty action removes the binding, which is how a default
+                // gets turned off. There has to be a way to say "nothing
+                // here" that is not "bind it to something harmless".
+                if action_name.trim().is_empty() {
+                    keymap.unbind(context, &chord);
+                    continue;
+                }
+                match Action::parse(action_name) {
+                    Some(action) => keymap.bind(context, chord, action),
+                    None => problems.push(format!(
+                        "[keys.{}] {written:?}: there is no action called {action_name:?}",
+                        context.name()
+                    )),
+                }
+            }
+        }
+
+        // A binding that a tab-local one hides is worth mentioning: it is how
+        // a tab gives a key its own meaning, and also how somebody's new
+        // global binding quietly fails to work on one tab.
+        for (context, chord, local, global) in keymap.shadowed() {
+            if local == global {
+                continue;
+            }
+            problems.push(format!(
+                "{chord} runs {local} on the {} tab, which hides the global {global}",
+                context.name()
+            ));
+        }
+
+        (keymap, problems)
     }
 }
 
