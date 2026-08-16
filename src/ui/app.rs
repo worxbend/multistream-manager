@@ -611,6 +611,13 @@ impl App {
             return false;
         }
 
+        // The Configuration tab is a form. Its keys move a cursor, change a
+        // setting and edit a layout, so they are local to it — the leader
+        // would take the space bar from a list somebody is working down.
+        if self.tab == Tab::Config {
+            return true;
+        }
+
         // The chat modals: composing, searching, joining, picking an emoji,
         // or answering the timeout prompt.
         if self.chat_is_showing() {
@@ -4970,5 +4977,83 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char('b')));
         app.handle_key(KeyEvent::from(KeyCode::Char('o')));
         assert_eq!(app.tab, Tab::Obs);
+    }
+
+    /// The Configuration tab is a form: its keys move a cursor and change a
+    /// setting, so the leader must not take the space bar from a list
+    /// somebody is working down.
+    #[test]
+    fn the_config_tab_keeps_its_own_keys() {
+        let mut app = app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::ALT));
+        assert_eq!(app.tab, Tab::Config);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(app.pending_keys.is_empty(), "no chord was started");
+    }
+
+    /// Opening the tab has to give it a layout to edit, or the section that
+    /// justifies the tab would have nothing in it.
+    #[test]
+    fn opening_the_config_tab_starts_an_edit_of_the_current_layout() {
+        let mut app = app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::ALT));
+        let config = app.config_tab.as_ref().expect("the tab has state");
+        assert_eq!(config.draft.panels(), app.layout.panels());
+        assert!(!config.dirty, "nothing has been changed yet");
+    }
+
+    /// Editing the layout must not change what is drawn until it is saved,
+    /// so an experiment can be abandoned.
+    #[test]
+    fn editing_the_layout_does_not_take_effect_until_it_is_saved() {
+        let mut app = app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::ALT));
+        let before = app.layout.panels().len();
+
+        // Focus the contents, then remove a panel.
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+
+        let config = app.config_tab.as_ref().expect("the tab has state");
+        assert!(config.dirty, "the draft changed");
+        assert_eq!(config.draft.panels().len(), before - 1);
+        assert_eq!(
+            app.layout.panels().len(),
+            before,
+            "what is drawn has not changed yet"
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('s')));
+        assert_eq!(app.layout.panels().len(), before - 1, "saving applies it");
+    }
+
+    /// Cleanup lists before it deletes. Removing things somebody made
+    /// without showing them first would be asking for trust this has no way
+    /// to earn.
+    #[test]
+    fn cleanup_lists_before_it_deletes() {
+        let mut app = app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::ALT));
+
+        // Move to Housekeeping, then into its list.
+        for _ in 0..5 {
+            app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        }
+        let section = app.config_tab.as_ref().expect("state").section;
+        assert_eq!(section, super::super::config_tab::Section::Maintenance);
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        let first = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(
+            matches!(first.as_slice(), [Command::Cleanup { delete: false }]),
+            "the first press only lists: {first:?}"
+        );
+
+        let second = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(
+            matches!(second.as_slice(), [Command::Cleanup { delete: true }]),
+            "the second press deletes: {second:?}"
+        );
     }
 }
