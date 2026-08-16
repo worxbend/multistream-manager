@@ -4,6 +4,7 @@
 //! way it is meant to be used. The subcommands exist for the things a TUI is bad
 //! at: one-off logins, scripted go-lives, and printing a stream key.
 
+mod anim;
 mod auth;
 mod backend;
 mod chat;

@@ -225,6 +225,16 @@ pub struct App {
     pub should_quit: bool,
     /// A transient one-line message shown at the bottom.
     pub toast: Option<String>,
+    /// How much the interface animates.
+    pub animation: crate::anim::Mode,
+    /// When this run started.
+    ///
+    /// Every animation is a function of how long ago this was, so one value
+    /// drives all of them and they stay in step with each other for free.
+    pub started_at: std::time::Instant,
+    /// Set once the start-up splash has been dismissed by a keypress.
+    pub splash_skipped: bool,
+
     /// The theme picker, while it is open.
     pub theme_picker: Option<super::theme_picker::ThemePicker>,
     /// The palette every surface is drawn from.
@@ -309,6 +319,9 @@ impl App {
             );
         }
         Self {
+            animation: config.appearance.animation_mode(),
+            started_at: std::time::Instant::now(),
+            splash_skipped: false,
             theme_picker: None,
             palette,
             tab: Tab::StreamInfo,
@@ -642,6 +655,17 @@ impl App {
         // Ctrl+C always quits, on every screen, even mid-request.
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
             self.should_quit = true;
+            return vec![];
+        }
+
+        // Any key dismisses the start-up splash and is then swallowed. The
+        // key is deliberately not passed on to whatever is underneath: at the
+        // moment it was pressed the user was looking at the splash, not at
+        // the screen behind it, so acting on it would act on something they
+        // could not see. Ctrl+C is the exception, handled just above, because
+        // "stop" must always mean stop.
+        if self.splash_is_showing() {
+            self.splash_skipped = true;
             return vec![];
         }
 
@@ -1174,6 +1198,33 @@ impl App {
         let custom = self.config.appearance.custom_theme.to_palette();
         let (palette, _) = crate::theme::resolve(&picker.selected_name(), &custom);
         self.apply_palette(palette);
+    }
+
+    /// How long this run has been going, which is what every animation is a
+    /// function of.
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.started_at.elapsed()
+    }
+
+    /// Whether anything on screen is currently moving.
+    ///
+    /// The event loop uses this to decide whether to run the ten-a-second
+    /// animation clock at all. When nothing is animating it stays parked, so
+    /// an idle interface costs two redraws a second rather than ten.
+    pub fn is_animating(&self) -> bool {
+        if self.animation == crate::anim::Mode::Off {
+            return false;
+        }
+        self.splash_is_showing()
+    }
+
+    /// Whether the start-up splash is still covering the interface.
+    pub fn splash_is_showing(&self) -> bool {
+        super::splash::is_showing(
+            self.elapsed(),
+            self.splash_skipped,
+            self.config.appearance.splash,
+        )
     }
 
     /// Make `palette` the one every subsequent frame is drawn from.
@@ -1842,7 +1893,14 @@ mod tests {
         // configured, which is not what most of these tests are about; they
         // drive the streaming flow, so they start at the platform picker.
         let mut app = App::new(Config::default());
+        // The start-up splash would otherwise cover the screen these tests
+        // are looking at, and swallow the keys they send.
+        app.splash_skipped = true;
         app.screen = Screen::Platforms;
+        // The start-up splash covers the interface and swallows the first
+        // keypress, which is right for a real session and wrong for a test
+        // that wants to drive the screen underneath it.
+        app.splash_skipped = true;
         app
     }
 
@@ -2595,6 +2653,9 @@ mod tests {
     #[test]
     fn alt_modified_keys_are_not_typed_into_a_chat_input() {
         let mut app = App::new(Config::default());
+        // The start-up splash would otherwise cover the screen these tests
+        // are looking at, and swallow the keys they send.
+        app.splash_skipped = true;
         app.tab = Tab::Chat;
         app.chat.mode = super::super::chat_tab::ChatFocus::Join(String::new());
 
@@ -2660,6 +2721,9 @@ mod tests {
     fn setup_saves_credentials_and_moves_to_the_login_screen() {
         let scratch = crate::paths::test_support::ScratchConfigDir::new("app-setup-save");
         let mut app = App::new(Config::default());
+        // The start-up splash would otherwise cover the screen these tests
+        // are looking at, and swallow the keys they send.
+        app.splash_skipped = true;
         assert_eq!(app.screen, Screen::Setup);
 
         // Enter is refused until at least one platform is complete.
@@ -2695,6 +2759,9 @@ mod tests {
         config.twitch.client_id = "id".into();
         config.twitch.client_secret = "secret".into();
         let mut app = App::new(config);
+        // The start-up splash would otherwise cover the screen these tests
+        // are looking at, and swallow the keys they send.
+        app.splash_skipped = true;
         assert_eq!(app.screen, Screen::Login);
 
         let commands = app.handle_key(key(KeyCode::Enter));
@@ -2717,6 +2784,9 @@ mod tests {
         config.twitch.client_id = "id".into();
         config.twitch.client_secret = "secret".into();
         let mut app = App::new(config);
+        // The start-up splash would otherwise cover the screen these tests
+        // are looking at, and swallow the keys they send.
+        app.splash_skipped = true;
 
         let commands = app.handle_event(Event::LoggedIn {
             platform: Platform::Twitch,
@@ -2739,6 +2809,9 @@ mod tests {
         config.twitch.client_id = "id".into();
         config.twitch.client_secret = "secret".into();
         let mut app = App::new(config);
+        // The start-up splash would otherwise cover the screen these tests
+        // are looking at, and swallow the keys they send.
+        app.splash_skipped = true;
         app.busy = true;
 
         let commands = app.handle_event(Event::LoggedIn {
@@ -2849,7 +2922,10 @@ mod tests {
         config.preset.language = "pl".into();
         config.preset.platforms = vec![Platform::Twitch];
 
-        let app = App::new(config);
+        let mut app = App::new(config);
+        // The start-up splash would otherwise cover the screen these tests
+        // are looking at, and swallow the keys they send.
+        app.splash_skipped = true;
         assert_eq!(app.input(Field::Title).unwrap().value(), "Saved title");
         assert_eq!(app.input(Field::Tags).unwrap().value(), "rust");
         assert_eq!(app.plan().language, "pl");
@@ -3057,7 +3133,64 @@ mod tests {
     fn an_empty_saved_platform_list_falls_back_to_all_platforms() {
         let mut config = Config::default();
         config.preset.platforms = vec![];
-        let app = App::new(config);
+        let mut app = App::new(config);
+        // The start-up splash would otherwise cover the screen these tests
+        // are looking at, and swallow the keys they send.
+        app.splash_skipped = true;
         assert_eq!(app.selected, Platform::ALL.to_vec());
+    }
+
+    /// The splash covers the interface, so a key pressed while it is up must
+    /// dismiss it and go no further: the user was looking at the splash, not
+    /// at the screen behind it, and acting on that key would act on something
+    /// they could not see.
+    #[test]
+    fn a_key_during_the_splash_dismisses_it_without_reaching_the_screen_behind() {
+        let mut app = App::new(Config::default());
+        app.screen = Screen::Platforms;
+        assert!(app.splash_is_showing(), "the splash starts covering things");
+
+        // `q` quits from the platform picker. It must not, here.
+        app.handle_key(KeyEvent::from(KeyCode::Char('q')));
+        assert!(!app.should_quit, "the splash must swallow the key");
+        assert!(!app.splash_is_showing(), "and be dismissed by it");
+
+        // The next key reaches the screen underneath as usual.
+        app.handle_key(KeyEvent::from(KeyCode::Char('q')));
+        assert!(app.should_quit);
+    }
+
+    /// Stop always has to mean stop, even over a decorative start-up screen.
+    #[test]
+    fn ctrl_c_quits_even_while_the_splash_is_up() {
+        let mut app = App::new(Config::default());
+        assert!(app.splash_is_showing());
+        app.handle_key(ctrl('c'));
+        assert!(app.should_quit);
+    }
+
+    /// Turning the splash off in the config has to actually turn it off, or
+    /// the setting is a lie that costs the user a keypress at every start-up.
+    #[test]
+    fn the_splash_can_be_turned_off_in_the_config() {
+        let mut config = Config::default();
+        config.appearance.splash = false;
+        let app = App::new(config);
+        assert!(!app.splash_is_showing());
+        assert!(
+            !app.is_animating(),
+            "nothing is moving, so no clock is needed"
+        );
+    }
+
+    /// The animation clock must stay parked when animation is off, however
+    /// much is on screen — that is the whole point of the setting.
+    #[test]
+    fn animation_off_parks_the_clock_even_during_the_splash() {
+        let mut config = Config::default();
+        config.appearance.animations = "off".into();
+        let app = App::new(config);
+        assert!(app.splash_is_showing());
+        assert!(!app.is_animating());
     }
 }

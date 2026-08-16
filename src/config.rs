@@ -61,6 +61,17 @@ pub struct AppearanceConfig {
     /// restate the other eight.
     pub custom_theme: CustomTheme,
 
+    /// How much the interface animates: `fast`, `reduced`, or `off`.
+    ///
+    /// `reduced` keeps every effect but runs it in fewer, bigger steps, which
+    /// is the setting to use if motion is uncomfortable or the terminal is on
+    /// the far end of a slow connection. `off` renders every animated element
+    /// at its finished frame — nothing is hidden, it simply does not move.
+    pub animations: String,
+
+    /// Show the animated start-up splash.
+    pub splash: bool,
+
     /// React to mouse clicks and the scroll wheel.
     ///
     /// Turning this off gives the terminal back its own text selection, which
@@ -93,6 +104,8 @@ impl Default for AppearanceConfig {
         Self {
             theme: crate::theme::DEFAULT_PRESET.to_string(),
             custom_theme: CustomTheme::default(),
+            animations: "fast".to_string(),
+            splash: true,
             mouse: true,
             telemetry: false,
             toasts: true,
@@ -146,6 +159,14 @@ impl CustomTheme {
 }
 
 impl AppearanceConfig {
+    /// How much motion the interface should use.
+    ///
+    /// An unrecognised value means the same as the default: something is
+    /// wrong with the config file, but the interface still has to draw.
+    pub fn animation_mode(&self) -> crate::anim::Mode {
+        crate::anim::Mode::parse(&self.animations).unwrap_or_default()
+    }
+
     /// The palette to draw with, plus whether the configured name was
     /// recognised. A `false` here is worth logging, not worth failing on.
     pub fn palette(&self) -> (crate::theme::Palette, bool) {

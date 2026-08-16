@@ -4,6 +4,7 @@ pub mod app;
 pub mod chat_tab;
 pub mod draw;
 pub mod input;
+pub mod splash;
 pub mod theme_picker;
 pub mod worker;
 
@@ -114,6 +115,18 @@ pub async fn run(config: Config) -> Result<()> {
     // between the (much more expensive) statistics polls.
     let mut redraw = tokio::time::interval(std::time::Duration::from_millis(500));
 
+    // The animation clock. Every moving thing on screen is a function of how
+    // long the run has been going (see `crate::anim`), so making them move is
+    // simply a matter of redrawing often enough — one clock for all of them
+    // rather than a timer per effect.
+    //
+    // It only runs when there is actually something animating. With
+    // `animations = "off"`, or once the splash has gone and nothing else is
+    // moving, this stays parked and the interface goes back to redrawing
+    // twice a second.
+    let mut frames = tokio::time::interval(crate::anim::FRAME_INTERVAL);
+    frames.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         guard
             .terminal
@@ -193,6 +206,9 @@ pub async fn run(config: Config) -> Result<()> {
                     }
                 }
             }
+
+            // The animation clock, ticking only while something is moving.
+            _ = frames.tick(), if app.is_animating() => {}
 
             // Plain redraw tick, so counters stay current.
             _ = redraw.tick() => {}

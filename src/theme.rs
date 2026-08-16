@@ -702,6 +702,59 @@ pub fn contrast_corrected(foreground: &str, background: &str, fallback: &str) ->
     }
 }
 
+/// `steps` colours evenly spaced from `start` to `end`.
+///
+/// An unparseable endpoint yields `steps` copies of `start`, so a broken
+/// custom palette loses a decoration rather than the whole screen.
+pub fn gradient(start: &str, end: &str, steps: usize) -> Vec<String> {
+    if steps == 0 {
+        return Vec::new();
+    }
+    let (Some(from), Some(to)) = (parse_hex(start), parse_hex(end)) else {
+        return vec![start.to_string(); steps];
+    };
+    if steps == 1 {
+        return vec![canonical(from)];
+    }
+    (0..steps)
+        .map(|index| {
+            let fraction = index as f64 / (steps - 1) as f64;
+            canonical((
+                interpolate(from.0, to.0, fraction),
+                interpolate(from.1, to.1, fraction),
+                interpolate(from.2, to.2, fraction),
+            ))
+        })
+        .collect()
+}
+
+/// A gradient that runs `start` → `end` → `start`.
+///
+/// Animations rotate through a gradient to make colour travel along a line of
+/// text. With a plain gradient the wrap from the last colour back to the first
+/// is a visible seam that scrolls past once per cycle; mirroring the ramp so
+/// both ends match removes it.
+pub fn seamless_gradient(start: &str, end: &str, steps: usize) -> Vec<String> {
+    if steps == 0 {
+        return Vec::new();
+    }
+    let forward_length = steps / 2 + steps % 2;
+    let forward = gradient(start, end, forward_length);
+    let mut colors = Vec::with_capacity(steps);
+    colors.extend_from_slice(&forward);
+
+    let mut reverse_start = forward.len() as isize - 1;
+    if steps % 2 == 1 {
+        reverse_start -= 1;
+    }
+    let mut index = reverse_start;
+    while index >= 0 {
+        colors.push(forward[index as usize].clone());
+        index -= 1;
+    }
+    colors
+}
+
 /// Darken a colour by `amount`, where 0 changes nothing and 1 gives black.
 pub fn darken(color: &str, amount: f64) -> String {
     let Some((r, g, b)) = parse_hex(color) else {
@@ -867,6 +920,30 @@ mod tests {
     fn an_unparseable_colour_draws_as_the_terminal_default() {
         assert_eq!(color("#ff0000"), Color::Rgb(255, 0, 0));
         assert_eq!(color("not a colour"), Color::Reset);
+    }
+
+    #[test]
+    fn a_gradient_runs_from_one_endpoint_to_the_other() {
+        let ramp = gradient("#000000", "#ffffff", 3);
+        assert_eq!(ramp, vec!["#000000", "#808080", "#ffffff"]);
+        assert_eq!(gradient("#000000", "#ffffff", 0), Vec::<String>::new());
+        assert_eq!(gradient("#000000", "#ffffff", 1), vec!["#000000"]);
+    }
+
+    #[test]
+    fn a_broken_endpoint_degrades_the_gradient_rather_than_the_screen() {
+        assert_eq!(gradient("nope", "#ffffff", 2), vec!["nope", "nope"]);
+    }
+
+    /// The point of the mirrored ramp is that rotating through it has no
+    /// visible jump, which means the first and last entries must match.
+    #[test]
+    fn a_seamless_gradient_starts_and_ends_on_the_same_colour() {
+        for steps in 2..12 {
+            let ramp = seamless_gradient("#000000", "#ffffff", steps);
+            assert_eq!(ramp.len(), steps, "wrong length for {steps} steps");
+            assert_eq!(ramp[0], ramp[steps - 1], "seam visible at {steps} steps");
+        }
     }
 
     #[test]

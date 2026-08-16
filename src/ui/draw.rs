@@ -59,6 +59,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     draw_footer(frame, areas[3], app);
 
+    // The start-up splash covers everything, including the picker: it is on
+    // screen before either could have been opened.
+    if app.splash_is_showing() {
+        super::splash::draw(frame, frame.area(), app.elapsed(), app.animation);
+        return;
+    }
+
     // The theme picker covers everything: colours are judged by looking at
     // the whole screen, so it takes the whole screen.
     if let Some(picker) = &app.theme_picker {
@@ -1177,7 +1184,14 @@ mod tests {
         // their own App under a scratch config directory; this helper is for
         // everything else, so it just lands on the platform picker.
         let mut app = App::new(config);
+        // The start-up splash would otherwise cover the screen these tests
+        // are looking at, and swallow the keys they send.
+        app.splash_skipped = true;
         app.screen = Screen::Platforms;
+        // The start-up splash covers the interface and swallows the first
+        // keypress, which is right for a real session and wrong for a test
+        // that wants to drive the screen underneath it.
+        app.splash_skipped = true;
         app
     }
 
@@ -1197,7 +1211,10 @@ mod tests {
         // A scratch config directory keeps the test off the developer's own
         // saved logins, which would otherwise decide the opening screen.
         let _scratch = crate::paths::test_support::ScratchConfigDir::new("draw-setup");
-        let app = App::new(Config::default());
+        let mut app = App::new(Config::default());
+        // The start-up splash would otherwise cover the screen these tests
+        // are looking at, and swallow the keys they send.
+        app.splash_skipped = true;
         let screen = render(&app, 100, 30);
 
         assert!(screen.contains("Set up API access"));
@@ -1214,6 +1231,9 @@ mod tests {
     fn the_setup_form_never_draws_a_secret() {
         let _scratch = crate::paths::test_support::ScratchConfigDir::new("draw-setup-secret");
         let mut app = App::new(Config::default());
+        // The start-up splash would otherwise cover the screen these tests
+        // are looking at, and swallow the keys they send.
+        app.splash_skipped = true;
         app.setup_cursor = 1; // the Twitch client secret
         for c in "hunter2secret".chars() {
             app.handle_key(crossterm::event::KeyEvent::new(
@@ -1234,7 +1254,10 @@ mod tests {
         let mut config = Config::default();
         config.twitch.client_id = "id".into();
         config.twitch.client_secret = "secret".into();
-        let app = App::new(config);
+        let mut app = App::new(config);
+        // The start-up splash would otherwise cover the screen these tests
+        // are looking at, and swallow the keys they send.
+        app.splash_skipped = true;
         let screen = render(&app, 100, 30);
 
         assert!(screen.contains("Authorise your accounts"));
@@ -1270,6 +1293,9 @@ mod tests {
         // cannot pick up real logins from the developer's machine.
         let _scratch = crate::paths::test_support::ScratchConfigDir::new("draw-chat-empty");
         let mut app = App::new(Config::default());
+        // The start-up splash would otherwise cover the screen these tests
+        // are looking at, and swallow the keys they send.
+        app.splash_skipped = true;
         app.tab = super::super::app::Tab::Chat;
         let screen = render(&app, 120, 30);
         assert!(screen.contains("Twitch"));
