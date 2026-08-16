@@ -159,6 +159,8 @@ pub enum Tab {
     Combined,
     /// OBS Studio: scenes, microphones, streaming and recording.
     Obs,
+    /// Everything the program can be told, while it is running.
+    Config,
 }
 
 /// Which half of the combined tab the keyboard is talking to.
@@ -260,6 +262,11 @@ pub struct App {
 
     /// What this process is costing the machine, when it is being shown.
     pub telemetry: crate::telemetry::Telemetry,
+    /// How the Combined tab is arranged.
+    pub layout: crate::layout::Layout,
+    /// The configuration tab, while it is open.
+    pub config_tab: Option<super::config_tab::ConfigTab>,
+
     /// The bindings in force, built from the defaults plus `[keys]`.
     pub keymap: crate::keys::Keymap,
     /// Keys pressed so far towards a chord, e.g. leader then `o` while
@@ -359,7 +366,17 @@ impl App {
                 "unknown theme name; using the default palette"
             );
         }
+        // The Combined tab's arrangement. A layout the file cannot express
+        // falls back to the default one rather than to a blank tab, and says
+        // why in the log.
+        let (layout, layout_problem) = match crate::layout::Layout::from_file(&config.layout) {
+            Ok(layout) => (layout, None),
+            Err(reason) => (crate::layout::Layout::default(), Some(reason)),
+        };
+
         let mut app = Self {
+            config_tab: None,
+            layout,
             keymap,
             pending_keys: Vec::new(),
             which_key_all: false,
@@ -415,6 +432,12 @@ impl App {
         // ability to start.
         for problem in key_problems {
             app.push_log(LogLevel::Warning, format!("Key binding: {problem}"));
+        }
+        if let Some(problem) = layout_problem {
+            app.push_log(
+                LogLevel::Warning,
+                format!("Layout: {problem} — using the default arrangement"),
+            );
         }
 
         app
@@ -705,6 +728,7 @@ impl App {
             Action::TabChat => return self.go_to_tab(Tab::Chat),
             Action::TabCombined => return self.go_to_tab(Tab::Combined),
             Action::TabObs => return self.go_to_tab(Tab::Obs),
+            Action::TabConfig => return self.go_to_tab(Tab::Config),
             Action::TabNext => return self.cycle_tab(1),
             Action::TabPrevious => return self.cycle_tab(-1),
             Action::CombinedSwapFocus => {
@@ -841,13 +865,27 @@ impl App {
                 self.chat.activate(&self.config);
             }
             Tab::Obs => self.obs_command(crate::obs::task::Command::Refresh),
+            Tab::Config => {
+                // The tab edits a copy of the layout, so opening it takes a
+                // fresh one rather than resuming an edit somebody walked away
+                // from a session ago.
+                if self.config_tab.is_none() {
+                    self.config_tab = Some(super::config_tab::ConfigTab::new(self.layout.clone()));
+                }
+            }
             Tab::StreamInfo => {}
         }
         vec![]
     }
 
     fn cycle_tab(&mut self, delta: isize) -> Vec<Command> {
-        const ORDER: [Tab; 4] = [Tab::StreamInfo, Tab::Chat, Tab::Combined, Tab::Obs];
+        const ORDER: [Tab; 5] = [
+            Tab::StreamInfo,
+            Tab::Chat,
+            Tab::Combined,
+            Tab::Obs,
+            Tab::Config,
+        ];
         let index = ORDER.iter().position(|tab| *tab == self.tab).unwrap_or(0);
         let next = ORDER[(index as isize + delta).rem_euclid(ORDER.len() as isize) as usize];
         self.go_to_tab(next)
@@ -881,6 +919,259 @@ impl App {
                     let name = input.name.clone();
                     self.obs_command(ObsCommand::ToggleMute(name));
                 }
+            }
+        }
+    }
+
+    /// The Configuration tab's own keys.
+    ///
+    /// This tab is a form, so most of its keys are local to it: they move a
+    /// cursor, change a setting, or edit the layout. Anything the keymap has
+    /// bound has already run by the time this is reached.
+    fn key_config(&mut self, key: KeyEvent) -> Vec<Command> {
+        use super::config_tab::{edit, Focus, Section};
+
+        let Some(mut config) = self.config_tab.clone() else {
+            return vec![];
+        };
+        let rows = config.rows(self);
+
+        match key.code {
+            KeyCode::Tab | KeyCode::Char('h') | KeyCode::Char('l') => {
+                config.focus = match config.focus {
+                    Focus::Sections => Focus::Contents,
+                    Focus::Contents => Focus::Sections,
+                };
+            }
+            KeyCode::Down | KeyCode::Char('j') => match config.focus {
+                Focus::Sections => {
+                    let index = Section::ALL
+                        .iter()
+                        .position(|section| *section == config.section)
+                        .unwrap_or(0);
+                    config.section = Section::ALL[(index + 1) % Section::ALL.len()];
+                    config.cursor = 0;
+                }
+                Focus::Contents => {
+                    if rows > 0 {
+                        config.cursor = (config.cursor + 1) % rows;
+                    }
+                }
+            },
+            KeyCode::Up | KeyCode::Char('k') => match config.focus {
+                Focus::Sections => {
+                    let index = Section::ALL
+                        .iter()
+                        .position(|section| *section == config.section)
+                        .unwrap_or(0);
+                    config.section =
+                        Section::ALL[(index + Section::ALL.len() - 1) % Section::ALL.len()];
+                    config.cursor = 0;
+                }
+                Focus::Contents => {
+                    if rows > 0 {
+                        config.cursor = (config.cursor + rows - 1) % rows;
+                    }
+                }
+            },
+            KeyCode::Esc => {
+                // Leaving with an unsaved layout throws the edit away rather
+                // than keeping it half-applied, and says so.
+                if config.dirty {
+                    self.notify(
+                        super::toast::Level::Warning,
+                        "Layout changes were not saved — press s to keep them.",
+                    );
+                }
+                self.config_tab = None;
+                return self.go_to_tab(Tab::StreamInfo);
+            }
+            KeyCode::Enter if config.section == Section::Maintenance => {
+                self.config_tab = Some(config);
+                return self.run_maintenance();
+            }
+            KeyCode::Enter if config.section == Section::Accounts => {
+                self.config_tab = Some(config);
+                return self.toggle_login();
+            }
+            _ if config.section == Section::Layout => {
+                match key.code {
+                    KeyCode::Char('+') | KeyCode::Char('=') => {
+                        edit::resize(&mut config.draft, config.cursor, 1);
+                        config.dirty = true;
+                    }
+                    KeyCode::Char('-') | KeyCode::Char('_') => {
+                        edit::resize(&mut config.draft, config.cursor, -1);
+                        config.dirty = true;
+                    }
+                    KeyCode::Char('r') => {
+                        edit::rotate(&mut config.draft);
+                        config.dirty = true;
+                    }
+                    KeyCode::Char('d') => {
+                        if edit::remove(&mut config.draft, config.cursor) {
+                            config.dirty = true;
+                            config.cursor = config
+                                .cursor
+                                .min(config.draft.panels().len().saturating_sub(1));
+                        } else {
+                            self.notify(
+                                super::toast::Level::Warning,
+                                "A layout needs at least one panel.",
+                            );
+                        }
+                    }
+                    KeyCode::Char('a') => {
+                        // Add whichever panel is not on the layout yet, so
+                        // one key adds something rather than opening a menu
+                        // to choose from a list of eight.
+                        let present = config.draft.panels();
+                        match crate::layout::Panel::ALL
+                            .iter()
+                            .find(|panel| !present.contains(panel))
+                        {
+                            Some(panel) => {
+                                edit::add(&mut config.draft, *panel);
+                                config.dirty = true;
+                                self.notify(
+                                    super::toast::Level::Info,
+                                    format!("Added {}.", panel.title()),
+                                );
+                            }
+                            None => self.notify(
+                                super::toast::Level::Info,
+                                "Every panel is already on the layout.",
+                            ),
+                        }
+                    }
+                    KeyCode::Char('p') => {
+                        // Cycle through the presets, which is a faster way to
+                        // arrive somewhere usable than moving eight panels by
+                        // hand.
+                        let names = crate::layout::presets::NAMES;
+                        let next = names[(config.cursor + 1) % names.len()].0;
+                        if let Some(layout) = crate::layout::presets::by_name(next) {
+                            config.draft = layout;
+                            config.dirty = true;
+                            config.cursor = 0;
+                            self.notify(
+                                super::toast::Level::Info,
+                                format!("Layout preset: {next}"),
+                            );
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        self.config_tab = Some(config);
+                        return self.save_layout();
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+
+        self.config_tab = Some(config);
+        vec![]
+    }
+
+    /// Run whichever housekeeping job is selected.
+    ///
+    /// The results go to the activity log rather than into this pane: they
+    /// are a list of things that happened, which is exactly what the log is,
+    /// and a second scrolling list inside a settings screen would be a worse
+    /// version of it.
+    fn run_maintenance(&mut self) -> Vec<Command> {
+        let Some(config) = self.config_tab.as_mut() else {
+            return vec![];
+        };
+        match config.cursor {
+            0 => {
+                // The first press lists, the second deletes. Deleting things
+                // somebody made, without showing them first, would be asking
+                // for trust this has no way to earn.
+                let delete = config.cleanup_listed;
+                config.cleanup_listed = !delete;
+                vec![Command::Cleanup { delete }]
+            }
+            1 => vec![Command::ExportSuperchats],
+            _ => vec![Command::ListStreams],
+        }
+    }
+
+    /// Log in to, or out of, the selected platform.
+    fn toggle_login(&mut self) -> Vec<Command> {
+        let Some(config) = self.config_tab.as_ref() else {
+            return vec![];
+        };
+        let Some(platform) = Platform::ALL.get(config.cursor).copied() else {
+            return vec![];
+        };
+
+        if self.logged_in.get(&platform).copied().unwrap_or(false) {
+            self.logged_in.insert(platform, false);
+            self.notify(
+                super::toast::Level::Info,
+                format!("Logging out of {}…", platform.label()),
+            );
+            vec![Command::Logout(platform)]
+        } else {
+            if self.config.check_credentials(&[platform]).is_err() {
+                self.notify(
+                    super::toast::Level::Warning,
+                    format!(
+                        "{} has no API credentials yet — fill them in on the setup screen.",
+                        platform.label()
+                    ),
+                );
+                return vec![];
+            }
+            self.notify(
+                super::toast::Level::Info,
+                format!("Opening your browser to authorise {}…", platform.label()),
+            );
+            vec![Command::Login(vec![platform])]
+        }
+    }
+
+    /// Keep the edited layout: apply it and write it to the config file.
+    fn save_layout(&mut self) -> Vec<Command> {
+        let Some(config) = self.config_tab.as_mut() else {
+            return vec![];
+        };
+        if let Err(reason) = config.draft.validate() {
+            self.notify(
+                super::toast::Level::Error,
+                format!("That layout will not work: {reason}"),
+            );
+            return vec![];
+        }
+
+        let draft = config.draft.clone();
+        // A layout the file format cannot express is refused rather than
+        // saved in a form that would come back different — a setting that
+        // does not survive a restart is worse than one that was refused.
+        let Some(file) = draft.to_file() else {
+            self.notify(
+                super::toast::Level::Error,
+                "That layout is nested too deeply to be saved.",
+            );
+            return vec![];
+        };
+
+        config.dirty = false;
+        self.layout = draft;
+        self.config.layout = file;
+        match self.config.save() {
+            Ok(()) => {
+                self.notify(super::toast::Level::Success, "Layout saved.");
+                vec![Command::ReloadConfig(Box::new(self.config.clone()))]
+            }
+            Err(err) => {
+                self.notify(
+                    super::toast::Level::Error,
+                    format!("Could not save the layout: {err:#}"),
+                );
+                vec![]
             }
         }
     }
@@ -1530,6 +1821,10 @@ impl App {
             return self.key_chat(key);
         }
 
+        if self.tab == Tab::Config {
+            return self.key_config(key);
+        }
+
         if self.tab == Tab::Obs {
             return self.key_obs(key);
         }
@@ -1554,7 +1849,7 @@ impl App {
         match self.tab {
             Tab::Chat => true,
             Tab::Combined => self.combined_focus == CombinedFocus::Chat,
-            Tab::StreamInfo | Tab::Obs => false,
+            Tab::StreamInfo | Tab::Obs | Tab::Config => false,
         }
     }
 

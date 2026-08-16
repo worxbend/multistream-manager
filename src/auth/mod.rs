@@ -32,17 +32,6 @@ fn credentials(config: &Config, platform: Platform) -> (String, String) {
     }
 }
 
-/// Run the interactive browser login for one platform and save the result.
-///
-/// With `add = false` the tokens become the platform's primary account (the
-/// one streaming uses), exactly as before. With `add = true` — `msm login
-/// twitch --add` — the tokens are stored as an *additional* account under
-/// `twitch:<login>` / `youtube:<channel-id>`, for the Chat tab's multi-account
-/// support. Returns the token-store key the login landed under.
-pub async fn login(config: &Config, platform: Platform, add: bool) -> Result<String> {
-    login_with(config, platform, add, &|message| println!("{message}")).await
-}
-
 /// The same login, with the progress messages routed somewhere other than
 /// standard output — which is what the terminal interface needs, since it owns
 /// the screen and cannot have anything printed underneath it.

@@ -1106,6 +1106,20 @@ fn connection_color(status: ConnectionStatus) -> Color {
     }
 }
 
+/// One chat pane, drawn without a border of its own.
+///
+/// The Combined tab places panels itself and draws its own frames, so it
+/// needs the contents of a pane separately from the pane.
+pub fn draw_single(
+    frame: &mut Frame,
+    area: Rect,
+    state: &ChatTabState,
+    config: &Config,
+    platform: Platform,
+) {
+    draw_pane_inner(frame, area, state, config, platform);
+}
+
 fn draw_pane(
     frame: &mut Frame,
     area: Rect,
@@ -1126,7 +1140,18 @@ fn draw_pane(
         .title(format!(" {} ", platform.label()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    draw_pane_inner(frame, inner, state, config, platform);
+}
 
+/// Everything inside a chat pane's border.
+fn draw_pane_inner(
+    frame: &mut Frame,
+    inner: Rect,
+    state: &ChatTabState,
+    config: &Config,
+    platform: Platform,
+) {
+    let focused = state.focus == platform;
     let accounts = state.accounts_for(platform);
     if accounts.is_empty() {
         draw_empty_state(frame, inner, config, platform);

@@ -40,6 +40,11 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
 
 /// The top strip: connected or not, what is live, what is recording.
 fn draw_status(frame: &mut Frame, area: Rect, obs: &ObsState) {
+    draw_status_lines(frame, area, obs);
+}
+
+/// The status strip on its own, for the Combined tab to place.
+pub fn draw_status_lines(frame: &mut Frame, area: Rect, obs: &ObsState) {
     let sk = theme::skin();
 
     let (indicator, colour) = match &obs.connection {
@@ -170,7 +175,16 @@ fn draw_scenes(frame: &mut Frame, area: Rect, app: &App) {
     let block = pane_block("Scenes", focused, sk);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    draw_scene_list(frame, inner, app);
+}
 
+/// The scene list on its own, with no border of its own.
+///
+/// The Combined tab draws its own frames around whatever the layout places,
+/// so the panels it can hold have to be available without one.
+pub fn draw_scene_list(frame: &mut Frame, inner: Rect, app: &App) {
+    let sk = theme::skin();
+    let focused = app.obs_focus == ObsFocus::Scenes;
     if app.obs.scenes.is_empty() {
         frame.render_widget(
             empty_note(&app.obs, app.config.obs.enabled, "No scenes."),
@@ -251,7 +265,13 @@ fn draw_audio(frame: &mut Frame, area: Rect, app: &App) {
     let block = pane_block("Audio", focused, sk);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    draw_audio_list(frame, inner, app);
+}
 
+/// The audio list on its own, with no border of its own.
+pub fn draw_audio_list(frame: &mut Frame, inner: Rect, app: &App) {
+    let sk = theme::skin();
+    let focused = app.obs_focus == ObsFocus::Audio;
     if app.obs.audio.is_empty() {
         frame.render_widget(
             empty_note(&app.obs, app.config.obs.enabled, "No audio inputs."),

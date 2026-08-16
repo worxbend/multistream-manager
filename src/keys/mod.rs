@@ -263,6 +263,7 @@ const DEFAULTS: &[(Context, &str, Action)] = &[
     (Context::Global, "<A-2>",     Action::TabChat),
     (Context::Global, "<A-3>",     Action::TabCombined),
     (Context::Global, "<A-4>",     Action::TabObs),
+    (Context::Global, "<A-5>",     Action::TabConfig),
     (Context::Global, "<A-w>",     Action::CombinedSwapFocus),
     (Context::Global, "<A-m>",     Action::MessageHistory),
 
@@ -283,6 +284,7 @@ const DEFAULTS: &[(Context, &str, Action)] = &[
     (Context::Global, "<Leader>bc", Action::TabChat),
     (Context::Global, "<Leader>bb", Action::TabCombined),
     (Context::Global, "<Leader>bo", Action::TabObs),
+    (Context::Global, "<Leader>bg", Action::TabConfig),
     (Context::Global, "<Leader>bn", Action::TabNext),
     (Context::Global, "<Leader>bp", Action::TabPrevious),
 
@@ -292,7 +294,10 @@ const DEFAULTS: &[(Context, &str, Action)] = &[
     (Context::Global, "<Leader>fc", Action::ChatSearch),
     (Context::Global, "<Leader>fk", Action::WhichKey),
 
-    // <Leader>u — interface toggles, as in AstroNvim.
+    // <Leader>u — interface toggles, as in AstroNvim. `uc` is the
+    // configuration tab, which is where the rest of them can also be reached
+    // for anyone who would rather see the list than remember the letter.
+    (Context::Global, "<Leader>uc", Action::TabConfig),
     (Context::Global, "<Leader>ut", Action::ThemePicker),
     (Context::Global, "<Leader>ua", Action::CycleAnimations),
     (Context::Global, "<Leader>uy", Action::ToggleTelemetry),

@@ -102,13 +102,6 @@ impl Engine {
         ))
     }
 
-    /// Drop one platform's backend, for a caller that has decided the platform
-    /// is unusable (for example because its `connect` check failed) and does
-    /// not want later batch operations to keep retrying it.
-    pub fn disconnect(&mut self, platform: Platform) {
-        self.backends.remove(&platform);
-    }
-
     /// Renew every backend's access token if it is close to expiring.
     ///
     /// Called before each batch of API work. `auth::access_token` is a no-op
@@ -166,40 +159,6 @@ impl Engine {
             results.push((platform, outcome));
         }
         results
-    }
-
-    /// Resolve a category that the config named but did not give an id for.
-    ///
-    /// A hand-edited preset says `twitch_category = "Just Chatting"` with no id,
-    /// so the name has to be turned into one before the plan can be submitted.
-    pub async fn resolve_plan(&mut self, plan: &mut StreamPlan, name_hint: &str) -> Result<()> {
-        if plan.twitch_category.is_some() || name_hint.trim().is_empty() {
-            return Ok(());
-        }
-        if !self.backends.contains_key(&Platform::Twitch) {
-            return Ok(());
-        }
-
-        let matches = self.search_categories(Platform::Twitch, name_hint).await?;
-
-        // Prefer an exact match; fall back to the best fuzzy hit rather than
-        // failing, since the config was written by a human typing from memory.
-        let chosen = matches
-            .iter()
-            .find(|c| c.name.eq_ignore_ascii_case(name_hint))
-            .or_else(|| matches.first())
-            .cloned();
-
-        match chosen {
-            Some(category) => {
-                plan.twitch_category = Some(category);
-                Ok(())
-            }
-            None => anyhow::bail!(
-                "could not find a Twitch category matching {name_hint:?} from your config. \
-                 Check the spelling against Twitch's own category list."
-            ),
-        }
     }
 
     /// Apply the plan to every platform, all at once.
@@ -391,98 +350,6 @@ impl Engine {
     }
 }
 
-/// Format a go-live result set as plain text, for the non-interactive CLI path.
-pub fn render_results(results: &[PlatformResult]) -> String {
-    let mut out = String::new();
-
-    for result in results {
-        out.push_str(&format!("\n=== {} ===\n", result.platform.label()));
-        match &result.outcome {
-            Err(err) => {
-                out.push_str(&format!("FAILED: {err}\n"));
-            }
-            Ok(outcome) => {
-                out.push_str("Ready.\n");
-                if let Some(url) = &outcome.watch_url {
-                    out.push_str(&format!("  Watch:   {url}\n"));
-                }
-                if let Some(url) = &outcome.manage_url {
-                    out.push_str(&format!("  Manage:  {url}\n"));
-                }
-                if let Some(url) = &outcome.ingest_url {
-                    out.push_str(&format!("  Ingest:  {url}\n"));
-                }
-                if outcome.stream_key.is_some() {
-                    // Never printed in full: terminal scrollback and screen
-                    // shares leak it. `msm key <platform>` prints it on demand.
-                    out.push_str("  Key:     (hidden — run `msm key` to print it)\n");
-                }
-                for note in &outcome.notes {
-                    out.push_str(&format!("  - {note}\n"));
-                }
-            }
-        }
-    }
-
-    let failed = results.iter().filter(|r| !r.succeeded()).count();
-    if failed > 0 && failed < results.len() {
-        out.push_str(
-            "\nSome platforms are ready and some are not. The ones marked Ready will \
-             work if you start streaming now.\n",
-        );
-    }
-
-    out
-}
-
-/// Format a go-live result set as JSON, for `msm go --json`.
-///
-/// One object per platform, in the same order as the human report, so a wrapper
-/// script can loop over the array and act on each platform in turn. Every field
-/// is present on every object — `null` where the platform did not supply one —
-/// so a consumer can read `.watch_url` without first checking that it exists.
-///
-/// ## The stream key is deliberately absent
-///
-/// This output exists to be piped into another program, redirected into a file,
-/// or pasted into a bug report. A stream key that lands in any of those places
-/// lets whoever reads it broadcast to your channel, and unlike a password there
-/// is no prompt in front of it. `msm key` prints it when you actually want it,
-/// as a separate and deliberate act.
-pub fn render_results_json(results: &[PlatformResult]) -> String {
-    let items: Vec<serde_json::Value> = results
-        .iter()
-        .map(|result| {
-            let (ok, watch, manage, ingest, error, notes) = match &result.outcome {
-                Ok(outcome) => (
-                    true,
-                    outcome.watch_url.clone(),
-                    outcome.manage_url.clone(),
-                    outcome.ingest_url.clone(),
-                    None,
-                    outcome.notes.clone(),
-                ),
-                Err(err) => (false, None, None, None, Some(err.clone()), Vec::new()),
-            };
-
-            serde_json::json!({
-                "platform": result.platform.slug(),
-                "ok": ok,
-                "watch_url": watch,
-                "manage_url": manage,
-                "ingest_url": ingest,
-                "error": error,
-                "notes": notes,
-            })
-        })
-        .collect();
-
-    // Serialising an array of plain JSON values cannot fail, but returning an
-    // empty array rather than panicking keeps a scripted caller's parser happy
-    // even in the impossible case.
-    serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,122 +376,10 @@ mod tests {
     }
 
     #[test]
-    fn rendering_shows_urls_and_notes_for_a_success() {
-        let text = render_results(&[ok_result(Platform::Twitch)]);
-        assert!(text.contains("Twitch"));
-        assert!(text.contains("https://example.com/watch"));
-        assert!(text.contains("a note"));
-    }
-
-    #[test]
-    fn the_stream_key_is_never_printed() {
-        let text = render_results(&[ok_result(Platform::Twitch)]);
-        assert!(
-            !text.contains("super-secret-key"),
-            "the stream key must not appear in ordinary output"
-        );
-        assert!(text.contains("msm key"));
-    }
-
-    #[test]
-    fn a_failure_is_reported_with_its_reason() {
-        let text = render_results(&[err_result(Platform::YouTube)]);
-        assert!(text.contains("FAILED"));
-        assert!(text.contains("out of quota"));
-    }
-
-    #[test]
-    fn partial_success_gets_an_explicit_explanation() {
-        let text = render_results(&[ok_result(Platform::Twitch), err_result(Platform::YouTube)]);
-        assert!(text.contains("Some platforms are ready and some are not"));
-    }
-
-    #[test]
-    fn total_failure_does_not_claim_partial_success() {
-        let text = render_results(&[err_result(Platform::Twitch), err_result(Platform::YouTube)]);
-        assert!(!text.contains("Some platforms are ready"));
-    }
-
-    #[test]
     fn results_are_reported_in_a_stable_platform_order() {
         let mut results = [err_result(Platform::YouTube), ok_result(Platform::Twitch)];
         results.sort_by_key(|r| r.platform);
         assert_eq!(results[0].platform, Platform::Twitch);
-    }
-
-    /// Parse the JSON report back out, so the tests assert on the structure a
-    /// script would actually see rather than on the exact text.
-    fn parsed_json(results: &[PlatformResult]) -> Vec<serde_json::Value> {
-        serde_json::from_str(&render_results_json(results))
-            .expect("the JSON report must be valid JSON")
-    }
-
-    #[test]
-    fn the_json_report_is_an_array_with_one_object_per_platform() {
-        let items = parsed_json(&[ok_result(Platform::Twitch), err_result(Platform::YouTube)]);
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0]["platform"], "twitch");
-        assert_eq!(items[1]["platform"], "youtube");
-    }
-
-    #[test]
-    fn a_successful_platform_reports_ok_with_its_urls_and_notes() {
-        let items = parsed_json(&[ok_result(Platform::Twitch)]);
-        assert_eq!(items[0]["ok"], true);
-        assert_eq!(items[0]["watch_url"], "https://example.com/watch");
-        assert_eq!(items[0]["error"], serde_json::Value::Null);
-        assert_eq!(items[0]["notes"][0], "a note");
-    }
-
-    #[test]
-    fn a_failed_platform_reports_its_reason_rather_than_disappearing() {
-        // Partial success is the point: a script has to be able to see that one
-        // platform worked and why the other did not.
-        let items = parsed_json(&[err_result(Platform::YouTube)]);
-        assert_eq!(items[0]["ok"], false);
-        assert_eq!(items[0]["error"], "out of quota");
-        assert_eq!(items[0]["watch_url"], serde_json::Value::Null);
-    }
-
-    #[test]
-    fn the_json_report_never_contains_the_stream_key() {
-        // The whole reason this output is safe to redirect into a file is that
-        // the key is not in it. A key is enough on its own to broadcast to the
-        // channel, and JSON output is meant to be stored and passed around.
-        let text = render_results_json(&[ok_result(Platform::Twitch)]);
-        assert!(
-            !text.contains("super-secret-key"),
-            "the stream key leaked into the machine-readable output"
-        );
-        assert!(!text.contains("stream_key"));
-    }
-
-    #[test]
-    fn every_documented_field_is_present_even_when_it_has_no_value() {
-        // A consumer should be able to read a field without checking for it
-        // first, so absence is spelled `null` rather than by omitting the key.
-        let items = parsed_json(&[err_result(Platform::Twitch)]);
-        for field in [
-            "platform",
-            "ok",
-            "watch_url",
-            "manage_url",
-            "ingest_url",
-            "error",
-            "notes",
-        ] {
-            assert!(
-                items[0].get(field).is_some(),
-                "the {field:?} field is missing from the JSON report"
-            );
-        }
-    }
-
-    #[test]
-    fn an_empty_result_set_still_produces_a_parseable_array() {
-        // `msm go` can in principle end with nothing to report; a script must
-        // not have to special-case an empty stdout.
-        assert!(parsed_json(&[]).is_empty());
     }
 
     /// A backend that does nothing except succeed, or panic on `go_live`.

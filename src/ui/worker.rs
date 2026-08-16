@@ -46,6 +46,16 @@ pub enum Command {
     /// Adopt a config the interface has just saved (API credentials entered on
     /// the setup screen), and forget any engine built from the old one.
     ReloadConfig(Box<Config>),
+    /// Forget a platform's saved login.
+    Logout(Platform),
+    /// Find the YouTube broadcasts that were created and never went live, and
+    /// with `delete`, remove them.
+    Cleanup { delete: bool },
+    /// Write every paid chat event to a CSV file beside the chat logs.
+    ExportSuperchats,
+    /// List the stream keys on the YouTube channel, so the id needed by
+    /// `[youtube] stream_id` can be found without leaving the interface.
+    ListStreams,
     /// Fetch this platform's stream key and put it on the system clipboard.
     ///
     /// The key never travels to the UI half at all: it goes from the API
@@ -307,6 +317,140 @@ pub async fn run(
                         engine = None;
                     }
                     let _ = events.send(Event::LoggedIn { platform, result });
+                }
+            }
+
+            Command::Logout(platform) => {
+                let outcome = (|| -> anyhow::Result<()> {
+                    let mut store = crate::auth::store::TokenStore::load()?;
+                    store.remove(platform);
+                    store.save()
+                })();
+                let _ = events.send(match outcome {
+                    Ok(()) => {
+                        // The engine holds a backend authenticated with the
+                        // token that has just been thrown away, so it has to
+                        // go too rather than carrying on with a login that no
+                        // longer exists on disk.
+                        engine = None;
+                        Event::Log {
+                            level: LogLevel::Success,
+                            message: format!("Logged out of {}.", platform.label()),
+                        }
+                    }
+                    Err(err) => Event::Log {
+                        level: LogLevel::Error,
+                        message: format!("Could not log out of {}: {err:#}", platform.label()),
+                    },
+                });
+            }
+
+            Command::Cleanup { delete } => {
+                let _ = events.send(Event::Log {
+                    level: LogLevel::Info,
+                    message: "Looking for abandoned YouTube broadcasts…".into(),
+                });
+                match crate::maintenance::find_stale_broadcasts(&config).await {
+                    Ok(stale) if stale.is_empty() => {
+                        let _ = events.send(Event::Log {
+                            level: LogLevel::Success,
+                            message: "No abandoned broadcasts to clean up.".into(),
+                        });
+                    }
+                    Ok(stale) if !delete => {
+                        // Listing before deleting, always. These are things
+                        // somebody made, and a command that removed them
+                        // without showing them first would be asking for
+                        // trust it has no way to earn.
+                        for broadcast in &stale {
+                            let _ = events.send(Event::Log {
+                                level: LogLevel::Info,
+                                message: format!("  {} — {}", broadcast.id, broadcast.title),
+                            });
+                        }
+                        let _ = events.send(Event::Log {
+                            level: LogLevel::Warning,
+                            message: format!(
+                                "{} abandoned broadcast(s). Press D again to delete them.",
+                                stale.len()
+                            ),
+                        });
+                    }
+                    Ok(stale) => match crate::maintenance::delete_broadcasts(&config, &stale).await
+                    {
+                        Ok(report) => {
+                            for (title, reason) in &report.failed {
+                                let _ = events.send(Event::Log {
+                                    level: LogLevel::Warning,
+                                    message: format!("Could not delete {title}: {reason}"),
+                                });
+                            }
+                            let _ = events.send(Event::Log {
+                                level: LogLevel::Success,
+                                message: report.describe(),
+                            });
+                        }
+                        Err(err) => {
+                            let _ = events.send(Event::Log {
+                                level: LogLevel::Error,
+                                message: format!("Cleanup failed: {err:#}"),
+                            });
+                        }
+                    },
+                    Err(err) => {
+                        let _ = events.send(Event::Log {
+                            level: LogLevel::Error,
+                            message: format!("Could not look for broadcasts: {err:#}"),
+                        });
+                    }
+                }
+            }
+
+            Command::ExportSuperchats => {
+                let _ = events.send(match crate::maintenance::export_superchats(&config) {
+                    Ok((path, rows)) => Event::Log {
+                        level: LogLevel::Success,
+                        message: format!("Exported {rows} paid event(s) to {}", path.display()),
+                    },
+                    Err(err) => Event::Log {
+                        level: LogLevel::Error,
+                        message: format!("Export failed: {err:#}"),
+                    },
+                });
+            }
+
+            Command::ListStreams => {
+                let Some(engine) = engine.as_mut() else {
+                    let _ = events.send(Event::Log {
+                        level: LogLevel::Error,
+                        message: "Not connected yet, so there are no streams to list.".into(),
+                    });
+                    continue;
+                };
+                match engine.list_ingest_endpoints(Platform::YouTube).await {
+                    Ok(endpoints) if endpoints.is_empty() => {
+                        let _ = events.send(Event::Log {
+                            level: LogLevel::Warning,
+                            message: "This channel has no reusable stream keys yet.".into(),
+                        });
+                    }
+                    Ok(endpoints) => {
+                        for endpoint in endpoints {
+                            // The id, never the key: this window is often part
+                            // of the broadcast, and the id is the only half
+                            // needed for `[youtube] stream_id`.
+                            let _ = events.send(Event::Log {
+                                level: LogLevel::Info,
+                                message: format!("  {} — {}", endpoint.id, endpoint.title),
+                            });
+                        }
+                    }
+                    Err(err) => {
+                        let _ = events.send(Event::Log {
+                            level: LogLevel::Error,
+                            message: format!("Could not list the streams: {err:#}"),
+                        });
+                    }
                 }
             }
 

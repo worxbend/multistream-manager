@@ -38,9 +38,6 @@ toml = "0.8"
 # not fields.
 toml_edit = "0.22"
 
-# Command line argument parsing.
-clap = { version = "4", features = ["derive"] }
-
 # Error handling. anyhow for propagating, thiserror for typed API errors.
 anyhow = "1"
 thiserror = "2"

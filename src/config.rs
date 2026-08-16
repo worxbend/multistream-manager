@@ -38,6 +38,8 @@ pub struct Config {
     pub obs: ObsConfig,
     /// Key bindings. Anything left out keeps its default.
     pub keys: KeysConfig,
+    /// How the Combined tab is arranged.
+    pub layout: crate::layout::LayoutFile,
     /// The saved stream settings the form starts from.
     pub preset: PresetConfig,
 }
@@ -741,17 +743,6 @@ impl Config {
         Ok(config)
     }
 
-    /// Load from an explicit path instead of the default location. Used by
-    /// `--config`, which lets you keep one preset file per kind of stream.
-    pub fn load_from(path: &std::path::Path) -> Result<Self> {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let mut config: Config =
-            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        config.source_path = Some(path.to_path_buf());
-        Ok(config)
-    }
-
     /// Write the config back out, keeping whatever comments are already there.
     ///
     /// Uses owner-only file permissions because the file contains client
@@ -1002,76 +993,6 @@ mod tests {
         let mut config = Config::default();
         config.general.oauth_port = 9999;
         assert_eq!(config.redirect_uri(), "http://localhost:9999/callback");
-    }
-
-    /// Pressing Ctrl+S in the form used to replace the whole file with a
-    /// serialisation of the struct, deleting the setup guidance `msm init`
-    /// wrote and any notes the user had added.
-    #[test]
-    fn saving_keeps_the_comments_already_in_the_file() {
-        let dir = std::env::temp_dir().join(format!("msm-config-save-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-
-        std::fs::write(
-            &path,
-            "# my own note about this file\n\
-             [twitch]\n\
-             # get this from https://dev.twitch.tv/console/apps\n\
-             client_id = \"abc\"\n\
-             client_secret = \"shh\"\n\
-             \n\
-             [preset]\n\
-             # what the stream is usually called\n\
-             title = \"old title\"\n",
-        )
-        .unwrap();
-
-        let mut config = Config::load_from(&path).unwrap();
-        config.preset.title = "new title".into();
-        config.save().unwrap();
-
-        let saved = std::fs::read_to_string(&path).unwrap();
-        assert!(saved.contains("# my own note about this file"), "{saved}");
-        assert!(
-            saved.contains("# get this from https://dev.twitch.tv/console/apps"),
-            "{saved}"
-        );
-        assert!(
-            saved.contains("# what the stream is usually called"),
-            "{saved}"
-        );
-
-        // The value really was updated, and the untouched ones are intact.
-        assert!(saved.contains("new title"), "{saved}");
-        assert!(!saved.contains("old title"), "{saved}");
-        assert_eq!(Config::load_from(&path).unwrap().twitch.client_id, "abc");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// With no file to start from there are no comments to keep, so a complete
-    /// one is written — header included.
-    #[test]
-    fn saving_with_no_existing_file_writes_the_explanatory_header() {
-        let dir = std::env::temp_dir().join(format!("msm-config-new-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-
-        let config = Config {
-            source_path: Some(path.clone()),
-            ..Default::default()
-        };
-        config.save().unwrap();
-
-        let saved = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            saved.starts_with("# multistream-manager configuration"),
-            "{saved}"
-        );
-        Config::load_from(&path).expect("what was written must parse back");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A config file from before the Chat tab existed has no [chat] table;

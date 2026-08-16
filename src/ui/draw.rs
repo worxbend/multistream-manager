@@ -49,6 +49,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
         super::app::Tab::Combined => draw_combined(frame, areas[2], app),
         super::app::Tab::Obs => super::obs_tab::draw(frame, areas[2], app),
+        super::app::Tab::Config => super::config_tab::draw(frame, areas[2], app),
         super::app::Tab::StreamInfo => match app.screen {
             Screen::Setup => draw_setup(frame, areas[2], app),
             Screen::Login => draw_login(frame, areas[2], app),
@@ -143,7 +144,9 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
         tab("3 Combined", app.tab == super::app::Tab::Combined),
         Span::raw(" "),
         tab("4 OBS", app.tab == super::app::Tab::Obs),
-        Span::styled("   alt+1/2/3/4 to switch", Style::default().fg(sk.muted)),
+        Span::raw(" "),
+        tab("5 Config", app.tab == super::app::Tab::Config),
+        Span::styled("   alt+1…5", Style::default().fg(sk.muted)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 
@@ -332,41 +335,94 @@ fn draw_login(frame: &mut Frame, area: Rect, app: &App) {
 /// The strip on top is deliberately small — the point of this tab is to watch
 /// chat while keeping an eye on whether you are actually live and how many
 /// people are watching, not to duplicate the whole dashboard.
+/// The Combined tab, drawn from whatever arrangement the config asks for.
+///
+/// This used to be a fixed seven-row strip above two chat panes. It is now
+/// whatever `[layout]` says, because the whole point of this tab is a
+/// fullscreen terminal on a second monitor and what belongs on that screen is
+/// not the same for a solo streamer as for somebody with a moderator and a
+/// second camera.
 fn draw_combined(frame: &mut Frame, area: Rect, app: &App) {
     let sk = crate::theme::skin();
     use super::app::CombinedFocus;
+    use crate::layout::Panel;
 
-    let areas = Layout::vertical([Constraint::Length(7), Constraint::Min(0)]).split(area);
-    let focused_border = |focused: bool| {
-        if focused {
-            Style::new().fg(sk.accent)
-        } else {
-            Style::new().fg(sk.border)
+    let placed = app.layout.resolve(area);
+    if placed.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " Nothing is on this layout. Press <Leader>uc to arrange it.",
+                Style::new().fg(sk.muted),
+            ))),
+            area,
+        );
+        return;
+    }
+
+    let chat_focused = app.combined_focus == CombinedFocus::Chat;
+    for (panel, rect) in placed {
+        // A pane too small to hold a border and one row of content would be
+        // drawn as a box with nothing in it, which reads as a fault rather
+        // than as a layout that does not fit.
+        if rect.width < 3 || rect.height < 3 {
+            continue;
         }
-    };
 
-    let stream_focused = app.combined_focus == CombinedFocus::StreamInfo;
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(focused_border(stream_focused))
-        .title(" Stream info — alt+w swaps halves ")
-        .padding(ratatui::widgets::Padding::horizontal(1));
-    let inner = block.inner(areas[0]);
-    frame.render_widget(block, areas[0]);
-    frame.render_widget(
-        Paragraph::new(stream_summary_lines(app)).wrap(Wrap { trim: false }),
-        inner,
-    );
+        // The border says which half of the tab answers to the keyboard, so
+        // that `alt+w` has a visible effect rather than an invisible one.
+        let focused = match panel {
+            Panel::TwitchChat | Panel::YouTubeChat => chat_focused,
+            _ => !chat_focused,
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(if focused { sk.accent } else { sk.border }))
+            .title(format!(" {} ", panel.title()))
+            .padding(ratatui::widgets::Padding::horizontal(1));
+        let inner = block.inner(rect);
+        frame.render_widget(block, rect);
 
-    let chat_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(focused_border(!stream_focused))
-        .title(" Chat ");
-    let chat_inner = chat_block.inner(areas[1]);
-    frame.render_widget(chat_block, areas[1]);
-    super::chat_tab::draw(frame, chat_inner, &app.chat, &app.config);
+        draw_panel(frame, inner, app, panel);
+    }
+}
+
+/// Draw one panel of the Combined tab.
+fn draw_panel(frame: &mut Frame, area: Rect, app: &App, panel: crate::layout::Panel) {
+    use crate::layout::Panel;
+    use crate::model::Platform;
+
+    match panel {
+        Panel::StreamInfo => frame.render_widget(
+            Paragraph::new(stream_summary_lines(app)).wrap(Wrap { trim: false }),
+            area,
+        ),
+        Panel::TwitchChat => {
+            super::chat_tab::draw_single(frame, area, &app.chat, &app.config, Platform::Twitch)
+        }
+        Panel::YouTubeChat => {
+            super::chat_tab::draw_single(frame, area, &app.chat, &app.config, Platform::YouTube)
+        }
+        Panel::ObsScenes => super::obs_tab::draw_scene_list(frame, area, app),
+        Panel::ObsAudio => super::obs_tab::draw_audio_list(frame, area, app),
+        Panel::ObsStatus => super::obs_tab::draw_status_lines(frame, area, &app.obs),
+        Panel::ActivityLog => {
+            // The log panel draws its own border on the Stream Info tab, so
+            // it is given a rectangle two cells larger here to compensate for
+            // the frame the Combined tab has already drawn.
+            let outer = Rect {
+                x: area.x.saturating_sub(1),
+                y: area.y.saturating_sub(1),
+                width: area.width.saturating_add(2).min(frame.area().width),
+                height: area.height.saturating_add(2).min(frame.area().height),
+            };
+            draw_log(frame, outer, app)
+        }
+        Panel::Stats => frame.render_widget(
+            Paragraph::new(stream_summary_lines(app)).wrap(Wrap { trim: false }),
+            area,
+        ),
+    }
 }
 
 /// A few lines describing where each platform stands right now: which account
@@ -1370,7 +1426,7 @@ mod tests {
         assert!(screen.contains("1 Stream Info"));
         assert!(screen.contains("2 Chat"));
         assert!(screen.contains("3 Combined"));
-        assert!(screen.contains("alt+1/2/3"));
+        assert!(screen.contains("alt+1"));
     }
 
     #[test]

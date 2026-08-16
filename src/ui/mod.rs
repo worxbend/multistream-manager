@@ -3,6 +3,7 @@
 pub mod app;
 pub mod chat_tab;
 pub mod command_palette;
+pub mod config_tab;
 pub mod draw;
 pub mod input;
 pub mod mouse;

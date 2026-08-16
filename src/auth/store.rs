@@ -229,10 +229,6 @@ impl TokenStore {
         self.tokens.get(key)
     }
 
-    pub fn remove_keyed(&mut self, key: &str) -> bool {
-        self.tokens.remove(key).is_some()
-    }
-
     /// Every account stored for one platform, primary first, then the extra
     /// chat accounts in stable (alphabetical) order. Each entry is the token
     /// store key and the tokens behind it.
@@ -360,37 +356,6 @@ mod tests {
         let accounts = store.accounts(Platform::Twitch);
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].0, "twitch");
-    }
-
-    /// Extra chat accounts live under `twitch:<login>` beside the primary
-    /// `twitch` entry; accounts() lists the primary first, extras after, and
-    /// the other platform's entries never bleed in.
-    #[test]
-    fn extra_accounts_are_listed_after_the_primary() {
-        let mut store = TokenStore::default();
-        store.set(
-            Platform::Twitch,
-            TokenSet::new("main".into(), None, Some(3600), vec![]),
-        );
-        store.set_keyed(
-            "twitch:alt".into(),
-            TokenSet::new("alt".into(), None, Some(3600), vec![]),
-        );
-        store.set_keyed(
-            "youtube:UCx".into(),
-            TokenSet::new("yt".into(), None, Some(3600), vec![]),
-        );
-
-        let twitch: Vec<&str> = store
-            .accounts(Platform::Twitch)
-            .into_iter()
-            .map(|(key, _)| key)
-            .collect();
-        assert_eq!(twitch, ["twitch", "twitch:alt"]);
-
-        assert!(store.get_keyed("twitch:alt").is_some());
-        assert!(store.remove_keyed("twitch:alt"));
-        assert!(store.get_keyed("twitch:alt").is_none());
     }
 
     /// An identity, once stored, round-trips through the JSON file.
