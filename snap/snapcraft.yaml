@@ -1,0 +1,83 @@
+# Snap packaging for `msm`.
+#
+# A snap is a single self-contained package that installs the same way on
+# every distribution that supports it, without the program having to be built
+# separately for each one. Build it with `snapcraft` in the project root, then
+# install the resulting file with:
+#
+#   sudo snap install --dangerous ./msm_*.snap
+#
+# ("dangerous" only means the file has not been signed by the store — it is
+# the normal way to install a snap you built yourself.)
+
+name: msm
+title: Multistream Manager
+summary: Go live on Twitch and YouTube from one terminal interface
+description: |
+  Set your stream title, category, tags and language once, push them to
+  Twitch and YouTube together, and watch both chats side by side — without
+  opening either website.
+
+  Stream keys are copy-only: they are never drawn on screen, because the
+  window running this is often part of the broadcast itself.
+
+  Run `msm` with no arguments to open the interface. `msm doctor` checks the
+  setup and says what is missing.
+
+# `git` reads the version from the most recent tag, so a release is tagged
+# rather than having its number written here and forgotten.
+adopt-info: msm
+license: MIT
+source-code: https://github.com/worxbend/multistream-manager
+issues: https://github.com/worxbend/multistream-manager/issues
+
+base: core24
+grade: stable
+
+# Strict confinement: the snap can only reach what the interfaces below allow.
+# Everything this program needs is covered by them, so there is no reason to
+# ask for the run of the machine.
+confinement: strict
+
+apps:
+  msm:
+    command: bin/msm
+    plugs:
+      # Talking to the Twitch and YouTube APIs, and running the loopback
+      # listener that catches the OAuth redirect.
+      - network
+      - network-bind
+      # Opening the consent page in your browser during login. Without this,
+      # `msm login` can only print the URL for you to paste yourself.
+      - desktop
+      # Reading a config file you keep somewhere of your own with
+      # `msm --config`. The snap's own config lives in its private directory
+      # and needs no interface.
+      - home
+    environment:
+      # Inside a snap, `$HOME` is the snap's own private directory, so the
+      # config, tokens and log land there by default:
+      #   ~/snap/msm/current/.config/msm
+      # Naming it explicitly means the location is stated rather than
+      # inherited, and `msm paths` prints somewhere that actually exists.
+      MSM_CONFIG_DIR: $SNAP_USER_DATA/.config/msm
+
+parts:
+  msm:
+    plugin: rust
+    source: .
+    # Only the binary; the release profile already strips symbols.
+    rust-path: ["."]
+    build-packages:
+      # reqwest is built against rustls rather than the system TLS library, so
+      # there is deliberately no libssl-dev here.
+      - pkg-config
+    override-pull: |
+      craftctl default
+      # Take the version from the newest tag, falling back to the manifest for
+      # a build from an untagged checkout.
+      version="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+      if [ -z "$version" ]; then
+        version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+      fi
+      craftctl set version="${version#v}"

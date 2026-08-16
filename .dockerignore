@@ -1,0 +1,13 @@
+# Everything the image does not need. `target/` alone can be several
+# gigabytes, and sending it to the build daemon would dominate the build time
+# while being thrown away — the image compiles from source in its own stage.
+target/
+.git/
+*.snap
+snap/
+Dockerfile
+.dockerignore
+
+# Local notes and agent configuration, which are not part of the program.
+CLAUDE.md
+.claude/

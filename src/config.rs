@@ -50,7 +50,7 @@ pub struct AppearanceConfig {
     /// Which palette to draw with: one of the 57 built-in names, or `custom`
     /// to use the `[appearance.custom_theme]` colours below.
     ///
-    /// Run `msm profile themes` to list every name. An unrecognised name
+    /// Run `msm profile list` to see every name. An unrecognised name
     /// falls back to the default palette.
     pub theme: String,
 
