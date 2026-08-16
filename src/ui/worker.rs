@@ -46,6 +46,13 @@ pub enum Command {
     /// Adopt a config the interface has just saved (API credentials entered on
     /// the setup screen), and forget any engine built from the old one.
     ReloadConfig(Box<Config>),
+    /// Run a browser login and save the result as an *additional* chat
+    /// account rather than replacing the platform's primary one.
+    ///
+    /// The primary account is the one streaming uses. An extra one only
+    /// appears as a sub-tab on the Chat tab, which is how somebody reads and
+    /// answers chat as a bot or a second identity.
+    LoginAdd(Platform),
     /// Forget a platform's saved login.
     Logout(Platform),
     /// Find the YouTube broadcasts that were created and never went live, and
@@ -318,6 +325,36 @@ pub async fn run(
                     }
                     let _ = events.send(Event::LoggedIn { platform, result });
                 }
+            }
+
+            Command::LoginAdd(platform) => {
+                let _ = events.send(Event::Log {
+                    level: LogLevel::Info,
+                    message: format!(
+                        "Starting an additional {} login — sign in as the other account.",
+                        platform.label()
+                    ),
+                });
+                let sink = events.clone();
+                let notice = move |message: String| {
+                    let _ = sink.send(Event::Log {
+                        level: LogLevel::Info,
+                        message,
+                    });
+                };
+                let result = crate::auth::login_with(&config, platform, true, &notice)
+                    .await
+                    .map_err(|err| format!("{err:#}"));
+                let _ = events.send(match result {
+                    Ok(name) => Event::Log {
+                        level: LogLevel::Success,
+                        message: format!("Added the {} chat account {name}.", platform.label()),
+                    },
+                    Err(reason) => Event::Log {
+                        level: LogLevel::Error,
+                        message: format!("Could not add that account: {reason}"),
+                    },
+                });
             }
 
             Command::Logout(platform) => {

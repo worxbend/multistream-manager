@@ -1001,6 +1001,14 @@ impl App {
                 self.config_tab = Some(config);
                 return self.toggle_login();
             }
+            KeyCode::Char('a') if config.section == Section::Accounts => {
+                self.config_tab = Some(config);
+                return self.add_chat_account();
+            }
+            KeyCode::Enter if config.section == Section::Appearance => {
+                self.config_tab = Some(config);
+                return self.change_appearance_setting();
+            }
             _ if config.section == Section::Layout => {
                 match key.code {
                     KeyCode::Char('+') | KeyCode::Char('=') => {
@@ -1119,6 +1127,79 @@ impl App {
             1 => vec![Command::ExportSuperchats],
             _ => vec![Command::ListStreams],
         }
+    }
+
+    /// Authorise a second account for the selected platform.
+    ///
+    /// Kept apart from logging in because the two do different things: this
+    /// one leaves the primary account alone, and the account it adds is for
+    /// reading and answering chat rather than for streaming.
+    fn add_chat_account(&mut self) -> Vec<Command> {
+        let Some(config) = self.config_tab.as_ref() else {
+            return vec![];
+        };
+        let Some(platform) = Platform::ALL.get(config.cursor).copied() else {
+            return vec![];
+        };
+        if self.config.check_credentials(&[platform]).is_err() {
+            self.notify(
+                super::toast::Level::Warning,
+                format!("{} has no API credentials yet.", platform.label()),
+            );
+            return vec![];
+        }
+        self.notify(
+            super::toast::Level::Info,
+            format!(
+                "Sign in as the other {} account in your browser.",
+                platform.label()
+            ),
+        );
+        vec![Command::LoginAdd(platform)]
+    }
+
+    /// Change whichever appearance setting is selected.
+    ///
+    /// The booleans flip. The two that are not booleans open the thing that
+    /// chooses them, because a theme is picked by looking at it and an
+    /// animation mode has three values rather than two.
+    fn change_appearance_setting(&mut self) -> Vec<Command> {
+        let Some(config) = self.config_tab.as_ref() else {
+            return vec![];
+        };
+
+        match config.cursor {
+            0 => {
+                self.theme_picker = Some(super::theme_picker::ThemePicker::open(
+                    &self.config.appearance.theme,
+                    &self.palette,
+                ));
+                return vec![];
+            }
+            1 => {
+                self.animation = self.animation.next();
+                self.config.appearance.animations = self.animation.name().to_string();
+            }
+            2 => self.config.appearance.splash = !self.config.appearance.splash,
+            3 => self.config.appearance.mouse = !self.config.appearance.mouse,
+            4 => self.config.appearance.telemetry = !self.config.appearance.telemetry,
+            5 => self.config.appearance.toasts = !self.config.appearance.toasts,
+            _ => {
+                self.config.appearance.terminal_background =
+                    !self.config.appearance.terminal_background
+            }
+        }
+
+        // Mouse reporting is turned on when the terminal is set up, so a
+        // change to it only takes effect next time. Saying so beats leaving
+        // somebody to wonder why the setting appears to do nothing.
+        if config.cursor == 3 {
+            self.notify(
+                super::toast::Level::Info,
+                "Mouse reporting changes when msm next starts.",
+            );
+        }
+        self.save_appearance()
     }
 
     /// Log in to, or out of, the selected platform.
@@ -5071,5 +5152,84 @@ mod tests {
             matches!(second.as_slice(), [Command::Cleanup { delete: true }]),
             "the second press deletes: {second:?}"
         );
+    }
+
+    /// The Appearance section's hint says enter changes a setting, so it has
+    /// to change one. A hint that promises a key the screen does not handle
+    /// is worse than no hint.
+    #[test]
+    fn enter_changes_the_selected_appearance_setting() {
+        let mut app = app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::ALT));
+        // Move to Appearance, then into its list.
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+
+        // Row 2 is the splash, which is a plain boolean.
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        let before = app.config.appearance.splash;
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_ne!(app.config.appearance.splash, before, "the setting flipped");
+    }
+
+    /// The theme is chosen by looking at it, so its row opens the picker
+    /// rather than cycling blindly through 57 palettes.
+    #[test]
+    fn enter_on_the_theme_row_opens_the_picker() {
+        let mut app = app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::ALT));
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.theme_picker.is_some());
+    }
+
+    /// The Accounts section's hint offers `a` for adding another chat
+    /// account, so `a` has to start that login.
+    #[test]
+    fn a_adds_another_chat_account() {
+        let mut config = scratch_config();
+        config.twitch.client_id = "id".into();
+        config.twitch.client_secret = "secret".into();
+        let mut app = App::new(config);
+        app.splash_skipped = true;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::ALT));
+        // Move to Accounts, then into its list.
+        for _ in 0..4 {
+            app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        }
+        assert_eq!(
+            app.config_tab.as_ref().expect("state").section,
+            super::super::config_tab::Section::Accounts
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+
+        let commands = app.handle_key(KeyEvent::from(KeyCode::Char('a')));
+        assert!(
+            matches!(commands.as_slice(), [Command::LoginAdd(Platform::Twitch)]),
+            "got {commands:?}"
+        );
+    }
+
+    /// Adding an account with no credentials cannot work, and saying so
+    /// beats opening a browser that will fail.
+    #[test]
+    fn adding_an_account_without_credentials_explains_rather_than_trying() {
+        let mut app = app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::ALT));
+        for _ in 0..4 {
+            app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+
+        let commands = app.handle_key(KeyEvent::from(KeyCode::Char('a')));
+        assert!(commands.is_empty(), "nothing should be attempted");
+        assert!(app
+            .toasts
+            .visible_text()
+            .iter()
+            .any(|text| text.contains("credentials")));
     }
 }
