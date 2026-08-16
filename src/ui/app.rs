@@ -235,6 +235,8 @@ pub struct App {
     /// Set once the start-up splash has been dismissed by a keypress.
     pub splash_skipped: bool,
 
+    /// What this process is costing the machine, when it is being shown.
+    pub telemetry: crate::telemetry::Telemetry,
     /// The command palette, while it is open.
     pub command_palette: Option<super::command_palette::CommandPalette>,
     /// The theme picker, while it is open.
@@ -321,6 +323,7 @@ impl App {
             );
         }
         Self {
+            telemetry: crate::telemetry::Telemetry::default(),
             command_palette: None,
             animation: config.appearance.animation_mode(),
             started_at: std::time::Instant::now(),

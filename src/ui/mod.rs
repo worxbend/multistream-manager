@@ -129,11 +129,21 @@ pub async fn run(config: Config) -> Result<()> {
     let mut frames = tokio::time::interval(crate::anim::FRAME_INTERVAL);
     frames.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // How often the process telemetry is re-read. Once a second: these
+    // numbers are for noticing a trend, and a figure that jumps ten times a
+    // second is harder to read than one that does not.
+    let mut telemetry = tokio::time::interval(std::time::Duration::from_secs(1));
+    telemetry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         guard
             .terminal
             .draw(|frame| draw::draw(frame, &app))
             .context("drawing the interface")?;
+        // Counted after the frame has actually been drawn, so the frame rate
+        // reports what the terminal received rather than how often the loop
+        // went round.
+        app.telemetry.record_frame(std::time::Instant::now());
 
         if app.should_quit {
             break;
@@ -214,6 +224,13 @@ pub async fn run(config: Config) -> Result<()> {
             // has to come off the screen whether or not a key is pressed.
             _ = frames.tick(), if app.is_animating() => {
                 app.toasts.expire(std::time::Instant::now());
+            }
+
+            // Re-read the process telemetry, but only while it is on screen:
+            // reading `/proc` once a second for a figure nobody is looking at
+            // is exactly the sort of cost this feature exists to expose.
+            _ = telemetry.tick(), if app.config.appearance.telemetry => {
+                app.telemetry.sample(std::time::Instant::now());
             }
 
             // Plain redraw tick, so counters stay current.

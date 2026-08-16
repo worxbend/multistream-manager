@@ -15,6 +15,7 @@ mod lang;
 mod logging;
 mod model;
 mod paths;
+mod telemetry;
 mod theme;
 mod twitch;
 mod ui;

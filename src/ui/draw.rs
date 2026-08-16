@@ -123,6 +123,23 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("   alt+1/2/3 to switch", Style::default().fg(sk.muted)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
+
+    // The telemetry sits at the right-hand end of the same row. It shares the
+    // row rather than taking one of its own because it is optional: a whole
+    // line permanently reserved for numbers that are usually turned off would
+    // be a line the chat panes could have had.
+    if app.config.appearance.telemetry {
+        if let Some(summary) = app.telemetry.summary() {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!("{summary} "),
+                    Style::default().fg(sk.muted),
+                )))
+                .alignment(Alignment::Right),
+                area,
+            );
+        }
+    }
 }
 
 /// The first-run credential form.
@@ -1647,6 +1664,35 @@ mod tests {
             assert_ne!(
                 skin.on_accent, skin.accent,
                 "theme {name} draws the selected tab label in its own background colour"
+            );
+        }
+    }
+
+    /// The telemetry is off by default and must stay off until asked for —
+    /// the tab bar is not the place for numbers nobody wanted.
+    #[test]
+    fn the_telemetry_is_hidden_until_it_is_turned_on() {
+        let mut app = app();
+        app.telemetry.record_frame(std::time::Instant::now());
+        assert!(!render(&app, 100, 30).contains("fps"));
+
+        app.config.appearance.telemetry = true;
+        assert!(render(&app, 100, 30).contains("fps"));
+    }
+
+    /// It shares the tab bar's row, so it must not push the tab labels off
+    /// the left-hand end of a narrow terminal.
+    #[test]
+    fn the_telemetry_never_covers_the_tab_labels() {
+        let mut app = app();
+        app.config.appearance.telemetry = true;
+        app.telemetry.record_frame(std::time::Instant::now());
+        for width in [40, 60, 100, 200] {
+            let screen = render(&app, width, 30);
+            let first = screen.lines().next().unwrap_or_default();
+            assert!(
+                first.contains("1 Stream Info"),
+                "the tabs went missing at {width} columns: {first:?}"
             );
         }
     }
