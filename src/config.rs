@@ -34,6 +34,8 @@ pub struct Config {
     pub chat: ChatConfig,
     /// Colours, motion, and the optional interface extras.
     pub appearance: AppearanceConfig,
+    /// Controlling OBS Studio from the OBS tab.
+    pub obs: ObsConfig,
     /// The saved stream settings the form starts from.
     pub preset: PresetConfig,
 }
@@ -181,6 +183,164 @@ impl AppearanceConfig {
     pub fn palette(&self) -> (crate::theme::Palette, bool) {
         crate::theme::resolve(&self.theme, &self.custom_theme.to_palette())
     }
+}
+
+/// Talking to OBS Studio.
+///
+/// OBS has a WebSocket server built in (Tools → WebSocket Server Settings).
+/// Turn it on there, and this can drive scenes, microphones, streaming and
+/// recording without leaving the terminal.
+///
+/// Every value has a working default, and OBS not being there is not an
+/// error: with `enabled = true` and no OBS running, the pane says it is not
+/// connected and keeps trying quietly. Nothing here can stop a stream going
+/// live through Twitch or YouTube.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ObsConfig {
+    /// Whether to connect to OBS at all.
+    ///
+    /// On by default: connecting costs one local socket, and someone who has
+    /// OBS running almost certainly wants the pane. With no OBS listening the
+    /// attempt fails quietly and retries in the background, which is
+    /// indistinguishable from having it turned off.
+    pub enabled: bool,
+
+    /// The host OBS is on. Almost always this machine.
+    pub host: String,
+
+    /// The port from OBS's WebSocket Server Settings.
+    pub port: u16,
+
+    /// The password from that same settings window, if one is set.
+    ///
+    /// Prefer `password_env` to putting it here: this file holds your API
+    /// credentials too, but a password sitting in a file is one more place it
+    /// can be read from, and an OBS password lets anyone who has it control
+    /// your stream.
+    pub password: String,
+
+    /// The name of an environment variable holding the password.
+    ///
+    /// Used when `password` is empty. This is the better way round: the value
+    /// lives in your shell profile or your password manager's exec wrapper
+    /// rather than in a file that gets copied about.
+    pub password_env: String,
+
+    /// Short names for scenes, as `alias = "OBS scene name"`.
+    ///
+    /// `brb = "Be Right Back"` lets `msm obs scene brb` do the obvious thing,
+    /// and shows "brb" in the pane. Without one, the scene's real name is
+    /// used for both.
+    pub scene_aliases: std::collections::BTreeMap<String, String>,
+
+    /// One-key shortcuts for scenes, as `key = "OBS scene name"`.
+    ///
+    /// Pressing that key in the OBS tab switches to the scene. Keep them to
+    /// single characters; anything longer can never be typed as a shortcut.
+    pub scene_shortcuts: std::collections::BTreeMap<String, String>,
+
+    /// Short names for audio inputs, as `alias = "OBS input name"`.
+    pub audio_aliases: std::collections::BTreeMap<String, String>,
+
+    /// One-key shortcuts for muting audio inputs, as `key = "OBS input name"`.
+    pub audio_shortcuts: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for ObsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            host: "127.0.0.1".to_string(),
+            // obs-websocket's own default port.
+            port: 4455,
+            password: String::new(),
+            password_env: "OBS_WEBSOCKET_PASSWORD".to_string(),
+            scene_aliases: std::collections::BTreeMap::new(),
+            scene_shortcuts: std::collections::BTreeMap::new(),
+            audio_aliases: std::collections::BTreeMap::new(),
+            audio_shortcuts: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+impl ObsConfig {
+    /// The WebSocket address to connect to.
+    pub fn url(&self) -> String {
+        let host = self.host.trim();
+        let host = if host.is_empty() { "127.0.0.1" } else { host };
+        // An IPv6 literal has to be bracketed in a URL, or the colons in the
+        // address are read as the port separator.
+        if host.contains(':') && !host.starts_with('[') {
+            format!("ws://[{host}]:{}", self.port)
+        } else {
+            format!("ws://{host}:{}", self.port)
+        }
+    }
+
+    /// The password to authenticate with, if there is one.
+    ///
+    /// The config file wins over the environment when both are set, because
+    /// naming a value explicitly should beat inheriting one. An environment
+    /// variable that is set but empty counts as unset — that is what an
+    /// unfilled shell variable looks like, and treating it as a real empty
+    /// password would fail in a way nobody could read.
+    pub fn password(&self) -> Option<String> {
+        let literal = self.password.trim();
+        if !literal.is_empty() {
+            return Some(literal.to_string());
+        }
+        let name = self.password_env.trim();
+        if name.is_empty() {
+            return None;
+        }
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    /// Aliases and shortcuts keyed by OBS scene name, the way the connection
+    /// task wants them.
+    ///
+    /// The config is written the other way round — `brb = "Be Right Back"` —
+    /// because that is the readable direction for a person. Two people
+    /// pointing different aliases at the same scene is a config mistake; the
+    /// first in file order wins, and it is a BTreeMap so "first" is stable
+    /// rather than depending on hashing.
+    pub fn scene_labels(
+        &self,
+    ) -> std::collections::HashMap<String, (Option<String>, Option<String>)> {
+        labels_by_target(&self.scene_aliases, &self.scene_shortcuts)
+    }
+
+    pub fn audio_labels(
+        &self,
+    ) -> std::collections::HashMap<String, (Option<String>, Option<String>)> {
+        labels_by_target(&self.audio_aliases, &self.audio_shortcuts)
+    }
+}
+
+/// Invert `alias -> target` and `shortcut -> target` into
+/// `target -> (alias, shortcut)`.
+fn labels_by_target(
+    aliases: &std::collections::BTreeMap<String, String>,
+    shortcuts: &std::collections::BTreeMap<String, String>,
+) -> std::collections::HashMap<String, (Option<String>, Option<String>)> {
+    let mut labels: std::collections::HashMap<String, (Option<String>, Option<String>)> =
+        std::collections::HashMap::new();
+    for (alias, target) in aliases {
+        let entry = labels.entry(target.trim().to_string()).or_default();
+        if entry.0.is_none() {
+            entry.0 = Some(alias.trim().to_string());
+        }
+    }
+    for (shortcut, target) in shortcuts {
+        let entry = labels.entry(target.trim().to_string()).or_default();
+        if entry.1.is_none() {
+            entry.1 = Some(shortcut.trim().to_string());
+        }
+    }
+    labels
 }
 
 /// Twitch application credentials, from <https://dev.twitch.tv/console/apps>.
@@ -790,5 +950,113 @@ mod tests {
         assert_eq!(config.chat.poll_interval_floor_ms, 1000);
         assert_eq!(config.chat.daily_quota_units, 10_000);
         assert_eq!(config.chat.quota_reserve_percent, 10);
+    }
+
+    /// An IPv6 address has colons in it, so an unbracketed one would be read
+    /// as a host with the port in the middle of it.
+    #[test]
+    fn the_obs_url_brackets_an_ipv6_address() {
+        let config = ObsConfig {
+            host: "::1".into(),
+            port: 4455,
+            ..Default::default()
+        };
+        assert_eq!(config.url(), "ws://[::1]:4455");
+
+        // Already bracketed, and left alone.
+        let bracketed = ObsConfig {
+            host: "[::1]".into(),
+            ..Default::default()
+        };
+        assert_eq!(bracketed.url(), "ws://[::1]:4455");
+    }
+
+    #[test]
+    fn the_obs_url_uses_the_host_and_port_as_written() {
+        let config = ObsConfig {
+            host: "obs.local".into(),
+            port: 9999,
+            ..Default::default()
+        };
+        assert_eq!(config.url(), "ws://obs.local:9999");
+    }
+
+    /// An empty host is a half-edited config, not a request to connect to
+    /// nowhere.
+    #[test]
+    fn an_empty_obs_host_falls_back_to_this_machine() {
+        let config = ObsConfig {
+            host: "   ".into(),
+            ..Default::default()
+        };
+        assert_eq!(config.url(), "ws://127.0.0.1:4455");
+    }
+
+    #[test]
+    fn a_password_in_the_file_is_used_as_written() {
+        let config = ObsConfig {
+            password: "  hunter2  ".into(),
+            ..Default::default()
+        };
+        assert_eq!(config.password().as_deref(), Some("hunter2"));
+    }
+
+    #[test]
+    fn no_password_anywhere_means_none() {
+        let config = ObsConfig {
+            password: String::new(),
+            password_env: "MSM_TEST_OBS_PASSWORD_THAT_IS_NOT_SET".into(),
+            ..Default::default()
+        };
+        assert!(config.password().is_none());
+    }
+
+    /// An alias and a shortcut for the same scene have to end up on the same
+    /// entry, or one of them would silently do nothing.
+    #[test]
+    fn aliases_and_shortcuts_are_collected_per_target() {
+        let mut config = ObsConfig::default();
+        config
+            .scene_aliases
+            .insert("brb".into(), "Be Right Back".into());
+        config
+            .scene_shortcuts
+            .insert("3".into(), "Be Right Back".into());
+        config
+            .scene_aliases
+            .insert("cam".into(), "Main Camera".into());
+
+        let labels = config.scene_labels();
+        assert_eq!(
+            labels.get("Be Right Back"),
+            Some(&(Some("brb".to_string()), Some("3".to_string())))
+        );
+        assert_eq!(
+            labels.get("Main Camera"),
+            Some(&(Some("cam".to_string()), None))
+        );
+    }
+
+    /// Two aliases for one scene is a mistake in the file. Which one wins
+    /// must at least be stable, rather than changing between runs.
+    #[test]
+    fn a_duplicate_alias_resolves_the_same_way_every_time() {
+        let mut config = ObsConfig::default();
+        config.scene_aliases.insert("zzz".into(), "Main".into());
+        config.scene_aliases.insert("aaa".into(), "Main".into());
+
+        let first = config.scene_labels();
+        for _ in 0..20 {
+            assert_eq!(config.scene_labels(), first);
+        }
+        // Sorted order, so the answer does not depend on hashing.
+        assert_eq!(first["Main"].0.as_deref(), Some("aaa"));
+    }
+
+    #[test]
+    fn obs_is_on_by_default_and_points_at_the_usual_place() {
+        let config = ObsConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.url(), "ws://127.0.0.1:4455");
     }
 }

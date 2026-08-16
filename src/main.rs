@@ -14,6 +14,7 @@ mod engine;
 mod lang;
 mod logging;
 mod model;
+mod obs;
 mod paths;
 mod telemetry;
 mod theme;

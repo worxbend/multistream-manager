@@ -6,6 +6,7 @@ pub mod command_palette;
 pub mod draw;
 pub mod input;
 pub mod mouse;
+pub mod obs_tab;
 pub mod splash;
 pub mod theme_picker;
 pub mod toast;
@@ -131,6 +132,10 @@ pub async fn run(config: Config) -> Result<()> {
 
     let mut guard = TerminalGuard::new(config.appearance.mouse)?;
     let mut app = App::new(config);
+    // Start the OBS connection from inside the runtime, which is where
+    // spawning a task is possible.
+    app.connect_obs();
+    let mut obs_updates = app.obs_updates.take();
     // The chat tasks' shared event stream. Taken out of the tab state here
     // because only this loop may await on it.
     let mut chat_events = app
@@ -250,6 +255,19 @@ pub async fn run(config: Config) -> Result<()> {
                 dispatch(&mut app, &command_tx, commands);
             }
 
+            // Updates from the OBS connection. `obs_updates` is `None` when
+            // OBS control is turned off, and a `select!` branch whose future
+            // is never ready simply never fires — so this costs nothing at
+            // all in that case.
+            Some(update) = async {
+                match obs_updates.as_mut() {
+                    Some(updates) => updates.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                app.handle_obs_update(update);
+            }
+
             // Messages and state changes from the chat tasks. After the
             // awaited event, drain whatever else is already queued so a busy
             // chat becomes one redraw, not one redraw per message.
@@ -307,6 +325,15 @@ pub async fn run(config: Config) -> Result<()> {
     // an accepted send or a confirmed moderation call may still be in flight,
     // and returning from main would kill it mid-request after the composer
     // already reported it sent.
+    // The OBS connection winds down the same way: dropping its command
+    // sender ends its loop. It is awaited alongside the chat tasks so a
+    // command already in flight — a scene change, a mute — is not killed
+    // half-sent.
+    let obs_task = app.obs_handle.take().map(|handle| {
+        drop(handle.commands);
+        handle.task
+    });
+
     let chat_tasks: Vec<_> = app
         .chat
         .open
@@ -324,6 +351,9 @@ pub async fn run(config: Config) -> Result<()> {
     // the user has asked to quit.
     let shutdown = async move {
         let _ = worker.await;
+        if let Some(task) = obs_task {
+            let _ = task.await;
+        }
         for task in chat_tasks {
             let _ = task.await;
         }

@@ -44,6 +44,13 @@ fn is_typed_text(key: &KeyEvent) -> bool {
     !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT)
 }
 
+/// Which list on the OBS tab has the keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObsFocus {
+    Scenes,
+    Audio,
+}
+
 /// Which screen is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -150,6 +157,8 @@ pub enum Tab {
     /// Both at once: a compact strip of channel state above the two chat
     /// panes, for a second monitor where nothing should need switching.
     Combined,
+    /// OBS Studio: scenes, microphones, streaming and recording.
+    Obs,
 }
 
 /// Which half of the combined tab the keyboard is talking to.
@@ -234,6 +243,20 @@ pub struct App {
     pub started_at: std::time::Instant,
     /// Set once the start-up splash has been dismissed by a keypress.
     pub splash_skipped: bool,
+
+    /// Which half of the OBS tab has the keyboard, and where each list's
+    /// cursor is.
+    pub obs_focus: ObsFocus,
+    pub obs_scene_cursor: usize,
+    pub obs_audio_cursor: usize,
+
+    /// What OBS is doing, as far as this knows.
+    pub obs: crate::obs::state::ObsState,
+    /// The connection to OBS, when one has been started.
+    pub obs_handle: Option<crate::obs::task::Handle>,
+    /// Updates from that connection. Taken out by the event loop, which is
+    /// the only place allowed to await on it.
+    pub obs_updates: Option<tokio::sync::mpsc::UnboundedReceiver<crate::obs::task::Update>>,
 
     /// What this process is costing the machine, when it is being shown.
     pub telemetry: crate::telemetry::Telemetry,
@@ -323,6 +346,12 @@ impl App {
             );
         }
         Self {
+            obs_focus: ObsFocus::Scenes,
+            obs_scene_cursor: 0,
+            obs_audio_cursor: 0,
+            obs: crate::obs::state::ObsState::default(),
+            obs_handle: None,
+            obs_updates: None,
             telemetry: crate::telemetry::Telemetry::default(),
             command_palette: None,
             animation: config.appearance.animation_mode(),
@@ -479,6 +508,351 @@ impl App {
     }
 
     /// Append a line to the activity log, keeping the last 500.
+    /// Start talking to OBS, if it is configured.
+    ///
+    /// Deliberately not part of `App::new`. Spawning a task needs a running
+    /// async runtime, and a constructor that only works inside one is a trap
+    /// — every test that builds an `App` would have to become an async test
+    /// to make a connection it does not want. The event loop calls this once,
+    /// from inside the runtime, which is the one place that is true.
+    ///
+    /// There is nothing to wait for: the connection either succeeds in a
+    /// millisecond on the local machine, or fails and retries quietly in the
+    /// background.
+    pub fn connect_obs(&mut self) {
+        if !self.config.obs.enabled || self.obs_handle.is_some() {
+            return;
+        }
+        let (updates_tx, updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let params = crate::obs::task::Params {
+            url: self.config.obs.url(),
+            password: self.config.obs.password(),
+            scene_labels: self.config.obs.scene_labels(),
+            audio_labels: self.config.obs.audio_labels(),
+        };
+        tracing::info!(obs = %params.describe(), "connecting to OBS");
+        self.obs_handle = Some(crate::obs::task::spawn(params, updates_tx));
+        self.obs_updates = Some(updates_rx);
+        self.obs.connection = crate::obs::state::Connection::Connecting;
+    }
+
+    /// Keys on the OBS tab.
+    ///
+    /// Vim-flavoured, like the chat panes: `j`/`k` move, `tab` swaps lists,
+    /// `enter` acts on the selection. The letters that do something to OBS
+    /// are chosen to say what they do — `s` for stream, `r` for record — and
+    /// the destructive-looking ones are all toggles, so nothing here can act
+    /// on a stale idea of which way round something is.
+    fn key_obs(&mut self, key: KeyEvent) -> Vec<Command> {
+        use crate::obs::task::Command as ObsCommand;
+
+        // A scene or audio shortcut from the config beats the built-in keys,
+        // because somebody who bound `3` to a scene means that scene.
+        if is_typed_text(&key) {
+            if let KeyCode::Char(c) = key.code {
+                let typed = c.to_string();
+                if let Some(scene) = self
+                    .obs
+                    .scenes
+                    .iter()
+                    .find(|scene| scene.shortcut.as_deref() == Some(typed.as_str()))
+                {
+                    let name = scene.name.clone();
+                    self.obs_command(ObsCommand::SetScene(name));
+                    return vec![];
+                }
+                if let Some(input) = self
+                    .obs
+                    .audio
+                    .iter()
+                    .find(|input| input.shortcut.as_deref() == Some(typed.as_str()))
+                {
+                    let name = input.name.clone();
+                    self.obs_command(ObsCommand::ToggleMute(name));
+                    return vec![];
+                }
+            }
+        }
+
+        match key.code {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Tab
+            | KeyCode::Char('h')
+            | KeyCode::Char('l')
+            | KeyCode::Left
+            | KeyCode::Right => {
+                self.obs_focus = match self.obs_focus {
+                    ObsFocus::Scenes => ObsFocus::Audio,
+                    ObsFocus::Audio => ObsFocus::Scenes,
+                };
+            }
+            KeyCode::Char('j') | KeyCode::Down => self.move_obs_cursor(1),
+            KeyCode::Char('k') | KeyCode::Up => self.move_obs_cursor(-1),
+
+            // Act on the selection: switch to the scene, or toggle the mute.
+            KeyCode::Enter | KeyCode::Char(' ') => match self.obs_focus {
+                ObsFocus::Scenes => {
+                    if let Some(scene) = self.obs.scenes.get(self.obs_scene_cursor) {
+                        let name = scene.name.clone();
+                        self.obs_command(ObsCommand::SetScene(name));
+                    }
+                }
+                ObsFocus::Audio => {
+                    if let Some(input) = self.obs.audio.get(self.obs_audio_cursor) {
+                        let name = input.name.clone();
+                        self.obs_command(ObsCommand::ToggleMute(name));
+                    }
+                }
+            },
+            // `m` mutes whatever audio input is selected, from either list,
+            // because reaching for the microphone should not first require
+            // moving the focus to the audio column.
+            KeyCode::Char('m') => {
+                if let Some(input) = self.obs.audio.get(self.obs_audio_cursor) {
+                    let name = input.name.clone();
+                    self.obs_command(ObsCommand::ToggleMute(name));
+                }
+            }
+            // Volume, in steps of five: fine enough to be useful, coarse
+            // enough that holding the key does something visible.
+            KeyCode::Char('+') | KeyCode::Char('=') => self.nudge_obs_volume(0.05),
+            KeyCode::Char('-') | KeyCode::Char('_') => self.nudge_obs_volume(-0.05),
+
+            // Mute everything at once, or unmute everything if nothing is
+            // live. This is the panic key: saying something into an open
+            // microphone that should not have been open is the mistake with
+            // the largest consequences available here, and recovering from it
+            // should not involve finding the right row first.
+            KeyCode::Char('M') => self.mute_all_obs_audio(),
+
+            // Cycle through profiles and scene collections. Cycling rather
+            // than a picker because there are usually two or three of each,
+            // and a list to choose from would be more interface than the
+            // choice deserves.
+            KeyCode::Char('P') => self.cycle_obs(true),
+            KeyCode::Char('C') => self.cycle_obs(false),
+
+            KeyCode::Char('s') => self.obs_command(ObsCommand::ToggleStream),
+            KeyCode::Char('r') => self.obs_command(ObsCommand::ToggleRecord),
+            KeyCode::Char('p') => self.obs_command(ObsCommand::ToggleRecordPause),
+            KeyCode::Char('R') => {
+                self.obs_command(ObsCommand::Reconnect);
+                self.push_log(LogLevel::Info, "Reconnecting to OBS…");
+            }
+            KeyCode::Char('u') => self.obs_command(ObsCommand::Refresh),
+            _ => {}
+        }
+        vec![]
+    }
+
+    /// Mute every audio input, or unmute them all if none is live.
+    fn mute_all_obs_audio(&mut self) {
+        if self.obs.audio.is_empty() {
+            return;
+        }
+        // If anything can still be heard, the intent is silence. Only when
+        // everything is already muted does this become an unmute.
+        let any_live = self
+            .obs
+            .audio
+            .iter()
+            .any(|input| input.muted == Some(false));
+        let names: Vec<String> = self
+            .obs
+            .audio
+            .iter()
+            .map(|input| input.name.clone())
+            .collect();
+        for name in names {
+            self.obs_command(crate::obs::task::Command::SetMute {
+                input: name,
+                muted: any_live,
+            });
+        }
+        self.notify(
+            super::toast::Level::Info,
+            if any_live {
+                "OBS: everything muted."
+            } else {
+                "OBS: everything unmuted."
+            },
+        );
+    }
+
+    /// Move to the next profile, or the next scene collection.
+    fn cycle_obs(&mut self, profile: bool) {
+        let (list, current) = if profile {
+            (&self.obs.profiles, &self.obs.current_profile)
+        } else {
+            (
+                &self.obs.scene_collections,
+                &self.obs.current_scene_collection,
+            )
+        };
+        if list.len() < 2 {
+            self.notify(
+                super::toast::Level::Warning,
+                if profile {
+                    "OBS has only one profile."
+                } else {
+                    "OBS has only one scene collection."
+                },
+            );
+            return;
+        }
+        let index = current
+            .as_deref()
+            .and_then(|name| list.iter().position(|entry| entry == name))
+            .unwrap_or(0);
+        let next = list[(index + 1) % list.len()].clone();
+        self.obs_command(if profile {
+            crate::obs::task::Command::SetProfile(next)
+        } else {
+            crate::obs::task::Command::SetSceneCollection(next)
+        });
+    }
+
+    fn move_obs_cursor(&mut self, delta: isize) {
+        let (cursor, length) = match self.obs_focus {
+            ObsFocus::Scenes => (&mut self.obs_scene_cursor, self.obs.scenes.len()),
+            ObsFocus::Audio => (&mut self.obs_audio_cursor, self.obs.audio.len()),
+        };
+        if length == 0 {
+            *cursor = 0;
+            return;
+        }
+        // Wrapping, like every other list in this program.
+        *cursor = (*cursor as isize + delta).rem_euclid(length as isize) as usize;
+    }
+
+    /// Change the selected input's volume by `delta` of unity gain.
+    fn nudge_obs_volume(&mut self, delta: f64) {
+        let Some(input) = self.obs.audio.get(self.obs_audio_cursor) else {
+            return;
+        };
+        let Some(current) = input.volume_mul else {
+            self.notify(
+                super::toast::Level::Warning,
+                "That input's volume is not known yet.",
+            );
+            return;
+        };
+        let name = input.name.clone();
+        // Clamped at the top to unity gain. Amplifying past 100% in OBS is a
+        // deliberate act with real consequences for how a stream sounds, and
+        // it should not be reachable by leaning on a key.
+        let next = (current + delta).clamp(0.0, 1.0);
+        self.obs_command(crate::obs::task::Command::SetVolume {
+            input: name,
+            multiplier: next,
+        });
+    }
+
+    /// Keep the OBS list cursors inside the lists they point into.
+    ///
+    /// The lists change underneath them: a scene collection switch replaces
+    /// every scene at once, and an input can disappear while its row is
+    /// selected. Clamping here means the drawing code never has to.
+    fn clamp_obs_cursors(&mut self) {
+        self.obs_scene_cursor = self
+            .obs_scene_cursor
+            .min(self.obs.scenes.len().saturating_sub(1));
+        self.obs_audio_cursor = self
+            .obs_audio_cursor
+            .min(self.obs.audio.len().saturating_sub(1));
+    }
+
+    /// Send a command to OBS, if there is a connection to send it to.
+    ///
+    /// `try_send` rather than an awaited send: this runs on the thread that
+    /// draws the screen, and a full queue means the connection task is
+    /// already behind. Dropping the command and saying so beats freezing the
+    /// interface until OBS answers.
+    pub fn obs_command(&mut self, command: crate::obs::task::Command) {
+        let Some(handle) = &self.obs_handle else {
+            self.notify(
+                super::toast::Level::Warning,
+                "OBS control is turned off in config.toml.",
+            );
+            return;
+        };
+        if handle.commands.try_send(command).is_err() {
+            self.notify(
+                super::toast::Level::Warning,
+                "OBS is busy or not connected — that did nothing.",
+            );
+        }
+    }
+
+    /// Apply one update from the OBS connection.
+    ///
+    /// Connection changes are worth a line in the activity log; individual
+    /// events mostly are not, which is why [`crate::obs::event::Event::describe`]
+    /// returns `None` for the frequent ones.
+    pub fn handle_obs_update(&mut self, update: crate::obs::task::Update) {
+        use crate::obs::state::Connection;
+        use crate::obs::task::Update;
+
+        match update {
+            Update::Connection(connection) => {
+                // Only say something when the state actually changes.
+                // Reconnecting every few seconds against a machine with no
+                // OBS on it would otherwise fill the log with the same line.
+                if self.obs.connection == connection {
+                    return;
+                }
+                let previously_connected = self.obs.connection == Connection::Connected;
+                self.obs.connection = connection.clone();
+
+                match &connection {
+                    Connection::Connected => {
+                        self.push_log(LogLevel::Success, "OBS connected.");
+                    }
+                    Connection::Failed(reason) => {
+                        // Only worth telling somebody about if OBS had been
+                        // working: a failure at start-up usually just means
+                        // OBS is not running yet, which is not news.
+                        if previously_connected {
+                            self.push_log(LogLevel::Warning, format!("OBS: {reason}"));
+                        } else {
+                            tracing::debug!(reason = %reason, "OBS not reachable");
+                        }
+                        self.obs.clear_live_data();
+                        self.obs.connection = connection;
+                    }
+                    Connection::Reconnecting | Connection::Idle | Connection::Connecting => {
+                        if previously_connected {
+                            self.push_log(LogLevel::Warning, "OBS disconnected.");
+                            self.obs.clear_live_data();
+                            self.obs.connection = connection;
+                        }
+                    }
+                }
+            }
+            Update::Snapshot(state) => {
+                let connection = self.obs.connection.clone();
+                self.obs = *state;
+                // The snapshot is built by the connection task, which knows
+                // it is connected; the interface's view of the connection is
+                // the authority on anything else.
+                if connection != Connection::Connected {
+                    self.obs.connection = Connection::Connected;
+                }
+                self.clamp_obs_cursors();
+            }
+            Update::Event(event) => {
+                event.apply(&mut self.obs);
+                if let Some(line) = event.describe() {
+                    self.push_log(LogLevel::Info, line);
+                }
+                self.clamp_obs_cursors();
+            }
+            Update::CommandFailed(reason) => {
+                self.push_log(LogLevel::Error, format!("OBS: {reason}"));
+            }
+        }
+    }
+
     /// Raise a notification.
     ///
     /// Notifications and the activity log answer two different questions.
@@ -795,6 +1169,19 @@ impl App {
                     self.toasts.open_history();
                     return vec![];
                 }
+                // The OBS tab. Entering it asks for a fresh look at OBS,
+                // since anything may have changed there while it was not on
+                // screen and no events arrive for a scene collection swap.
+                KeyCode::Char('4') => {
+                    self.chat.pending_mod = None;
+                    self.chat.pending_space = false;
+                    if self.chat_is_showing() {
+                        self.chat.deactivate();
+                    }
+                    self.tab = Tab::Obs;
+                    self.obs_command(crate::obs::task::Command::Refresh);
+                    return vec![];
+                }
                 KeyCode::Char('3') => {
                     self.chat.pending_mod = None;
                     self.chat.pending_space = false;
@@ -831,6 +1218,10 @@ impl App {
             return self.key_chat(key);
         }
 
+        if self.tab == Tab::Obs {
+            return self.key_obs(key);
+        }
+
         match self.screen {
             Screen::Setup => self.key_setup(key),
             Screen::Login => self.key_login(key),
@@ -851,7 +1242,7 @@ impl App {
         match self.tab {
             Tab::Chat => true,
             Tab::Combined => self.combined_focus == CombinedFocus::Chat,
-            Tab::StreamInfo => false,
+            Tab::StreamInfo | Tab::Obs => false,
         }
     }
 

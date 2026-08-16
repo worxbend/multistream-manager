@@ -48,6 +48,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             super::chat_tab::draw(frame, areas[2], &app.chat, &app.config);
         }
         super::app::Tab::Combined => draw_combined(frame, areas[2], app),
+        super::app::Tab::Obs => super::obs_tab::draw(frame, areas[2], app),
         super::app::Tab::StreamInfo => match app.screen {
             Screen::Setup => draw_setup(frame, areas[2], app),
             Screen::Login => draw_login(frame, areas[2], app),
@@ -120,7 +121,9 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
         tab("2 Chat", app.tab == super::app::Tab::Chat),
         Span::raw(" "),
         tab("3 Combined", app.tab == super::app::Tab::Combined),
-        Span::styled("   alt+1/2/3 to switch", Style::default().fg(sk.muted)),
+        Span::raw(" "),
+        tab("4 OBS", app.tab == super::app::Tab::Obs),
+        Span::styled("   alt+1/2/3/4 to switch", Style::default().fg(sk.muted)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 
@@ -484,6 +487,17 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(hints, Style::new().fg(sk.muted)))),
+            area,
+        );
+        return;
+    }
+
+    if app.tab == super::app::Tab::Obs {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " j/k move   tab pane   enter switch/mute   m mute   M mute all   +/- volume                    s stream   r record   p pause   P profile   C collection   R reconnect   q quit",
+                Style::new().fg(sk.muted),
+            ))),
             area,
         );
         return;

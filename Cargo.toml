@@ -80,6 +80,20 @@ unicode-width = "0.2"
 # release past this crate's MSRV of 1.88, so a crate has to provide it.)
 fs4 = { version = "0.13", features = ["sync"] }
 
+# The OBS control pane speaks obs-websocket 5, which is a WebSocket protocol.
+# Only the client half is needed, and `rustls` rather than the system TLS to
+# match reqwest — though in practice OBS listens on plain `ws://localhost`,
+# because it has no TLS of its own. TLS is here for the case where somebody
+# has put a tunnel in front of it.
+tokio-tungstenite = { version = "0.24", default-features = false, features = [
+    "connect",
+    "handshake",
+    "rustls-tls-webpki-roots",
+] }
+# Splitting a WebSocket into its reading and writing halves, so one task can
+# await incoming messages while requests are sent from elsewhere.
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
 # Structured logging to a file (the TUI owns stdout, so logs cannot go there).
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
