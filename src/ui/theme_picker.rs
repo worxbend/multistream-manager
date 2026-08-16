@@ -93,9 +93,9 @@ impl ThemePicker {
 
 /// Draw the picker over the whole area.
 ///
-/// `preview` is the palette currently being previewed — which is the active
-/// one, because moving the cursor applies it — and is passed in so the list
-/// draws with the same colours as everything behind it.
+/// `custom` is the palette the config's `[appearance.custom_theme]` holds. It
+/// has to be passed in because the `custom` entry is the one row whose
+/// swatches cannot be looked up from the built-in table.
 pub fn draw(frame: &mut Frame, area: Rect, picker: &ThemePicker, custom: &Palette) {
     let sk = theme::skin();
     frame.render_widget(Clear, area);

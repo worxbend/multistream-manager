@@ -4,7 +4,18 @@ Each entry below is a real failure, what causes it, and what to do about it.
 Many of them are already explained inline by `msm` itself when they happen —
 this page is the longer version, with the reasoning.
 
-**First two things to try**
+**First thing to try**
+
+```bash
+msm doctor
+```
+
+checks the config file, both platforms' credentials, the saved logins, the
+clipboard, the terminal's colour support and the log location in one go, and
+says what to do about anything it finds. It exits non-zero only when something
+is genuinely broken, so it is safe to put in front of another command.
+
+**Then**
 
 ```bash
 msm status
@@ -42,6 +53,8 @@ tail -f "$(msm paths | awk '/^Log:/{print $2}')"     # in another
 * [One platform worked and the other did not](#one-platform-worked-and-the-other-did-not)
 * [The YouTube category field will not search](#the-youtube-category-field-will-not-search)
 * [msm key youtube does not print a key](#msm-key-youtube-does-not-print-a-key)
+* [Copying a stream key does nothing](#copying-a-stream-key-does-nothing)
+* [The theme looks wrong, or colours are approximate](#the-theme-looks-wrong-or-colours-are-approximate)
 
 ---
 
@@ -506,3 +519,93 @@ broadcast you have created.
 * [Commands](commands.md) — what each command does and prints.
 * [How it works](how-it-works.md) — why the failures are shaped this way.
 * [Back to the documentation index](README.md).
+
+---
+
+## Copying a stream key does nothing
+
+You press <kbd>y</kbd>, the interface says the key was copied, and pasting into
+OBS gives you nothing — or something you copied earlier.
+
+Stream keys are never displayed, only copied, so this is the one place where
+copying failing silently would leave you stuck. There are two routes and `msm`
+tries both:
+
+1. **A helper program** — `wl-copy` (Wayland), `xclip` or `xsel` (X11),
+   `pbcopy` (macOS), `clip` (Windows). This is the reliable route when `msm` is
+   running on the same machine as your desktop.
+2. **OSC 52**, an escape sequence asking the *terminal emulator* to set its own
+   clipboard. This is the only route that can work over ssh, because the
+   terminal doing the pasting is the one in front of you rather than the
+   machine `msm` runs on.
+
+Start with:
+
+```bash
+msm doctor | grep -i clipboard
+```
+
+**"no clipboard helper is installed"** — install one (`wl-copy` on Wayland,
+`xclip` on X11). Copying will still try the escape sequence in the meantime.
+
+**"installed but has no display to talk to"** — normal over ssh, and nothing
+needs installing. Copying uses the escape sequence, which many terminals
+disable by default. Turn it on:
+
+| Terminal | Setting |
+|---|---|
+| xterm | `XTerm*disallowedWindowOps: 20,21,SetXprop` in `.Xresources` |
+| Alacritty | on by default |
+| kitty | `clipboard_control write-clipboard write-primary` |
+| WezTerm | on by default |
+| tmux | `set -g set-clipboard on`, and the outer terminal must allow it too |
+| screen | does not forward OSC 52; use tmux or a direct connection |
+
+If you are inside tmux or screen, both the multiplexer *and* the terminal
+underneath it have to allow it — a single "no" anywhere in the chain is enough.
+
+As a last resort, `msm key twitch` prints the key to standard output, which you
+can pipe wherever you like. It is a separate command precisely so a key is
+never printed by accident; be aware that it lands in your scrollback.
+
+---
+
+## The theme looks wrong, or colours are approximate
+
+Themes are written as exact 24-bit colours. A terminal that cannot show them
+approximates each to the nearest colour it has, which can turn a carefully
+chosen palette into something muddy.
+
+```bash
+msm doctor | grep -i terminal
+```
+
+If that warns, your terminal is not advertising 24-bit colour. Most modern ones
+support it and simply need telling to say so:
+
+```bash
+export COLORTERM=truecolor
+```
+
+Inside tmux, also make sure the outer terminal's capability is passed through:
+
+```
+set -g default-terminal "tmux-256color"
+set -as terminal-features ",*:RGB"
+```
+
+Two related things that are *not* faults:
+
+* **A theme name that does not exist** falls back to the default palette and
+  logs a warning rather than failing to start. `msm profile list` prints every
+  valid name; `msm doctor` reports the fallback.
+* **A hand-written `[appearance.custom_theme]` can be unreadable.** Every
+  built-in palette is checked by a test to keep body text at or above the 4.5:1
+  contrast ratio the WCAG guidelines set for readable text; a custom one is
+  not. If text has become hard to read, that is the first thing to look at.
+
+If the terminal's own background does not match the theme — a light theme
+framed in dark, say — that is `terminal_background = false` in `[appearance]`,
+which is the default. Turning it on repaints the whole window; it is off by
+default because it replaces a deliberately transparent or blurred background
+with a solid colour.
