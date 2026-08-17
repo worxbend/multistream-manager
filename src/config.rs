@@ -481,7 +481,7 @@ fn labels_by_target(
 }
 
 /// Twitch application credentials, from <https://dev.twitch.tv/console/apps>.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TwitchConfig {
     /// The "Client ID" shown on your application's page.
@@ -492,6 +492,61 @@ pub struct TwitchConfig {
     /// secret-less flow for the scopes we need. It is stored locally and only
     /// ever sent to Twitch's own token endpoint.
     pub client_secret: String,
+
+    /// The name of an environment variable holding the client id, used when
+    /// `client_id` is empty.
+    pub client_id_env: String,
+    /// The name of an environment variable holding the client secret, used
+    /// when `client_secret` is empty.
+    ///
+    /// Worth preferring to the file for the secret in particular: a value in
+    /// the environment is not copied when the config file is, does not end up
+    /// in a dotfiles repository by accident, and can come from a password
+    /// manager at the moment the program starts.
+    pub client_secret_env: String,
+}
+
+impl Default for TwitchConfig {
+    fn default() -> Self {
+        Self {
+            client_id: String::new(),
+            client_secret: String::new(),
+            client_id_env: "MSM_TWITCH_CLIENT_ID".to_string(),
+            client_secret_env: "MSM_TWITCH_CLIENT_SECRET".to_string(),
+        }
+    }
+}
+
+impl TwitchConfig {
+    /// The client id to use, from the file or the environment.
+    pub fn client_id(&self) -> String {
+        resolve_credential(&self.client_id, &self.client_id_env)
+    }
+
+    /// The client secret to use, from the file or the environment.
+    pub fn client_secret(&self) -> String {
+        resolve_credential(&self.client_secret, &self.client_secret_env)
+    }
+}
+
+/// Read a credential from the file, falling back to an environment variable.
+///
+/// The file wins when both are set, because naming a value explicitly should
+/// beat inheriting one. A variable that exists but is empty counts as unset:
+/// that is what an unfilled shell variable looks like, and treating it as a
+/// real empty credential would fail later in a way nobody could read.
+fn resolve_credential(literal: &str, variable: &str) -> String {
+    let literal = literal.trim();
+    if !literal.is_empty() {
+        return literal.to_string();
+    }
+    let variable = variable.trim();
+    if variable.is_empty() {
+        return String::new();
+    }
+    std::env::var(variable)
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default()
 }
 
 /// Google/YouTube OAuth client credentials, from
@@ -502,6 +557,13 @@ pub struct TwitchConfig {
 pub struct YouTubeConfig {
     pub client_id: String,
     pub client_secret: String,
+
+    /// The name of an environment variable holding the client id, used when
+    /// `client_id` is empty.
+    pub client_id_env: String,
+    /// The name of an environment variable holding the client secret, used
+    /// when `client_secret` is empty.
+    pub client_secret_env: String,
 
     /// Reuse an existing reusable stream key instead of creating a new one for
     /// every broadcast.
@@ -516,6 +578,18 @@ pub struct YouTubeConfig {
     /// application pick the first reusable stream on your channel, which is what
     /// you want if you only have one.
     pub stream_id: String,
+}
+
+impl YouTubeConfig {
+    /// The client id to use, from the file or the environment.
+    pub fn client_id(&self) -> String {
+        resolve_credential(&self.client_id, &self.client_id_env)
+    }
+
+    /// The client secret to use, from the file or the environment.
+    pub fn client_secret(&self) -> String {
+        resolve_credential(&self.client_secret, &self.client_secret_env)
+    }
 }
 
 /// Settings for the Chat tab.
@@ -719,6 +793,8 @@ impl Default for YouTubeConfig {
         Self {
             client_id: String::new(),
             client_secret: String::new(),
+            client_id_env: "MSM_YOUTUBE_CLIENT_ID".to_string(),
+            client_secret_env: "MSM_YOUTUBE_CLIENT_SECRET".to_string(),
             // Defaulting to `true` is the whole point — see the field docs.
             reuse_stream: true,
             stream_id: String::new(),
@@ -798,7 +874,8 @@ impl Config {
         for platform in platforms {
             match platform {
                 Platform::Twitch => {
-                    if self.twitch.client_id.is_empty() || self.twitch.client_secret.is_empty() {
+                    if self.twitch.client_id().is_empty() || self.twitch.client_secret().is_empty()
+                    {
                         bail!(
                             "Twitch credentials are missing.\n\n\
                              To fix this:\n  \
@@ -806,14 +883,20 @@ impl Config {
                              2. Set the OAuth Redirect URL to exactly: http://localhost:{port}/callback\n  \
                              3. Choose category \"Application Integration\" and click Create.\n  \
                              4. Open the app, copy the Client ID, then press \"New Secret\" and copy that too.\n  \
-                             5. Put both into {path} under the [twitch] section.",
+                             5. Enter both on the setup screen, or put them into {path} under\n     \
+                                the [twitch] section — or set {id_var} and {secret_var} in\n     \
+                                the environment.",
                             port = self.general.oauth_port,
                             path = paths::config_file()?.display(),
+                            id_var = self.twitch.client_id_env,
+                            secret_var = self.twitch.client_secret_env,
                         );
                     }
                 }
                 Platform::YouTube => {
-                    if self.youtube.client_id.is_empty() || self.youtube.client_secret.is_empty() {
+                    if self.youtube.client_id().is_empty()
+                        || self.youtube.client_secret().is_empty()
+                    {
                         bail!(
                             "YouTube credentials are missing.\n\n\
                              To fix this:\n  \
@@ -821,12 +904,15 @@ impl Config {
                              2. Under \"APIs & Services\" enable the \"YouTube Data API v3\".\n  \
                              3. Under \"Credentials\" create an OAuth client ID of type \"Desktop app\".\n  \
                              4. Add http://localhost:{port}/callback as an authorised redirect URI.\n  \
-                             5. Copy the client ID and client secret into {path} under [youtube].\n\n\
+                             5. Enter both on the setup screen, or copy them into {path} under\n     \
+                                [youtube] — or set {id_var} and {secret_var} in the environment.\n\n\
                              Note: while your app is in \"Testing\" mode you must also add your own\n\
                              Google account under \"OAuth consent screen\" > \"Test users\", or Google\n\
                              will refuse the login.",
                             port = self.general.oauth_port,
                             path = paths::config_file()?.display(),
+                            id_var = self.youtube.client_id_env,
+                            secret_var = self.youtube.client_secret_env,
                         );
                     }
                 }
@@ -1115,5 +1201,144 @@ mod tests {
         let config = ObsConfig::default();
         assert!(config.enabled);
         assert_eq!(config.url(), "ws://127.0.0.1:4455");
+    }
+
+    /// Guards the credential environment variables, which are process-wide
+    /// state that more than one test here reads and writes.
+    static CREDENTIAL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `body` with `name` set to `value`, then put it back.
+    fn with_env<R>(name: &str, value: Option<&str>, body: impl FnOnce() -> R) -> R {
+        with_envs(&[(name, value)], body)
+    }
+
+    /// The same for several variables at once.
+    ///
+    /// Taking them together rather than nesting calls is deliberate: the lock
+    /// below is not reentrant, so a nested call on one thread would wait for
+    /// a lock that same thread already holds. That hangs the test run rather
+    /// than failing it, which is a great deal harder to work out from the
+    /// outside than an assertion would be.
+    fn with_envs<R>(pairs: &[(&str, Option<&str>)], body: impl FnOnce() -> R) -> R {
+        let _guard = CREDENTIAL_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+
+        let previous: Vec<(&str, Option<std::ffi::OsString>)> = pairs
+            .iter()
+            .map(|(name, _)| (*name, std::env::var_os(name)))
+            .collect();
+
+        // SAFETY: the lock above makes this the only thread touching these
+        // variables, and every one is restored before it is released.
+        unsafe {
+            for (name, value) in pairs {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+
+        unsafe {
+            for (name, value) in previous {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+
+        match result {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    #[test]
+    fn a_credential_can_come_from_the_environment() {
+        let config = TwitchConfig {
+            client_secret_env: "MSM_TEST_TWITCH_SECRET".to_string(),
+            ..Default::default()
+        };
+        with_env(
+            "MSM_TEST_TWITCH_SECRET",
+            Some("from-the-environment"),
+            || {
+                assert_eq!(config.client_secret(), "from-the-environment");
+            },
+        );
+    }
+
+    /// Naming a value explicitly should beat inheriting one, so a credential
+    /// written in the file wins over the same one in the environment.
+    #[test]
+    fn a_credential_in_the_file_wins_over_the_environment() {
+        let config = TwitchConfig {
+            client_secret: "from-the-file".to_string(),
+            client_secret_env: "MSM_TEST_TWITCH_SECRET".to_string(),
+            ..Default::default()
+        };
+        with_env(
+            "MSM_TEST_TWITCH_SECRET",
+            Some("from-the-environment"),
+            || {
+                assert_eq!(config.client_secret(), "from-the-file");
+            },
+        );
+    }
+
+    /// An unfilled shell variable looks exactly like this, and treating it as
+    /// a real empty credential would fail later in a way nobody could read.
+    #[test]
+    fn an_empty_environment_variable_counts_as_unset() {
+        let config = YouTubeConfig {
+            client_id_env: "MSM_TEST_YT_ID".to_string(),
+            ..Default::default()
+        };
+        with_env("MSM_TEST_YT_ID", Some("   "), || {
+            assert!(config.client_id().is_empty());
+        });
+    }
+
+    #[test]
+    fn credentials_from_the_environment_satisfy_the_check() {
+        let mut config = Config {
+            twitch: TwitchConfig {
+                client_id_env: "MSM_TEST_TWITCH_ID".to_string(),
+                client_secret_env: "MSM_TEST_TWITCH_SECRET".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.general.oauth_port = 8017;
+
+        // Both variables in one call. Nesting `with_env` inside itself would
+        // wait for a lock the same thread already holds, which hangs the run
+        // rather than failing it.
+        with_envs(
+            &[
+                ("MSM_TEST_TWITCH_ID", Some("an-id")),
+                ("MSM_TEST_TWITCH_SECRET", Some("a-secret")),
+            ],
+            || {
+                assert!(config.check_credentials(&[Platform::Twitch]).is_ok());
+            },
+        );
+    }
+
+    /// The message somebody sees when a credential is missing has to name
+    /// every way of supplying one, or the environment route is a secret.
+    #[test]
+    fn the_missing_credential_message_names_the_environment_variables() {
+        let config = Config::default();
+        let error = config
+            .check_credentials(&[Platform::Twitch])
+            .expect_err("no credentials are configured");
+        let message = format!("{error}");
+        assert!(message.contains("MSM_TWITCH_CLIENT_ID"), "got {message}");
+        assert!(message.contains("setup screen"), "got {message}");
     }
 }

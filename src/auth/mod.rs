@@ -21,14 +21,8 @@ pub fn spec_for(platform: Platform) -> ProviderSpec {
 /// The client id and secret for a platform, pulled out of the config.
 fn credentials(config: &Config, platform: Platform) -> (String, String) {
     match platform {
-        Platform::Twitch => (
-            config.twitch.client_id.clone(),
-            config.twitch.client_secret.clone(),
-        ),
-        Platform::YouTube => (
-            config.youtube.client_id.clone(),
-            config.youtube.client_secret.clone(),
-        ),
+        Platform::Twitch => (config.twitch.client_id(), config.twitch.client_secret()),
+        Platform::YouTube => (config.youtube.client_id(), config.youtube.client_secret()),
     }
 }
 

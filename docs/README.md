@@ -16,6 +16,7 @@ something goes wrong you can reason about it rather than guess.
 
 | Page | What it covers |
 |---|---|
+| [Running it](running.md) | How to run it, what credentials you need and why, registering the Twitch and Google applications, where credentials go, and every environment variable. Start here for the short version. |
 | [Getting started](getting-started.md) | Installing, registering a Twitch application, registering a Google OAuth client, logging in, and running your first stream. |
 | [Configuration](configuration.md) | Every key in `config.toml` with its type and default, a full worked example, and the preset workflow that makes a repeat stream two keystrokes. |
 | [Keys and actions](keys.md) | Every tab, every default binding, the action names for the `[keys]` section, and where each of the old subcommands now lives. |
@@ -25,7 +26,9 @@ something goes wrong you can reason about it rather than guess.
 
 ## Where to start
 
-* **Never used it before**: [Getting started](getting-started.md). Two steps in
+* **Never used it before, want the short version**: [Running it](running.md).
+* **Never used it before, want to be walked through it**:
+  [Getting started](getting-started.md). Two steps in
   that page are the ones people lose an evening to — Google's *Test users* list
   and YouTube's 24-hour wait before a channel may stream at all — so they are
   called out in boxes rather than buried in prose.

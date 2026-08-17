@@ -847,10 +847,75 @@ saves it back, so the file always reflects the last stream you set up.
 
 ## Environment variables
 
+Everything here is optional: `msm` runs with none of them set.
+
 | Variable | Effect |
 |---|---|
+| `MSM_TWITCH_CLIENT_ID` | The Twitch client id, when `[twitch] client_id` is empty. |
+| `MSM_TWITCH_CLIENT_SECRET` | The Twitch client secret, when `[twitch] client_secret` is empty. |
+| `MSM_YOUTUBE_CLIENT_ID` | The Google client id, when `[youtube] client_id` is empty. |
+| `MSM_YOUTUBE_CLIENT_SECRET` | The Google client secret, when `[youtube] client_secret` is empty. |
+| `OBS_WEBSOCKET_PASSWORD` | The OBS WebSocket password, when `[obs] password` is empty. |
 | `MSM_CONFIG_DIR` | Use this directory for config, tokens and the log instead of the OS default. Created if it does not exist. |
 | `MSM_LOG` | Log verbosity, in the usual `tracing` syntax: `MSM_LOG=debug`, or something narrower like `MSM_LOG=multistream_manager::youtube=trace`. Defaults to `info`. |
+| `COLORTERM` | Not read for configuration, but `truecolor` here is what tells the interface your terminal can show a theme's exact colours. |
+
+The four credential variables and the OBS one are the *default* names. Each is
+set by the matching `*_env` key, so you can point them wherever your setup
+already keeps things:
+
+```toml
+[twitch]
+client_secret_env = "TWITCH_SECRET_FROM_MY_PASSWORD_MANAGER"
+```
+
+### Credentials in the environment
+
+Every credential can come from either the config file or the environment. The
+rules are the same for all of them:
+
+* **The file wins when both are set.** Naming a value explicitly should beat
+  inheriting one.
+* **A variable that is set but empty counts as unset.** That is what an
+  unfilled shell variable looks like, and treating it as a real empty
+  credential would fail later in a way nobody could read.
+* **Nothing is written back.** A credential that came from the environment
+  stays there; saving from the interface never copies it into the file.
+
+Which to use is a real choice rather than a formality:
+
+| | In `config.toml` | In the environment |
+|---|---|---|
+| Survives a reboot | ✅ | only if exported from a shell profile |
+| Set up once, from the interface | ✅ | ❌ — you provide it every session |
+| Copied when you copy your dotfiles | ⚠️ **yes, including the secret** | ✅ no |
+| Can come from a password manager | ❌ | ✅ |
+| Visible to other programs you run | ❌ | ⚠️ yes, child processes inherit it |
+
+A reasonable middle: keep the **client ids** in the file, since they are not
+secret, and the **secrets** in the environment.
+
+```bash
+# ~/.profile, or whatever your shell reads at login
+export MSM_TWITCH_CLIENT_SECRET="…"
+export MSM_YOUTUBE_CLIENT_SECRET="…"
+export OBS_WEBSOCKET_PASSWORD="…"
+```
+
+Better still, have a password manager supply them at the moment `msm` starts,
+so they are never written to disk in plain text at all:
+
+```bash
+# One example; every password manager has an equivalent.
+MSM_TWITCH_CLIENT_SECRET="$(pass show msm/twitch-secret)" msm
+```
+
+> [!WARNING]
+> A variable exported in a shell profile is **not** visible to a copy of `msm`
+> started from a desktop launcher or a systemd unit, because those do not read
+> your shell profile. This is the usual reason a credential works in one
+> terminal and appears to be missing everywhere else. Config → Diagnostics
+> reports which credentials it can actually see.
 
 ---
 

@@ -79,7 +79,7 @@ impl Engine {
             let backend: Box<dyn Backend> = match platform {
                 Platform::Twitch => Box::new(TwitchBackend::new(
                     http.clone(),
-                    config.twitch.client_id.clone(),
+                    config.twitch.client_id(),
                     token,
                 )),
                 Platform::YouTube => Box::new(YouTubeBackend::new(

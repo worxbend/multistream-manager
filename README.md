@@ -232,7 +232,9 @@ sudo snap install --dangerous ./msm_*.snap
 Both Twitch and Google make you register your own "application" before their
 APIs will talk to you. That part is tedious and you only do it once — the
 click-by-click walkthrough, including the Google settings that are easy to miss,
-is in **[docs/getting-started.md](docs/getting-started.md)**.
+is in **[docs/getting-started.md](docs/getting-started.md)**, and the condensed
+version — credentials, both consoles, every environment variable — is in
+**[docs/running.md](docs/running.md)**.
 
 ```bash
 msm               # that is the whole command — it walks you through the rest
@@ -588,6 +590,7 @@ The detail lives in `docs/`, and is also published at
 | Page | What is in it |
 |---|---|
 | 📖 [Overview](docs/README.md) | Where to start, and what each page covers |
+| ▶️ [Running it](docs/running.md) | Running it, what credentials you need, registering both applications, and every environment variable |
 | 🧭 [Getting started](docs/getting-started.md) | Twitch and Google credentials, first login, first stream |
 | ⚙️ [Configuration](docs/configuration.md) | Every setting in `config.toml`, including `[keys]` and `[layout]` |
 | ⌨️ [Keys and actions](docs/keys.md) | Every tab, every default binding, and the `[keys]` section that changes them |
