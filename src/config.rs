@@ -32,6 +32,8 @@ pub struct Config {
     pub general: GeneralConfig,
     /// Chat pane settings.
     pub chat: ChatConfig,
+    /// Desktop notifications: which stream events reach the system tray.
+    pub notifications: NotificationsConfig,
     /// Colours, motion, and the optional interface extras.
     pub appearance: AppearanceConfig,
     /// Controlling OBS Studio from the OBS tab.
@@ -651,6 +653,93 @@ impl Default for ChatConfig {
             chat_log_dir: String::new(),
             chat_log_max_bytes: 10 * 1024 * 1024,
             chat_log_max_files: 5,
+        }
+    }
+}
+
+/// Desktop notifications — the pop-ups your desktop shows, not the ones drawn
+/// inside this program.
+///
+/// The distinction matters, because there are two kinds and they answer
+/// different questions. The in-program pop-ups (`[appearance] toasts`) tell you
+/// what *this program* just did, and you only see them while you are looking at
+/// the terminal. These are for what *your stream* just did, and they exist
+/// precisely for the times you are not looking at the terminal — because you
+/// are in OBS, or in the game, or making tea. A raid is the case that makes the
+/// difference concrete: you have about ten seconds to greet four hundred
+/// people, and a message in a chat pane on another workspace will not reach you
+/// in ten seconds.
+///
+/// On Linux this needs no configuration and no extra package in the common
+/// case: the program tries `notify-send`, then talks to the desktop's
+/// notification service over D-Bus with `gdbus`, then tries `kdialog`, then
+/// falls back to the terminal bell. See [`crate::notify`] for why the chain is
+/// shaped that way.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationsConfig {
+    /// The master switch for desktop notifications.
+    pub enabled: bool,
+
+    /// The shortest gap between two pop-ups, in milliseconds.
+    ///
+    /// Events arriving faster than this are queued, not discarded, and
+    /// released one per gap — a gift drop delivers one event per recipient,
+    /// and burying the raid that arrived in the middle of it would defeat the
+    /// point. Zero means no pacing at all.
+    pub min_gap_ms: u64,
+
+    /// Only notify about chat events when that chat is not on screen.
+    ///
+    /// Off by default, which is a deliberate change from how this behaved when
+    /// it was a chat-only feature. The old rule assumed you were reading chat
+    /// in this program; in practice the terminal is on a second monitor and a
+    /// raid still needs to reach you. Turn this on if you *do* watch chat here
+    /// and find the pop-ups redundant. Stream-state notifications ignore it.
+    pub only_when_hidden: bool,
+
+    /// Raids: another streamer sending their audience to your channel.
+    pub raids: bool,
+    /// Subscriptions, renewals, tier upgrades and gifted subs.
+    pub subscriptions: bool,
+    /// Twitch cheers (bits) and bits-badge milestones.
+    pub cheers: bool,
+    /// YouTube Super Chats and Super Stickers.
+    pub paid: bool,
+    /// YouTube channel memberships.
+    pub memberships: bool,
+    /// Stream state: going live, a platform failing to go live, and a
+    /// broadcast that stops while the program is watching it.
+    pub stream_state: bool,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_gap_ms: 2000,
+            only_when_hidden: false,
+            raids: true,
+            subscriptions: true,
+            cheers: true,
+            paid: true,
+            memberships: true,
+            stream_state: true,
+        }
+    }
+}
+
+impl NotificationsConfig {
+    /// The settings the notifier itself needs, with the pacing clamped to
+    /// something a desktop can survive.
+    ///
+    /// The ceiling is five minutes: a gap longer than that turns the queue
+    /// into a place notifications go to be forgotten. The floor is zero, which
+    /// is honest — somebody who asks for no pacing gets no pacing.
+    pub fn notifier_settings(&self) -> crate::notify::Settings {
+        crate::notify::Settings {
+            enabled: self.enabled,
+            min_gap: std::time::Duration::from_millis(self.min_gap_ms.min(300_000)),
         }
     }
 }

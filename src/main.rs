@@ -27,6 +27,7 @@ mod layout;
 mod logging;
 mod maintenance;
 mod model;
+mod notify;
 mod obs;
 mod paths;
 mod telemetry;

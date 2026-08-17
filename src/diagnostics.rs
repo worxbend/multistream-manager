@@ -186,6 +186,28 @@ pub fn run(config: &Config) -> Vec<Check> {
         )),
     }
 
+    // Desktop notifications, which are how a raid reaches somebody who is
+    // looking at OBS rather than at this window. Best-effort by design, which
+    // means a machine with no notification tooling is quiet rather than
+    // broken — and silently quiet is exactly what needs saying out loud.
+    if config.notifications.enabled {
+        match crate::notify::available_backend() {
+            Some(program) => checks.push(Check::ok(format!(
+                "desktop notifications: {program} will show them"
+            ))),
+            None => checks.push(Check::warning(
+                "no desktop notification program was found",
+                "Raids, subscriptions and a stopped stream will fall back to the terminal bell. \
+                 Installing libnotify (which provides notify-send) fixes it on every desktop; \
+                 GLib's gdbus and KDE's kdialog are also used if present.",
+            )),
+        }
+    } else {
+        checks.push(Check::ok(
+            "desktop notifications are turned off in config.toml",
+        ));
+    }
+
     // OBS, which is optional and therefore only worth a note either way. The
     // password is reported as present or absent and never shown: this list is
     // meant to be readable over someone's shoulder or in a screenshot.

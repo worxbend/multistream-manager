@@ -53,6 +53,7 @@ tail -f ~/.config/multistream-manager/msm.log      # in another
 * [Copying a stream key does nothing](#copying-a-stream-key-does-nothing)
 * [The theme looks wrong, or colours are approximate](#the-theme-looks-wrong-or-colours-are-approximate)
 * [The OBS tab will not connect](#the-obs-tab-will-not-connect)
+* [No desktop notification when a raid arrives](#no-desktop-notification-when-a-raid-arrives)
 
 ---
 
@@ -646,3 +647,69 @@ the tab uses itself are `h`, `j`, `k`, `l`, `m`, `M`, `s`, `r`, `p`, `P`, `C`,
 * [Keys and actions](keys.md) — where each part of the interface lives.
 * [How it works](how-it-works.md) — why the failures are shaped this way.
 * [Back to the documentation index](README.md).
+
+---
+
+## No desktop notification when a raid arrives
+
+`msm` sends a desktop notification for raids, subscriptions, cheers, Super
+Chats, memberships, and for a broadcast starting or stopping. When none of them
+appear, work down this list — the causes are in rough order of likelihood.
+
+**1. Is a notification program installed?** Check **Config → Diagnostics**. It
+names the program that will be used, or warns that it found none. `msm` tries
+four things in order: `notify-send` (from the *libnotify* package), `gdbus`
+(from GLib), `kdialog` (KDE), and finally the terminal bell. If Diagnostics
+found none, install libnotify. The package is `libnotify-bin` on Debian and
+Ubuntu, `libnotify` on Fedora and on Arch, and it is a few hundred kilobytes.
+
+```bash
+# Confirm by hand — if this shows nothing on screen, the problem is
+# your desktop, not msm.
+notify-send "test" "does this appear?"
+```
+
+**2. Is a notification daemon running?** The program above only hands the
+message to a service, which draws it. GNOME, KDE Plasma, XFCE and Cinnamon all
+run one for you. A bare window manager (i3, sway, dwm) usually does not — you
+have to start one yourself, `dunst` and `mako` being the usual choices.
+
+**3. Are they switched off?** **Config → Notifications**
+(<kbd>Alt</kbd>+<kbd>5</kbd>) has the master switch and one switch per event
+class. Also check `[chat] notifications` in `config.toml`, which silences every
+chat-derived notification on its own.
+
+**4. Is do-not-disturb on?** Raids and a stopped stream are sent as *critical*,
+which most desktops show anyway. Everything else is normal urgency and will be
+held back by do-not-disturb, focus assist, or a full-screen game — that is your
+desktop's choice, not this program's.
+
+**5. Did it arrive while another one was showing?** At most one pop-up is sent
+every `min_gap_ms` (two seconds by default). The rest are queued, not thrown
+away, so a raid during a fifty-recipient gift drop arrives a little late rather
+than never. If you would rather have them all at once, set
+`min_gap_ms = 0` under `[notifications]`.
+
+**6. Was the chat pane on screen?** Only if you turned
+`[notifications] only_when_hidden` on: that restores the old behaviour where
+chat events are only announced when you cannot already see them.
+
+**7. Was it backlog?** Opening a chat delivers a page of recent history, and
+history is never notified. A raid from before `msm` connected is not announced,
+which is deliberate — the alternative is a burst of alerts for events you have
+already missed, every time you reconnect.
+
+### A raid that appeared in chat but not on the desktop
+
+If the raid is visible in the chat pane, `msm` received it and the problem is
+between `msm` and your desktop — so it is one of causes 1, 2 or 4 above. Run
+the program with debug logging and watch for the notification lines:
+
+```bash
+MSM_LOG=debug msm
+grep notification ~/.config/multistream-manager/msm.log
+```
+
+A line reading *"desktop notification backend failed to launch"* means that
+program is missing and the next rung of the chain was tried. Three of them in a
+row means the chain ran out and the terminal bell was rung instead.

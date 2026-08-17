@@ -138,7 +138,7 @@ poll_interval_floor_ms = 1000  # YouTube never polls faster (server floor still 
 poll_interval_ceiling_ms = 0   # 0 = no ceiling
 daily_quota_units = 10000      # your YouTube API project quota
 quota_reserve_percent = 10     # stop polling early so sends keep working
-notifications = true           # desktop notifications for off-screen Super Chats etc.
+notifications = true           # master switch for chat desktop notifications
 chat_logging = false           # append every message to rotated JSONL files
 chat_log_dir = ""              # empty = chatlog/ under the config directory
 ```
@@ -446,13 +446,14 @@ and says why, because a blank tab is indistinguishable from a broken one.
 
 ## 🎛️ The Config tab
 
-<kbd>Alt</kbd>+<kbd>5</kbd>. Eight sections, most of which used to be a
+<kbd>Alt</kbd>+<kbd>5</kbd>. Nine sections, most of which used to be a
 subcommand.
 
 | Section | What it is for |
 |---|---|
 | **Layout** | Arrange the Combined tab |
-| **Appearance** | Theme, motion, notifications |
+| **Appearance** | Theme, motion, in-app pop-ups |
+| **Notifications** | Desktop alerts for raids, subs and a stopped stream |
 | **Keys** | Every binding, and what it runs |
 | **OBS** | Connection to OBS Studio |
 | **Accounts** | Twitch and YouTube logins — <kbd>Enter</kbd> logs in, or out |
@@ -504,9 +505,9 @@ element at its finished frame: nothing is hidden, it simply does not move.
 The start-up splash obeys the same setting, and any key skips it. `splash =
 false` in `[appearance]` turns it off for good.
 
-### Notifications
+### In-app pop-ups
 
-Notifications follow vim's model. Something happens, a short message appears in
+These follow vim's model. Something happens, a short message appears in
 the corner, it does not interrupt you and it goes away on its own — but it is not
 lost either. <kbd>Alt</kbd>+<kbd>M</kbd> opens the **message history**, vim's
 `:messages`, with everything the session has raised and when.
@@ -517,6 +518,47 @@ screen at all. A token that failed to refresh or a chat connection that dropped
 now reaches you wherever you are looking. Routine progress deliberately does not
 pop up — a notification for every ordinary step teaches you to ignore them, and
 then you miss the one that mattered.
+
+### Desktop notifications
+
+The pop-ups above are drawn inside this program, so you only see them while you
+are looking at the terminal. During a stream you usually are not — you are in
+OBS, or in the game. So the events that come from *outside* this program go to
+your desktop's own notification service as well.
+
+**Raids are the reason this exists.** Another streamer finishes their broadcast
+by sending their whole audience to yours. Four hundred people arrive at once and
+you have a few seconds to greet them; a line scrolling past in a chat pane on
+another workspace will not reach you in time, and a notification on top of OBS
+will. Raids are sent as *critical*, which on most desktops means they appear
+even with do-not-disturb on.
+
+Notified by default, each with its own switch:
+
+| Event | Where it comes from |
+|---|---|
+| **Raids** | Twitch |
+| **Subscriptions, renewals, upgrades, gifted subs** | Twitch |
+| **Cheers and bits milestones** | Twitch |
+| **Super Chats and Super Stickers** | YouTube |
+| **Memberships** | YouTube |
+| **Stream ready / stream stopped / going live failed** | Both |
+
+*Stream stopped* is the quiet one worth having. A platform that was reporting an
+incoming broadcast and suddenly is not means a dead encoder, a dropped
+connection or a closed OBS — and nothing else here will tell you, because the
+only sign is a number changing in a panel you are not watching.
+
+**Nothing to install, on any distribution.** `msm` tries `notify-send`
+(libnotify), then `gdbus` (GLib, so: GNOME, KDE, XFCE, Cinnamon, MATE) talking
+to the notification service directly, then `kdialog`, then the terminal bell.
+Config → Diagnostics names the one it will use, and warns if it found none.
+
+A burst is **paced, not dropped**: a fifty-recipient gift drop queues and
+releases one pop-up every two seconds, so the raid that lands in the middle of
+it is still seen. Everything is switchable in **Config → Notifications** or in
+the `[notifications]` section of `config.toml` — see
+[docs/configuration.md](docs/configuration.md#notifications).
 
 ### The mouse
 

@@ -236,6 +236,10 @@ pub struct App {
     pub should_quit: bool,
     /// Notifications: what is popped up now, and everything said so far.
     pub toasts: super::toast::Toasts,
+    /// Desktop notifications — the ones your *desktop* shows, which reach you
+    /// when this terminal is behind OBS or on another workspace. Shared with
+    /// the chat panes so everything queues in one place.
+    pub desktop: crate::notify::Notifier,
     /// How much the interface animates.
     pub animation: crate::anim::Mode,
     /// When this run started.
@@ -374,8 +378,12 @@ impl App {
             Err(reason) => (crate::layout::Layout::default(), Some(reason)),
         };
 
+        let desktop =
+            crate::notify::Notifier::with_settings(config.notifications.notifier_settings());
+
         let mut app = Self {
             config_tab: None,
+            desktop: desktop.clone(),
             layout,
             keymap,
             pending_keys: Vec::new(),
@@ -394,7 +402,7 @@ impl App {
             theme_picker: None,
             palette,
             tab: Tab::StreamInfo,
-            chat: super::chat_tab::ChatTabState::new(&config),
+            chat: super::chat_tab::ChatTabState::new(&config, desktop.clone()),
             combined_focus: CombinedFocus::Chat,
             screen,
             config,
@@ -1009,6 +1017,10 @@ impl App {
                 self.config_tab = Some(config);
                 return self.change_appearance_setting();
             }
+            KeyCode::Enter if config.section == Section::Notifications => {
+                self.config_tab = Some(config);
+                return self.change_notification_setting();
+            }
             _ if config.section == Section::Layout => {
                 match key.code {
                     KeyCode::Char('+') | KeyCode::Char('=') => {
@@ -1199,6 +1211,38 @@ impl App {
                 "Mouse reporting changes when msm next starts.",
             );
         }
+        self.save_appearance()
+    }
+
+    /// Flip whichever desktop-notification switch is selected.
+    ///
+    /// The row order is the one `draw_notifications` lists, and the two have
+    /// to agree — a mismatch would silently toggle the wrong setting, so the
+    /// list is short, in one place, and covered by a test.
+    fn change_notification_setting(&mut self) -> Vec<Command> {
+        let Some(config) = self.config_tab.as_ref() else {
+            return vec![];
+        };
+        let settings = &mut self.config.notifications;
+        match config.cursor {
+            0 => settings.enabled = !settings.enabled,
+            1 => settings.raids = !settings.raids,
+            2 => settings.subscriptions = !settings.subscriptions,
+            3 => settings.cheers = !settings.cheers,
+            4 => settings.paid = !settings.paid,
+            5 => settings.memberships = !settings.memberships,
+            6 => settings.stream_state = !settings.stream_state,
+            _ => settings.only_when_hidden = !settings.only_when_hidden,
+        }
+
+        // Take effect now rather than at the next start-up. The notifier is
+        // shared, so configuring it covers the chat panes' delivery — but the
+        // chat tab holds its own copy of the settings that decide *which*
+        // events qualify, and that copy has to be told too.
+        self.desktop
+            .configure(self.config.notifications.notifier_settings());
+        let config = self.config.clone();
+        self.chat.adopt_notification_settings(&config);
         self.save_appearance()
     }
 
@@ -1545,6 +1589,67 @@ impl App {
             .push(level, text, self.config.appearance.toast_duration());
     }
 
+    /// Raise a desktop notification about the stream's own state.
+    ///
+    /// Separate from [`Self::notify`], which draws a pop-up inside this
+    /// program: that one is only seen by somebody looking at the terminal,
+    /// and the whole reason these exist is the times you are not.
+    fn notify_stream_state(
+        &self,
+        title: &str,
+        body: impl Into<String>,
+        urgency: crate::notify::Urgency,
+    ) {
+        if !self.config.notifications.stream_state {
+            return;
+        }
+        self.desktop
+            .send(crate::notify::Notification::new(title, body, urgency));
+    }
+
+    /// Compare a fresh statistics snapshot against the last one and notify on
+    /// any platform that started or stopped broadcasting.
+    ///
+    /// This is how "your stream just died" reaches you. Nothing else in the
+    /// program can tell you that: the platform simply stops reporting an
+    /// incoming broadcast, and the only sign on screen is a number changing in
+    /// a panel you are not looking at. A dropped encoder found forty minutes
+    /// later is the failure this exists to prevent, so it is `Critical` —
+    /// most desktops show a critical notification even in do-not-disturb.
+    ///
+    /// A platform missing from either snapshot is not a transition: the first
+    /// poll after connecting has no "before", and a platform that failed to
+    /// poll must not be reported as having gone offline.
+    fn notify_live_transitions(&self, fresh: &BTreeMap<Platform, PlatformStats>) {
+        for (platform, next) in fresh {
+            let Some(previous) = self.stats.get(platform) else {
+                continue;
+            };
+            // A failed poll carries no usable `live` flag — it is the last
+            // known value, or a default. Treating that as a transition would
+            // announce a dead stream every time the network hiccuped.
+            if next.error.is_some() || previous.error.is_some() {
+                continue;
+            }
+            match (previous.live, next.live) {
+                (false, true) => self.notify_stream_state(
+                    "Now live",
+                    format!("{} is receiving your broadcast.", platform.label()),
+                    crate::notify::Urgency::Normal,
+                ),
+                (true, false) => self.notify_stream_state(
+                    "Stream stopped",
+                    format!(
+                        "{} is no longer receiving your broadcast.",
+                        platform.label()
+                    ),
+                    crate::notify::Urgency::Critical,
+                ),
+                _ => {}
+            }
+        }
+    }
+
     pub fn push_log(&mut self, level: LogLevel, message: impl Into<String>) {
         let message = message.into();
 
@@ -1687,10 +1792,31 @@ impl App {
                         super::toast::Level::Success,
                         "Ready — start streaming in OBS whenever you like.",
                     );
+                    // Going live is the moment you stop looking at this
+                    // window, so it is also the moment a desktop pop-up is
+                    // worth more than an in-program one. The body names the
+                    // platforms that took the plan, because a partial success
+                    // (Twitch yes, YouTube no) is the case worth reading.
+                    let ready: Vec<&str> = self
+                        .results
+                        .iter()
+                        .filter(|result| result.succeeded())
+                        .map(|result| result.platform.label())
+                        .collect();
+                    self.notify_stream_state(
+                        "Stream ready",
+                        format!("{} — start streaming in OBS.", ready.join(" and ")),
+                        crate::notify::Urgency::Normal,
+                    );
                 } else {
                     self.notify(
                         super::toast::Level::Error,
                         "Every platform failed. See the log below for why.",
+                    );
+                    self.notify_stream_state(
+                        "Going live failed",
+                        "Every platform refused. Check the activity log.",
+                        crate::notify::Urgency::Critical,
                     );
                 }
             }
@@ -1731,7 +1857,9 @@ impl App {
             }
 
             Event::Stats(stats) => {
-                self.stats = stats.into_iter().collect();
+                let stats: BTreeMap<Platform, PlatformStats> = stats.into_iter().collect();
+                self.notify_live_transitions(&stats);
+                self.stats = stats;
             }
         }
         vec![]
@@ -5127,18 +5255,144 @@ mod tests {
 
     /// Cleanup lists before it deletes. Removing things somebody made
     /// without showing them first would be asking for trust this has no way
+    /// Every switch in the Notifications section has to flip the setting the
+    /// row next to it names. The list lives in two places — the drawing code
+    /// and the key handler — and a mismatch would silently change the wrong
+    /// one, which is the sort of bug nobody reports because they assume they
+    /// misread the screen.
+    #[test]
+    fn every_notification_switch_flips_the_setting_beside_it() {
+        let mut app = app();
+        go_to_config_section(&mut app, super::super::config_tab::Section::Notifications);
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+
+        let read = |app: &App| {
+            let n = &app.config.notifications;
+            vec![
+                n.enabled,
+                n.raids,
+                n.subscriptions,
+                n.cheers,
+                n.paid,
+                n.memberships,
+                n.stream_state,
+                n.only_when_hidden,
+            ]
+        };
+        let before = read(&app);
+        for row in 0..super::super::config_tab::NOTIFICATION_ROWS {
+            let previous = read(&app);
+            app.handle_key(KeyEvent::from(KeyCode::Enter));
+            let now = read(&app);
+            for (index, (was, is)) in previous.iter().zip(now.iter()).enumerate() {
+                if index == row {
+                    assert_ne!(was, is, "row {row} must flip its own setting");
+                } else {
+                    assert_eq!(was, is, "row {row} must leave row {index} alone");
+                }
+            }
+            app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        }
+        // Eight rows, eight flips: nothing is where it started.
+        let after = read(&app);
+        assert!(before.iter().zip(after.iter()).all(|(a, b)| a != b));
+    }
+
+    /// A platform that stops reporting an incoming broadcast is the failure
+    /// this feature exists for: nothing else on screen says the encoder died,
+    /// and the only place it can reach somebody who is looking at OBS is the
+    /// desktop.
+    #[test]
+    fn a_stream_starting_or_stopping_reaches_the_desktop() {
+        let mut app = app();
+        let live = |live: bool| {
+            Event::Stats(vec![(
+                Platform::Twitch,
+                PlatformStats {
+                    live,
+                    ..Default::default()
+                },
+            )])
+        };
+
+        // The first snapshot has no "before", so it is not a transition.
+        app.handle_event(live(false));
+        app.handle_event(live(true));
+        app.handle_event(live(false));
+
+        // The queue is what proves the notifications were raised: the first
+        // went out immediately, the second is still waiting on the gap.
+        assert_eq!(app.desktop.queued(), 1);
+    }
+
+    /// A failed poll carries no usable live flag. Announcing a dead stream
+    /// every time the network hiccuped would train somebody to ignore the one
+    /// notification that matters.
+    #[test]
+    fn a_failed_statistics_poll_is_not_a_stream_ending() {
+        let mut app = app();
+        app.handle_event(Event::Stats(vec![(
+            Platform::Twitch,
+            PlatformStats {
+                live: true,
+                ..Default::default()
+            },
+        )]));
+        app.handle_event(Event::Stats(vec![(
+            Platform::Twitch,
+            PlatformStats {
+                live: false,
+                error: Some("timed out".into()),
+                ..Default::default()
+            },
+        )]));
+        assert_eq!(app.desktop.queued(), 0);
+    }
+
+    /// Switching stream-state notifications off has to switch them off.
+    #[test]
+    fn stream_state_notifications_can_be_declined() {
+        let mut app = app();
+        app.config.notifications.stream_state = false;
+        app.handle_event(Event::Stats(vec![(
+            Platform::Twitch,
+            PlatformStats {
+                live: false,
+                ..Default::default()
+            },
+        )]));
+        app.handle_event(Event::Stats(vec![(
+            Platform::Twitch,
+            PlatformStats {
+                live: true,
+                ..Default::default()
+            },
+        )]));
+        assert_eq!(app.desktop.queued(), 0);
+    }
+
+    /// Open the Configuration tab and move the section cursor onto `wanted`.
+    ///
+    /// Pressing "j" a fixed number of times would be shorter, and would break
+    /// every time a section is added — which is how it read before the
+    /// Notifications section arrived. This walks until it arrives instead.
+    fn go_to_config_section(app: &mut App, wanted: super::super::config_tab::Section) {
+        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::ALT));
+        for _ in 0..super::super::config_tab::Section::ALL.len() {
+            if app.config_tab.as_ref().expect("the tab has state").section == wanted {
+                return;
+            }
+            app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        }
+        panic!("never reached {wanted:?}");
+    }
+
     /// to earn.
     #[test]
     fn cleanup_lists_before_it_deletes() {
         let mut app = app();
-        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::ALT));
-
         // Move to Housekeeping, then into its list.
-        for _ in 0..5 {
-            app.handle_key(KeyEvent::from(KeyCode::Char('j')));
-        }
-        let section = app.config_tab.as_ref().expect("state").section;
-        assert_eq!(section, super::super::config_tab::Section::Maintenance);
+        go_to_config_section(&mut app, super::super::config_tab::Section::Maintenance);
 
         app.handle_key(KeyEvent::from(KeyCode::Tab));
         let first = app.handle_key(KeyEvent::from(KeyCode::Enter));
@@ -5195,15 +5449,8 @@ mod tests {
         let mut app = App::new(config);
         app.splash_skipped = true;
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::ALT));
         // Move to Accounts, then into its list.
-        for _ in 0..4 {
-            app.handle_key(KeyEvent::from(KeyCode::Char('j')));
-        }
-        assert_eq!(
-            app.config_tab.as_ref().expect("state").section,
-            super::super::config_tab::Section::Accounts
-        );
+        go_to_config_section(&mut app, super::super::config_tab::Section::Accounts);
         app.handle_key(KeyEvent::from(KeyCode::Tab));
 
         let commands = app.handle_key(KeyEvent::from(KeyCode::Char('a')));
@@ -5218,10 +5465,7 @@ mod tests {
     #[test]
     fn adding_an_account_without_credentials_explains_rather_than_trying() {
         let mut app = app();
-        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::ALT));
-        for _ in 0..4 {
-            app.handle_key(KeyEvent::from(KeyCode::Char('j')));
-        }
+        go_to_config_section(&mut app, super::super::config_tab::Section::Accounts);
         app.handle_key(KeyEvent::from(KeyCode::Tab));
 
         let commands = app.handle_key(KeyEvent::from(KeyCode::Char('a')));

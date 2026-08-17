@@ -320,7 +320,8 @@ table above does not already use — see
 | Section | What it is for |
 |---|---|
 | **Layout** | Arrange the Combined tab |
-| **Appearance** | Theme, motion, notifications |
+| **Appearance** | Theme, motion, in-app pop-ups |
+| **Notifications** | Desktop alerts for stream events |
 | **Keys** | Every binding, and what it runs |
 | **OBS** | Connection to OBS Studio |
 | **Accounts** | Twitch and YouTube logins |

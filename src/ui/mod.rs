@@ -313,8 +313,13 @@ pub async fn run(config: Config) -> Result<()> {
                 app.telemetry.sample(std::time::Instant::now());
             }
 
-            // Plain redraw tick, so counters stay current.
-            _ = redraw.tick() => {}
+            // Plain redraw tick, so counters stay current. It also paces
+            // desktop notifications: a burst of stream events is queued
+            // rather than dropped, and this is what releases the queue one
+            // pop-up at a time.
+            _ = redraw.tick() => {
+                app.desktop.flush();
+            }
         }
     }
 

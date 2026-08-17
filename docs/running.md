@@ -251,7 +251,8 @@ field in **[configuration.md](configuration.md)**:
 [youtube]     # Google credentials, plus stream-key reuse
 [general]     # polling interval, OAuth callback port
 [chat]        # scrollback, YouTube polling and quota, chat logging
-[appearance]  # theme, motion, mouse, notifications
+[notifications]  # desktop alerts for raids, subs and a stopped stream
+[appearance]  # theme, motion, mouse, in-app pop-ups
 [obs]         # connection to OBS Studio
 [keys]        # every key binding
 [layout]      # how the Combined tab is arranged

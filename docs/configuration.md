@@ -18,6 +18,7 @@ different kinds of thing:
 * [`[youtube]`](#youtube)
 * [`[general]`](#general)
 * [`[chat]`](#chat)
+* [`[notifications]`](#notifications)
 * [`[appearance]`](#appearance)
 * [`[obs]`](#obs)
 * [`[keys]`](#keys)
@@ -58,7 +59,7 @@ which is what the old `msm init` command used to do.
 
 ## Shape of the file
 
-Nine sections, all optional. Anything you leave out falls back to the default
+Ten sections, all optional. Anything you leave out falls back to the default
 listed below, so a partial file is valid and a completely empty file parses.
 
 ```toml
@@ -66,7 +67,8 @@ listed below, so a partial file is valid and a completely empty file parses.
 [youtube]     # Google OAuth credentials, plus stream-key reuse settings
 [general]     # settings that belong to neither platform
 [chat]        # the chat panes: scrollback, polling, quota, logging
-[appearance]  # colours, motion, mouse, notifications
+[notifications]  # desktop pop-ups for raids, subs and a stopped stream
+[appearance]  # colours, motion, mouse, in-app pop-ups
 [obs]         # controlling OBS Studio
 [keys]        # key bindings, written the way vim writes them
 [layout]      # how the Combined tab is arranged
@@ -207,7 +209,7 @@ poll_interval_floor_ms = 1000    # fastest the YouTube poller may ever poll
 poll_interval_ceiling_ms = 0     # 0 = no ceiling
 daily_quota_units = 10000        # your project's daily YouTube API quota
 quota_reserve_percent = 10       # stop polling below this much quota left
-notifications = true             # desktop notifications for off-screen events
+notifications = true             # master switch for chat desktop notifications
 chat_logging = false             # write every message to JSON Lines files
 chat_log_dir = ""                # empty = chatlog/ under the config directory
 chat_log_max_bytes = 10485760    # rotate a log file at this size
@@ -253,6 +255,127 @@ CSV of every paid event, with no network access and no API quota spent, which is
 what makes them worth keeping.
 Files rotate at `chat_log_max_bytes` and the oldest are pruned beyond
 `chat_log_max_files`.
+
+
+---
+
+## `[notifications]`
+
+Desktop notifications: the pop-ups **your desktop** shows, in the corner of the
+screen, over whatever program you happen to be using.
+
+These are not the same thing as the pop-ups this program draws inside its own
+window (those are `[appearance] toasts`, and they say what *this program* just
+did). These say what *your stream* just did, and they exist for the times you
+are not looking at the terminal — which, during a stream, is most of the time.
+
+A raid is the example that makes the difference concrete. Another streamer ends
+their broadcast by sending their audience to yours; four hundred people arrive
+at once, and you have a few seconds to say hello before they decide nothing is
+happening here. A line scrolling past in a chat pane on another workspace will
+not reach you in a few seconds. A notification on top of OBS will.
+
+### Nothing to install, on any distribution
+
+"Send a desktop notification" is not one single thing on Linux, so `msm` tries
+four in order and uses the first that works:
+
+1. **`notify-send`** — the usual answer. It comes from the *libnotify* package,
+   which is separate from the notification daemon that actually draws the
+   pop-up, so it is not always installed even when notifications work.
+2. **`gdbus`** — part of GLib, talking to the desktop's notification service
+   directly. GLib is a dependency of GNOME, KDE, XFCE, Cinnamon and MATE, so
+   this is the rung that makes "any distribution" true in practice.
+3. **`kdialog`** — for a KDE Plasma install that has neither of the above.
+4. **The terminal bell** — so that something happens even on a machine with no
+   notification tooling at all.
+
+Whichever one works is remembered for the rest of the session. **Config →
+Diagnostics** names it, and warns if the answer was "none of them" — that is
+worth checking once, because a notification that is never sent looks exactly
+like a stream where nothing happened.
+
+macOS uses `osascript`. Windows gets the terminal bell: this program is
+Linux-first and the Windows toast API is not worth the maintenance.
+
+### The settings
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `enabled` | boolean | `true` | The master switch. Off means nothing is sent and nothing is queued. |
+| `min_gap_ms` | integer | `2000` | The shortest gap between two pop-ups, in milliseconds. |
+| `only_when_hidden` | boolean | `false` | Only notify about chat events when that chat is not on screen. |
+| `raids` | boolean | `true` | Raids — another streamer sending you their audience. |
+| `subscriptions` | boolean | `true` | Subscriptions, renewals, tier upgrades and gifted subs. |
+| `cheers` | boolean | `true` | Twitch cheers (bits) and bits-badge milestones. |
+| `paid` | boolean | `true` | YouTube Super Chats and Super Stickers. |
+| `memberships` | boolean | `true` | YouTube channel memberships. |
+| `stream_state` | boolean | `true` | Going live, a platform refusing to, and a broadcast that stops. |
+
+```toml
+[notifications]
+enabled = true
+min_gap_ms = 2000
+only_when_hidden = false
+raids = true
+subscriptions = true
+cheers = true
+paid = true
+memberships = true
+stream_state = true
+```
+
+Every one of these is a switch in **Config → Notifications**
+(<kbd>Alt</kbd>+<kbd>5</kbd>), changed with <kbd>Enter</kbd> and saved as you
+change it — the file is there for people who prefer files, not because the
+interface cannot do it.
+
+### `min_gap_ms`: paced, not dropped
+
+Stream events do not arrive evenly. A gift drop of fifty subscriptions delivers
+one event per recipient, and if a raid lands in the middle of that, fifty-one
+pop-ups is the same as none.
+
+So events arriving faster than `min_gap_ms` are **queued**, not discarded, and
+released one per gap. Nothing is lost; it simply arrives paced. (The queue
+holds thirty-two, and past that the oldest waiting one is dropped, on the
+grounds that during a flood the newest news is the news worth reading.) Setting
+`min_gap_ms = 0` turns the pacing off entirely.
+
+### `only_when_hidden`
+
+Off by default, and this is a deliberate change from how this behaved when it
+was a chat-only feature. The old rule was "only notify about what you cannot
+already see", which assumes you are reading chat in this program. In practice
+the terminal is on a second monitor, behind OBS, or not on screen at all.
+
+Turn it on if you *do* watch chat here and find the pop-ups redundant. It only
+affects chat events; `stream_state` notifications ignore it, because a stream
+that has stopped is worth saying whatever is on screen.
+
+### `stream_state`
+
+Three things, and the middle one is the reason it defaults to on:
+
+* **Stream ready** — going live succeeded, naming the platforms that took it.
+* **Stream stopped** — a platform that *was* reporting an incoming broadcast has
+  stopped reporting one. That is what a dead encoder, a dropped connection or a
+  closed OBS looks like from the outside, and nothing else in this program will
+  tell you: the only sign is a number changing in a panel you are not watching.
+  Sent as *critical*, which on most desktops means it appears even with
+  do-not-disturb on.
+* **Going live failed** — every platform refused the plan.
+
+A failed statistics poll is deliberately **not** treated as a stopped stream. A
+network hiccup that announced a dead broadcast every time would teach you to
+ignore the one notification that matters.
+
+### Turning chat notifications off wholesale
+
+`[chat] notifications = false` silences every chat-derived notification — raids,
+subs, cheers, Super Chats, memberships — whatever the per-event switches above
+say. `[notifications] enabled = false` silences those *and* the stream-state
+ones. Between the two there is a switch for every level of "not now".
 
 ---
 

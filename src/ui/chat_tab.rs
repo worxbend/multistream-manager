@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::auth::store::TokenStore;
-use crate::chat::notify::{high_signal, Notifier};
+use crate::chat::notify::high_signal;
 use crate::chat::render::{render_message, BadgeMode, MessageLayout, RenderOpts};
 use crate::chat::roster::{mention_prefix, Roster};
 use crate::chat::source::{self, ChatCommand, ChatHandle};
@@ -33,6 +33,7 @@ use crate::chat::{
 };
 use crate::config::Config;
 use crate::model::Platform;
+use crate::notify::Notifier;
 
 /// One account sub-tab: the token-store key it speaks as, the label shown,
 /// and the target of the account's own chat (Twitch login / YouTube channel
@@ -144,12 +145,14 @@ pub struct ChatTabState {
     /// ctrl+g/b/y/n. Session-only, like the references — no runtime toggle
     /// persists to config.
     pub render: RenderOpts,
-    /// Desktop notifications for high-signal events in off-screen chats.
+    /// Desktop notifications for stream events arriving in chat. Shared with
+    /// the rest of the interface, so chat and stream-state notifications
+    /// queue behind one another instead of talking over each other.
     notifier: Notifier,
     /// Opt-in JSONL chat logging.
     logger: Option<crate::chat::chatlog::ChatLogger>,
-    /// Whether the Chat tab is currently on screen at all — notifications
-    /// fire for events the user cannot see.
+    /// Whether the Chat tab is currently on screen at all. Only consulted
+    /// when `[notifications] only_when_hidden` is on.
     tab_visible: bool,
 }
 
@@ -168,7 +171,7 @@ impl ChatTabState {
     /// A store that cannot be read is treated as "no accounts": the panes
     /// then show their empty-state hints, which include the commands that
     /// would also surface the underlying problem.
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &Config, notifier: Notifier) -> Self {
         let accounts = match TokenStore::load() {
             Ok(store) => discover_accounts(&store),
             Err(err) => {
@@ -199,7 +202,7 @@ impl ChatTabState {
                     .map(|dir| dir.join("quota.json")),
             ),
             render: RenderOpts::default(),
-            notifier: Notifier::new(config.chat.notifications),
+            notifier,
             logger: build_logger(config),
             tab_visible: false,
             config: config.clone(),
@@ -444,6 +447,19 @@ impl ChatTabState {
         self.split_percent = SPLIT_DEFAULT;
     }
 
+    /// Adopt changed notification settings.
+    ///
+    /// This tab keeps its own copy of the config (so composer commands can
+    /// open chats without `&Config` being threaded through every key path),
+    /// and a copy taken at start-up would keep the old switches for the rest
+    /// of the session. Only the notification settings are refreshed: the rest
+    /// of the copy backs live machinery — the chat logger, the quota store —
+    /// that a wholesale replacement would leave pointing somewhere else.
+    pub fn adopt_notification_settings(&mut self, config: &Config) {
+        self.config.notifications = config.notifications.clone();
+        self.config.chat.notifications = config.chat.notifications;
+    }
+
     /// Fold one event from a chat task into its chat's state.
     ///
     /// An event for a chat closed meanwhile is simply dropped — its task ends
@@ -464,10 +480,23 @@ impl ChatTabState {
             if let Some(logger) = self.logger.as_mut() {
                 logger.append(&key.target, msg);
             }
-            // Notify only for what the user cannot currently see.
-            if !on_screen {
-                if let Some((title, body)) = high_signal(msg) {
-                    self.notifier.notify(&title, &body);
+            // Desktop notification for anything that counts as a stream
+            // event — a raid, a subscription, a cheer, a Super Chat.
+            //
+            // By default this fires whether or not the chat is on screen.
+            // That is deliberate: the terminal is usually not what you are
+            // looking at while you stream, and the event this feature exists
+            // for — a raid — has to reach you within seconds. Somebody who
+            // does read chat in this program can set
+            // `[notifications] only_when_hidden` and get the old behaviour,
+            // where a pop-up only appears for what is not already visible.
+            //
+            // `[chat] notifications = false` still switches off every
+            // chat-derived notification, whatever the per-event switches say.
+            let hidden_enough = !self.config.notifications.only_when_hidden || !on_screen;
+            if self.config.chat.notifications && hidden_enough {
+                if let Some(notification) = high_signal(msg, &self.config.notifications) {
+                    self.notifier.send(notification);
                 }
             }
         }
@@ -1724,6 +1753,104 @@ mod tests {
             }
         }
         state
+    }
+
+    /// Put one open chat into a tab state, so `handle_event` has somewhere to
+    /// fold an event into.
+    fn with_open_chat(state: &mut ChatTabState, notifier: Notifier) -> ChatKey {
+        // The account key has to be the one the tab believes is selected, or
+        // the chat counts as off-screen and the visibility rule under test
+        // would be exercised backwards.
+        let account = state.accounts[&Platform::Twitch][0].key.clone();
+        let key = ChatKey {
+            platform: Platform::Twitch,
+            account: account.clone(),
+            target: "somechannel".into(),
+        };
+        state.notifier = notifier;
+        state.open.insert(
+            key.clone(),
+            OpenChat {
+                handle: crate::chat::source::ChatHandle {
+                    key: key.clone(),
+                    commands: mpsc::channel(1).0,
+                    task: tokio::spawn(async {}),
+                },
+                state: ChatState::new(&state.config.chat),
+                title: "#somechannel".into(),
+                roster: Roster::new(),
+                roster_seq: 0,
+            },
+        );
+        state.chats.insert(account.clone(), vec![key.clone()]);
+        state.active_chat.insert(account, 0);
+        key
+    }
+
+    fn raid() -> ChatMessage {
+        ChatMessage {
+            id: "u1".into(),
+            timestamp: None,
+            author: ChatAuthor {
+                display_name: "iamelisabete".into(),
+                ..Default::default()
+            },
+            text: "430 raiders from iamelisabete have joined!".into(),
+            kind: MessageKind::Notice,
+            deleted: false,
+            historical: false,
+            local_echo: false,
+            meta: Some(PlatformMeta::Twitch(crate::chat::TwitchMeta {
+                system_event: "raid".into(),
+                ..Default::default()
+            })),
+        }
+    }
+
+    /// The event this whole feature exists for. A raid gives you seconds to
+    /// greet a few hundred people, and by default the pop-up fires whether or
+    /// not the chat pane happens to be on screen — because during a stream it
+    /// usually is not.
+    #[tokio::test]
+    async fn a_raid_notifies_the_desktop_even_with_the_chat_on_screen() {
+        let mut state = tab_state(1, 0);
+        let notifier = Notifier::new(true);
+        let key = with_open_chat(&mut state, notifier.clone());
+        state.tab_visible = true;
+
+        state.handle_event(key, ChatEvent::Message(Box::new(raid())));
+        assert_eq!(notifier.delivered(), 1);
+    }
+
+    /// …unless the old chat-only behaviour is asked for by name.
+    #[tokio::test]
+    async fn only_when_hidden_restores_the_old_off_screen_rule() {
+        let mut state = tab_state(1, 0);
+        state.config.notifications.only_when_hidden = true;
+        let notifier = Notifier::new(true);
+        let key = with_open_chat(&mut state, notifier.clone());
+        state.tab_visible = true;
+        state.refresh_visibility();
+
+        state.handle_event(key.clone(), ChatEvent::Message(Box::new(raid())));
+        assert_eq!(notifier.delivered(), 0, "the chat is on screen");
+
+        state.tab_visible = false;
+        state.handle_event(key, ChatEvent::Message(Box::new(raid())));
+        assert_eq!(notifier.delivered(), 1);
+    }
+
+    /// The chat-wide switch still turns every chat-derived notification off,
+    /// whatever the per-event switches say.
+    #[tokio::test]
+    async fn chat_notifications_off_silences_even_a_raid() {
+        let mut state = tab_state(1, 0);
+        state.config.chat.notifications = false;
+        let notifier = Notifier::new(true);
+        let key = with_open_chat(&mut state, notifier.clone());
+
+        state.handle_event(key, ChatEvent::Message(Box::new(raid())));
+        assert_eq!(notifier.delivered(), 0);
     }
 
     #[test]

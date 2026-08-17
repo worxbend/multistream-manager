@@ -28,6 +28,7 @@ use crate::theme;
 pub enum Section {
     Layout,
     Appearance,
+    Notifications,
     Keys,
     Obs,
     Accounts,
@@ -37,9 +38,10 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 8] = [
+    pub const ALL: [Section; 9] = [
         Section::Layout,
         Section::Appearance,
+        Section::Notifications,
         Section::Keys,
         Section::Obs,
         Section::Accounts,
@@ -52,6 +54,7 @@ impl Section {
         match self {
             Section::Layout => "Layout",
             Section::Appearance => "Appearance",
+            Section::Notifications => "Notifications",
             Section::Keys => "Keys",
             Section::Obs => "OBS",
             Section::Accounts => "Accounts",
@@ -66,7 +69,8 @@ impl Section {
     pub fn summary(self) -> &'static str {
         match self {
             Section::Layout => "Arrange the Combined tab",
-            Section::Appearance => "Theme, motion, notifications",
+            Section::Appearance => "Theme, motion, pop-ups",
+            Section::Notifications => "Desktop alerts for stream events",
             Section::Keys => "Every binding, and what it runs",
             Section::Obs => "Connection to OBS Studio",
             Section::Accounts => "Twitch and YouTube logins",
@@ -119,6 +123,7 @@ impl ConfigTab {
         match self.section {
             Section::Layout => self.draft.panels().len(),
             Section::Appearance => APPEARANCE_ROWS,
+            Section::Notifications => NOTIFICATION_ROWS,
             Section::Keys => app.keymap.all().len(),
             Section::Obs => 0,
             Section::Accounts => crate::model::Platform::ALL.len(),
@@ -131,6 +136,9 @@ impl ConfigTab {
 
 /// How many settings the Appearance section lists.
 pub const APPEARANCE_ROWS: usize = 7;
+
+/// How many switches the Notifications section lists.
+pub const NOTIFICATION_ROWS: usize = 8;
 
 /// The housekeeping jobs, in the order they are listed.
 pub const MAINTENANCE_JOBS: [(&str, &str); 3] = [
@@ -223,6 +231,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     match config.section {
         Section::Layout => draw_layout_section(frame, inner, config),
         Section::Appearance => draw_appearance(frame, inner, app, config),
+        Section::Notifications => draw_notifications(frame, inner, app, config),
         Section::Keys => draw_keys(frame, inner, app, config),
         Section::Obs => draw_obs(frame, inner, app),
         Section::Accounts => draw_accounts(frame, inner, app, config),
@@ -325,7 +334,10 @@ fn draw_appearance(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab)
         ("Splash screen", on_off(appearance.splash)),
         ("Mouse", on_off(appearance.mouse)),
         ("Telemetry", on_off(appearance.telemetry)),
-        ("Notifications", on_off(appearance.toasts)),
+        // Named for what it is, because the Notifications section next door
+        // is about the *desktop's* pop-ups and confusing the two would send
+        // somebody to the wrong switch.
+        ("In-app pop-ups", on_off(appearance.toasts)),
         (
             "Terminal background",
             on_off(appearance.terminal_background),
@@ -357,6 +369,76 @@ fn draw_appearance(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab)
         ))))
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The Notifications section: desktop pop-ups for what the *stream* does.
+///
+/// Kept apart from Appearance on purpose. Appearance's "In-app pop-ups" are
+/// drawn inside this program and are only seen by somebody looking at the
+/// terminal. These go to the desktop's own notification service, and exist for
+/// the times you are in OBS, in the game, or out of the room — which is when a
+/// raid lands.
+fn draw_notifications(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab) {
+    let sk = theme::skin();
+    let settings = &app.config.notifications;
+    let rows: [(&str, String); NOTIFICATION_ROWS] = [
+        ("Desktop notifications", on_off(settings.enabled)),
+        ("Raids", on_off(settings.raids)),
+        ("Subscriptions & gifts", on_off(settings.subscriptions)),
+        ("Cheers & bits", on_off(settings.cheers)),
+        ("Super Chats", on_off(settings.paid)),
+        ("Memberships", on_off(settings.memberships)),
+        ("Stream started/stopped", on_off(settings.stream_state)),
+        (
+            "Only when chat is hidden",
+            on_off(settings.only_when_hidden),
+        ),
+    ];
+
+    let mut lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, (name, value))| {
+            let selected = index == config.cursor && config.focus == Focus::Contents;
+            // Every switch below the first is meaningless while the master
+            // switch is off, and greying them says that without hiding them.
+            let dimmed = index > 0 && !settings.enabled;
+            let name_colour = if dimmed { sk.muted } else { sk.foreground };
+            let value_colour = if dimmed { sk.muted } else { sk.accent };
+            let mut line = Line::from(vec![
+                Span::styled(
+                    if selected { "▸ " } else { "  " },
+                    Style::new().fg(sk.accent),
+                ),
+                Span::styled(format!("{name:<26}"), Style::new().fg(name_colour)),
+                Span::styled(value.clone(), Style::new().fg(value_colour)),
+            ]);
+            if selected {
+                line = line.style(Style::new().bg(sk.selection));
+            }
+            line
+        })
+        .collect();
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "At most one pop-up every {:.1}s; the rest queue rather than being lost.",
+            settings.min_gap_ms as f64 / 1000.0
+        ),
+        Style::new().fg(sk.muted),
+    )));
+    lines.push(Line::from(Span::styled(
+        "Needs no setup: notify-send, then gdbus, then kdialog, then the bell.",
+        Style::new().fg(sk.muted),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "enter change · every change is saved straight away",
+        Style::new().fg(sk.muted),
+    )));
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
 }
 
 fn on_off(value: bool) -> String {
