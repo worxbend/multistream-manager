@@ -414,6 +414,24 @@ mod tests {
     /// A backend that does nothing except succeed, or panic on `go_live`.
     struct FakeBackend {
         panics: bool,
+        /// What `end_stream` should answer. `None` means "use the trait's
+        /// default", which is what a platform with no broadcast object does.
+        ends: Option<Result<EndOutcome, &'static str>>,
+        /// Every platform whose `end_stream` ran, in the order they ran, so a
+        /// test can see that ending is sequential and complete.
+        ended: Option<std::sync::Arc<std::sync::Mutex<Vec<Platform>>>>,
+        platform: Platform,
+    }
+
+    impl FakeBackend {
+        fn new(panics: bool) -> Self {
+            Self {
+                panics,
+                ends: None,
+                ended: None,
+                platform: Platform::Twitch,
+            }
+        }
     }
 
     impl Backend for FakeBackend {
@@ -441,6 +459,24 @@ mod tests {
         }
 
         fn set_access_token(&mut self, _token: String) {}
+
+        fn end_stream(&mut self) -> BoxFuture<'_, Result<EndOutcome>> {
+            if let Some(log) = &self.ended {
+                log.lock()
+                    .expect("the log is not poisoned")
+                    .push(self.platform);
+            }
+            let answer = self.ends.clone();
+            Box::pin(async move {
+                match answer {
+                    None => Ok(EndOutcome::NothingToEnd {
+                        reason: "nothing to end".into(),
+                    }),
+                    Some(Ok(outcome)) => Ok(outcome),
+                    Some(Err(message)) => Err(anyhow::anyhow!(message)),
+                }
+            })
+        }
     }
 
     fn engine_with(backends: Vec<(Platform, bool)>) -> Engine {
@@ -449,7 +485,7 @@ mod tests {
             backends: backends
                 .into_iter()
                 .map(|(platform, panics)| {
-                    let backend: Box<dyn Backend> = Box::new(FakeBackend { panics });
+                    let backend: Box<dyn Backend> = Box::new(FakeBackend::new(panics));
                     (platform, backend)
                 })
                 .collect(),
@@ -482,6 +518,97 @@ mod tests {
                 .contains("unexpectedly"),
             "the panicking platform must carry an error snapshot: {youtube:?}"
         );
+    }
+
+    /// Ending has to follow the same partial-success rule as going live: one
+    /// platform refusing must not leave the other broadcast open, and every
+    /// answer has to come back so the interface can show them side by side.
+    #[tokio::test]
+    async fn ending_reports_every_platform_even_when_one_refuses() {
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("engine-end-partial");
+
+        let mut engine = Engine {
+            config: Config::default(),
+            backends: HashMap::new(),
+        };
+        engine.backends.insert(
+            Platform::Twitch,
+            Box::new(FakeBackend {
+                ends: Some(Err("the API said no")),
+                ..FakeBackend::new(false)
+            }),
+        );
+        engine.backends.insert(
+            Platform::YouTube,
+            Box::new(FakeBackend {
+                ends: Some(Ok(EndOutcome::Ended {
+                    note: "finished".into(),
+                })),
+                ..FakeBackend::new(false)
+            }),
+        );
+
+        let results = engine.end_live().await;
+
+        assert_eq!(results.len(), 2, "both platforms must answer");
+        // Canonical order, so the interface does not reshuffle depending on
+        // which request finished first.
+        assert_eq!(results[0].0, Platform::Twitch);
+        assert_eq!(results[1].0, Platform::YouTube);
+        assert!(results[0].1.is_err(), "the refusal is reported as one");
+        assert!(
+            results[1]
+                .1
+                .as_ref()
+                .is_ok_and(|outcome| outcome.changed_anything()),
+            "and the other platform is still closed"
+        );
+    }
+
+    /// Every connected platform is asked, exactly once each. A loop that
+    /// stopped at the first answer would leave a broadcast open, which is the
+    /// failure this whole feature exists to prevent.
+    #[tokio::test]
+    async fn ending_asks_every_platform_exactly_once() {
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("engine-end-each");
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut engine = Engine {
+            config: Config::default(),
+            backends: HashMap::new(),
+        };
+        for platform in Platform::ALL {
+            engine.backends.insert(
+                platform,
+                Box::new(FakeBackend {
+                    ended: Some(log.clone()),
+                    platform,
+                    ..FakeBackend::new(false)
+                }),
+            );
+        }
+
+        engine.end_live().await;
+
+        let mut called = log.lock().expect("not poisoned").clone();
+        called.sort();
+        assert_eq!(called, Platform::ALL.to_vec());
+    }
+
+    /// The default answer — a platform with no broadcast object — is not a
+    /// failure and must not be reported as one. Twitch answers this way every
+    /// single time.
+    #[tokio::test]
+    async fn nothing_to_end_is_not_an_error() {
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("engine-end-nothing");
+
+        let mut engine = engine_with(vec![(Platform::Twitch, false)]);
+        let results = engine.end_live().await;
+
+        match &results[0].1 {
+            Ok(outcome) => assert!(!outcome.changed_anything()),
+            Err(err) => panic!("nothing to end is not a failure: {err}"),
+        }
     }
 
     /// Building must follow the partial-success rule too: each platform gets

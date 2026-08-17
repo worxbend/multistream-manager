@@ -676,6 +676,122 @@ mod tests {
         handle.await.unwrap();
     }
 
+    /// Every command that needs an engine has to say so when there is none.
+    /// The rule matters because the worker is a loop that answers on a
+    /// channel: a command it silently ignores leaves the interface waiting
+    /// for a reply that will never come, with a spinner and no explanation.
+    #[tokio::test]
+    async fn ending_before_connecting_reports_an_error_rather_than_silence() {
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        let handle = tokio::spawn(run(Config::default(), command_rx, event_tx));
+
+        command_tx.send(Command::EndLive).await.unwrap();
+
+        match event_rx.recv().await.expect("an error should arrive") {
+            Event::Log { level, message } => {
+                assert_eq!(level, LogLevel::Error);
+                assert!(message.contains("Not connected"));
+            }
+            other => panic!("expected a log line, got {other:?}"),
+        }
+
+        drop(command_tx);
+        handle.await.unwrap();
+    }
+
+    /// A statistics poll is the one command that is *allowed* to say nothing
+    /// when there is no engine: it runs on a timer, and a log line every
+    /// fifteen seconds saying "still not connected" would bury everything
+    /// else in the log.
+    #[tokio::test]
+    async fn polling_before_connecting_stays_quiet() {
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        let handle = tokio::spawn(run(Config::default(), command_rx, event_tx));
+
+        command_tx.send(Command::PollStats).await.unwrap();
+        // Followed by something that does answer, so the test can tell
+        // "nothing yet" from "nothing ever" without sleeping.
+        command_tx.send(Command::Connect(vec![])).await.unwrap();
+
+        match event_rx.recv().await.expect("the second command answers") {
+            Event::Log { message, .. } => assert!(
+                message.contains("at least one platform"),
+                "the poll must not have produced a line of its own: {message}"
+            ),
+            other => panic!("expected a log line, got {other:?}"),
+        }
+
+        drop(command_tx);
+        handle.await.unwrap();
+    }
+
+    /// The worker keeps its own copy of the config, and adopting a new one has
+    /// to drop the engine with it: an engine built from the old credentials
+    /// would keep using them, which looks exactly like the setup screen having
+    /// silently failed to save.
+    #[tokio::test]
+    async fn reloading_the_config_forgets_the_engine_built_from_the_old_one() {
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        let handle = tokio::spawn(run(Config::default(), command_rx, event_tx));
+
+        // Connecting with no credentials still builds an engine — one whose
+        // platforms all failed — which is enough to tell whether it survived.
+        command_tx
+            .send(Command::Connect(vec![Platform::Twitch]))
+            .await
+            .unwrap();
+        // Drain until the connection answers.
+        loop {
+            match event_rx.recv().await.expect("the connect answers") {
+                Event::Connected(_) => break,
+                _ => continue,
+            }
+        }
+
+        command_tx
+            .send(Command::ReloadConfig(Box::default()))
+            .await
+            .unwrap();
+        command_tx.send(Command::EndLive).await.unwrap();
+
+        match event_rx.recv().await.expect("an answer arrives") {
+            Event::Log { level, message } => {
+                assert_eq!(level, LogLevel::Error);
+                assert!(
+                    message.contains("Not connected"),
+                    "the old engine must have been dropped: {message}"
+                );
+            }
+            other => panic!("expected a log line, got {other:?}"),
+        }
+
+        drop(command_tx);
+        handle.await.unwrap();
+    }
+
+    /// Dropping the command sender is the only shutdown signal there is, and
+    /// the loop has to end on it — a worker that outlived the interface would
+    /// hold the runtime open and the program would not exit.
+    #[tokio::test]
+    async fn dropping_the_commands_ends_the_worker() {
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+
+        let handle = tokio::spawn(run(Config::default(), command_rx, event_tx));
+        drop(command_tx);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("the worker must end when its commands do")
+            .expect("and not by panicking");
+    }
+
     #[tokio::test]
     async fn searching_before_connecting_answers_with_nothing_rather_than_staying_silent() {
         // The UI treats an empty reply as "the API list is unavailable" and

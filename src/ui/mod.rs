@@ -50,22 +50,10 @@ struct TerminalGuard {
 
 impl TerminalGuard {
     fn new(mouse: bool) -> Result<Self> {
-        // Checked before anything is switched on, because the error you get
-        // by simply trying is "No such device or address (os error 6)",
-        // which is true, unhelpful, and the first thing anybody sees when
-        // they pipe msm somewhere or run it from cron. This program is an
-        // interface and nothing else, so there is no meaningful non-terminal
-        // mode to fall back to — only a better sentence.
-        if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
-            anyhow::bail!(
-                "msm is an interactive program and needs a terminal.\n\
-                 It looks like its input or output is a pipe, a file or a service \
-                 manager's log rather than a terminal window.\n\
-                 There is nothing to run non-interactively: msm has no subcommands \
-                 and no batch mode. Run it in a terminal, or under a multiplexer \
-                 such as tmux or screen if you want it to outlive the session."
-            );
-        }
+        require_terminal(
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+        )?;
         enable_raw_mode().context("switching the terminal into raw mode")?;
         let mut stdout = std::io::stdout();
         execute!(stdout, EnterAlternateScreen).context("opening the alternate screen")?;
@@ -105,6 +93,30 @@ impl Drop for TerminalGuard {
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         let _ = self.terminal.show_cursor();
     }
+}
+
+/// Refuse to start when there is no terminal to draw on.
+///
+/// Checked before anything is switched on, because the error you get by simply
+/// trying is "No such device or address (os error 6)" — true, unhelpful, and
+/// the first thing anybody sees when they pipe `msm` somewhere or start it from
+/// a service manager. This program is an interface and nothing else, so there
+/// is no meaningful non-terminal mode to fall back to; only a better sentence.
+///
+/// Takes the two answers rather than asking for them, so the message can be
+/// tested without a test being able to run only under a terminal.
+fn require_terminal(stdin_is_terminal: bool, stdout_is_terminal: bool) -> Result<()> {
+    if stdin_is_terminal && stdout_is_terminal {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "msm is an interactive program and needs a terminal.\n\
+         It looks like its input or output is a pipe, a file or a service \
+         manager's log rather than a terminal window.\n\
+         There is nothing to run non-interactively: msm has no subcommands \
+         and no batch mode. Run it in a terminal, or under a multiplexer \
+         such as tmux or screen if you want it to outlive the session."
+    )
 }
 
 /// Hand commands to the worker without ever blocking the interface.
@@ -410,4 +422,84 @@ pub async fn run(config: Config) -> Result<()> {
     let _ = tokio::time::timeout(std::time::Duration::from_millis(500), shutdown).await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    #[test]
+    fn a_terminal_on_both_ends_is_what_it_takes_to_start() {
+        assert!(require_terminal(true, true).is_ok());
+    }
+
+    /// Piped either way is the case that used to fail with an OS error. Both
+    /// directions matter: output redirected to a log file is the service
+    /// manager case, and input from `/dev/null` is the cron one.
+    #[test]
+    fn without_a_terminal_the_refusal_explains_itself() {
+        for (stdin, stdout) in [(false, true), (true, false), (false, false)] {
+            let err = require_terminal(stdin, stdout).expect_err("must refuse");
+            let message = format!("{err}");
+            assert!(message.contains("needs a terminal"));
+            // And says what to do instead, which the OS error never did.
+            assert!(message.contains("tmux"));
+        }
+    }
+
+    fn app_for_dispatch() -> App {
+        let mut app = App::new(Config::default());
+        app.splash_skipped = true;
+        app
+    }
+
+    #[tokio::test]
+    async fn commands_reach_the_worker() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut app = app_for_dispatch();
+
+        dispatch(&mut app, &tx, vec![worker::Command::PollStats]);
+
+        assert!(matches!(rx.try_recv(), Ok(worker::Command::PollStats)));
+        assert!(!app.should_quit);
+    }
+
+    /// A full queue means the worker is far behind. The interface must say so
+    /// and carry on: an awaited send would park the only task that draws the
+    /// screen and reads the keyboard, so a stalled network call would take
+    /// Ctrl+C with it.
+    #[tokio::test]
+    async fn a_full_queue_drops_the_command_and_says_so() {
+        let (tx, _rx) = mpsc::channel(1);
+        let mut app = app_for_dispatch();
+
+        dispatch(
+            &mut app,
+            &tx,
+            vec![worker::Command::PollStats, worker::Command::PollStats],
+        );
+
+        assert!(!app.should_quit, "a busy worker is not a reason to quit");
+        assert!(
+            app.log
+                .iter()
+                .any(|line| line.message.contains("that request was ignored")),
+            "the dropped command has to be visible: {:?}",
+            app.log
+        );
+    }
+
+    /// If the worker has gone there is nothing left to drive the program, and
+    /// carrying on would mean an interface where no key does anything.
+    #[tokio::test]
+    async fn a_dead_worker_ends_the_program() {
+        let (tx, rx) = mpsc::channel(4);
+        drop(rx);
+        let mut app = app_for_dispatch();
+
+        dispatch(&mut app, &tx, vec![worker::Command::PollStats]);
+
+        assert!(app.should_quit);
+    }
 }
