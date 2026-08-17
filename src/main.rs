@@ -40,36 +40,88 @@ use anyhow::Result;
 
 use config::Config;
 
-/// What to say to somebody who typed an option.
+/// What the program was asked to do before the interface opens.
 ///
-/// There are none, and there is no `--help` to send them to either. Rather
-/// than start the interface as though nothing was typed — which would look
-/// like the argument had been understood — this says plainly that everything
-/// lives inside the interface, and where.
-fn explain_no_arguments(arguments: &[String]) {
-    println!("msm {}", env!("CARGO_PKG_VERSION"));
-    println!();
-    println!(
-        "This program has no command-line options. {:?} was ignored.",
-        arguments[0]
+/// There are no options that *change* how msm runs — everything it can be
+/// told is inside the interface. But two arguments have to work anyway,
+/// because the world assumes them: package builders, installers and CI
+/// pipelines all call `--version` to find out what they just installed, and
+/// somebody who types `--help` deserves an answer rather than a shrug.
+#[derive(Debug, PartialEq, Eq)]
+enum Invocation {
+    /// No arguments: open the interface.
+    Interface,
+    /// `--version` / `-V`: print the version and stop.
+    Version,
+    /// `--help` / `-h`: print where everything lives and stop.
+    Help,
+    /// Something else, which is a mistake worth naming.
+    Unknown(String),
+}
+
+/// Read the command line, such as it is.
+///
+/// Only the first argument is looked at: with no options to combine there is
+/// nothing a second one could mean, and reporting the first unrecognised
+/// thing is more useful than reporting the last.
+fn parse_arguments(arguments: &[String]) -> Invocation {
+    match arguments.first().map(String::as_str) {
+        None => Invocation::Interface,
+        Some("--version" | "-V") => Invocation::Version,
+        Some("--help" | "-h") => Invocation::Help,
+        Some(other) => Invocation::Unknown(other.to_string()),
+    }
+}
+
+/// `msm --version`, in the one-line `name version` form every other program
+/// uses — so `msm --version | cut -d" " -f2` gets a version and nothing else.
+fn version_line() -> String {
+    format!("msm {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Where everything lives, for `--help` and for anyone who typed something
+/// that does not exist.
+fn help_text() -> String {
+    let mut text = String::new();
+    text.push_str(&version_line());
+    text.push_str("\n\n");
+    text.push_str("Usage: msm\n\n");
+    text.push_str(
+        "This program has no command-line options beyond --version and --help.\n\
+         Everything it can do is inside the interface:\n",
     );
-    println!();
-    println!("Run `msm` on its own. Everything is inside the interface:");
-    println!("  alt+1  stream title, category and going live");
-    println!("  alt+2  both chats");
-    println!("  alt+3  the combined view");
-    println!("  alt+4  OBS scenes, audio, streaming and recording");
-    println!("  alt+5  configuration — layout, appearance, accounts, files");
-    println!();
-    println!("Press space inside it to see every key, or ctrl+p to search them.");
+    text.push_str("  alt+1  stream title, category and going live\n");
+    text.push_str("  alt+2  both chats\n");
+    text.push_str("  alt+3  the combined view\n");
+    text.push_str("  alt+4  OBS scenes, audio, streaming and recording\n");
+    text.push_str("  alt+5  configuration — layout, appearance, accounts, files\n\n");
+    text.push_str("Press space inside it to see every key, or ctrl+p to search them.");
+    text
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    if !arguments.is_empty() {
-        explain_no_arguments(&arguments);
-        return Ok(());
+    match parse_arguments(&arguments) {
+        Invocation::Interface => {}
+        Invocation::Version => {
+            println!("{}", version_line());
+            return Ok(());
+        }
+        Invocation::Help => {
+            println!("{}", help_text());
+            return Ok(());
+        }
+        Invocation::Unknown(argument) => {
+            // To stderr and with a non-zero status, because this *is* a
+            // failure: a script that passed an option msm does not have did
+            // not get what it asked for, and exiting 0 would tell it that it
+            // did. 2 is the conventional status for a usage error.
+            eprintln!("msm: unrecognised argument {argument:?}");
+            eprintln!();
+            eprintln!("{}", help_text());
+            std::process::exit(2);
+        }
     }
 
     // Keep the guard alive for the whole run so buffered log lines get
@@ -92,4 +144,66 @@ async fn main() -> Result<()> {
     };
 
     ui::run(config).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn no_arguments_opens_the_interface() {
+        assert_eq!(parse_arguments(&args(&[])), Invocation::Interface);
+    }
+
+    /// Package builders, installers and the release workflow's own smoke test
+    /// all call this. It used to print the version followed by a paragraph
+    /// saying the argument had been ignored, which is not an answer.
+    #[test]
+    fn version_is_a_real_option_in_both_spellings() {
+        assert_eq!(parse_arguments(&args(&["--version"])), Invocation::Version);
+        assert_eq!(parse_arguments(&args(&["-V"])), Invocation::Version);
+    }
+
+    /// One line, `name version`, so the usual shell one-liners work.
+    #[test]
+    fn the_version_line_is_parseable() {
+        let line = version_line();
+        let mut parts = line.split(' ');
+        assert_eq!(parts.next(), Some("msm"));
+        let version = parts.next().expect("a version");
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(parts.next(), None, "nothing else on the line");
+    }
+
+    #[test]
+    fn help_is_a_real_option_in_both_spellings() {
+        assert_eq!(parse_arguments(&args(&["--help"])), Invocation::Help);
+        assert_eq!(parse_arguments(&args(&["-h"])), Invocation::Help);
+    }
+
+    #[test]
+    fn anything_else_is_named_rather_than_ignored() {
+        assert_eq!(
+            parse_arguments(&args(&["--config", "other.toml"])),
+            Invocation::Unknown("--config".to_string())
+        );
+        assert_eq!(
+            parse_arguments(&args(&["go"])),
+            Invocation::Unknown("go".to_string())
+        );
+    }
+
+    /// The help has to name the interface, since that is the whole answer to
+    /// "how do I use this".
+    #[test]
+    fn the_help_says_where_everything_is() {
+        let help = help_text();
+        assert!(help.contains("Usage: msm"));
+        assert!(help.contains("alt+1"));
+        assert!(help.contains("--version"));
+    }
 }

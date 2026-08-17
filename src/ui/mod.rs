@@ -24,7 +24,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use std::io::Stdout;
+use std::io::{IsTerminal as _, Stdout};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt as _;
 
@@ -50,6 +50,22 @@ struct TerminalGuard {
 
 impl TerminalGuard {
     fn new(mouse: bool) -> Result<Self> {
+        // Checked before anything is switched on, because the error you get
+        // by simply trying is "No such device or address (os error 6)",
+        // which is true, unhelpful, and the first thing anybody sees when
+        // they pipe msm somewhere or run it from cron. This program is an
+        // interface and nothing else, so there is no meaningful non-terminal
+        // mode to fall back to — only a better sentence.
+        if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
+            anyhow::bail!(
+                "msm is an interactive program and needs a terminal.\n\
+                 It looks like its input or output is a pipe, a file or a service \
+                 manager's log rather than a terminal window.\n\
+                 There is nothing to run non-interactively: msm has no subcommands \
+                 and no batch mode. Run it in a terminal, or under a multiplexer \
+                 such as tmux or screen if you want it to outlive the session."
+            );
+        }
         enable_raw_mode().context("switching the terminal into raw mode")?;
         let mut stdout = std::io::stdout();
         execute!(stdout, EnterAlternateScreen).context("opening the alternate screen")?;

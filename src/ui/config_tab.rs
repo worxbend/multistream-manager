@@ -652,7 +652,19 @@ fn draw_diagnostics(frame: &mut Frame, area: Rect, app: &App) {
     // The age matters: these are facts about the machine at the moment they
     // were gathered, and the usual reason to look twice is having just
     // changed one of them (logged in, installed a helper).
+    // The verdict counts failures only, never warnings: an unfinished setup
+    // is not a broken one, and a list this long needs somebody to say which
+    // of it matters.
     lines.push(Line::from(""));
+    let failed = config
+        .diagnostics
+        .checks
+        .iter()
+        .any(|check| check.status.is_failure());
+    lines.push(Line::from(Span::styled(
+        crate::diagnostics::verdict(&config.diagnostics.checks),
+        Style::new().fg(if failed { sk.error } else { sk.success }),
+    )));
     lines.push(Line::from(Span::styled(
         match config.diagnostics.taken_at {
             Some(at) => format!("checked at {} · r to check again", at.format("%H:%M:%S")),

@@ -8,15 +8,11 @@
 //! checks separate from the drawing also makes them testable, which a function
 //! built around `println!` never was.
 //!
-//! Nothing in here talks to the network, so it is safe to call while the
-//! interface is redrawing. The clipboard check does start a local program to
-//! see whether it exists, which is quick and is what the old command did too.
-
-// Nothing calls into this module yet: the pane that will display the findings
-// is still being built. Without this the compiler reports every item here as
-// unused, which under `-D warnings` fails the build for a file that is
-// finished and tested. Remove this line once the interface calls `run`.
-#![allow(dead_code)]
+//! Nothing in here talks to the network. It is not free either: the clipboard
+//! check starts each candidate helper to find out whether it exists, and the
+//! login check reads the token store off disk. So [`run`] is called when
+//! Config → Diagnostics is opened and when `r` is pressed there — never from
+//! drawing code, which has to stay quick enough to keep up with a keypress.
 
 use crate::config::Config;
 use crate::model::Platform;
