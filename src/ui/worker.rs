@@ -38,6 +38,13 @@ pub enum Command {
         plan: Box<StreamPlan>,
         generation: u64,
     },
+    /// Finish the broadcast on every connected platform.
+    ///
+    /// The other end of `GoLive`. Sent only after the interface has asked
+    /// twice, because it cannot be undone: a finished YouTube broadcast
+    /// cannot be reopened, and viewers watching it are watching a recording
+    /// from the moment it completes.
+    EndLive,
     /// Refresh the statistics.
     PollStats,
     /// Run the browser login for these platforms, one after another, and save
@@ -100,6 +107,10 @@ pub enum Event {
     LoggedIn {
         platform: Platform,
         result: Result<String, String>,
+    },
+    /// Finishing the broadcast finished, per platform.
+    Ended {
+        results: Vec<(Platform, Result<crate::model::EndOutcome, String>)>,
     },
     /// A fresh statistics snapshot.
     Stats(Vec<(Platform, PlatformStats)>),
@@ -280,6 +291,47 @@ pub async fn run(
                     results,
                     generation,
                 });
+            }
+
+            Command::EndLive => {
+                let Some(engine) = engine.as_mut() else {
+                    let _ = events.send(Event::Log {
+                        level: LogLevel::Error,
+                        message: "Not connected to any platform yet.".into(),
+                    });
+                    continue;
+                };
+
+                let _ = events.send(Event::Log {
+                    level: LogLevel::Info,
+                    message: "Finishing the broadcast…".into(),
+                });
+
+                let results = engine.end_live().await;
+                for (platform, outcome) in &results {
+                    let (level, message) = match outcome {
+                        // "Nothing to end" is reported as information, not as
+                        // success and not as a fault. Twitch answers that way
+                        // every single time, and a green tick saying a
+                        // platform was closed when nothing happened would be
+                        // a lie told twice a session.
+                        Ok(outcome) if outcome.changed_anything() => (
+                            LogLevel::Success,
+                            format!("{}: {}", platform.label(), outcome.message()),
+                        ),
+                        Ok(outcome) => (
+                            LogLevel::Info,
+                            format!("{}: {}", platform.label(), outcome.message()),
+                        ),
+                        Err(err) => (
+                            LogLevel::Error,
+                            format!("{} could not be finished: {err}", platform.label()),
+                        ),
+                    };
+                    let _ = events.send(Event::Log { level, message });
+                }
+
+                let _ = events.send(Event::Ended { results });
             }
 
             Command::PollStats => {

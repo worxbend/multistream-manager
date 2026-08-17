@@ -10,7 +10,8 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::model::{
-    Category, GoLiveOutcome, IngestEndpoint, Platform, PlatformStats, StaleBroadcast, StreamPlan,
+    Category, EndOutcome, GoLiveOutcome, IngestEndpoint, Platform, PlatformStats, StaleBroadcast,
+    StreamPlan,
 };
 
 /// How long an audience total — followers, subscribers — is trusted before the
@@ -43,6 +44,26 @@ pub trait Backend: Send {
     /// After this returns successfully the platform is ready — you can hit "Start
     /// Streaming" in OBS and the broadcast will go out.
     fn go_live<'a>(&'a mut self, plan: &'a StreamPlan) -> BoxFuture<'a, Result<GoLiveOutcome>>;
+
+    /// Finish the broadcast this session started.
+    ///
+    /// The other half of [`Backend::go_live`], and for a long time it was
+    /// missing: you could create a YouTube broadcast from here but only
+    /// YouTube Studio could close one.
+    ///
+    /// The default is the honest answer for a platform that has no broadcast
+    /// object at all. On Twitch the channel is permanently there; going live
+    /// means pointing OBS at it and going offline means stopping OBS, so
+    /// there is nothing here to end and saying so is not a failure.
+    fn end_stream(&mut self) -> BoxFuture<'_, Result<EndOutcome>> {
+        Box::pin(async {
+            Ok(EndOutcome::NothingToEnd {
+                reason: "this platform has no broadcast to close — the stream ends when OBS \
+                         stops sending"
+                    .to_string(),
+            })
+        })
+    }
 
     /// Fetch current statistics. Called on a timer by the dashboard.
     fn fetch_stats(&mut self) -> BoxFuture<'_, Result<PlatformStats>>;

@@ -307,6 +307,9 @@ const DEFAULTS: &[(Context, &str, Action)] = &[
     // program's whole subject is streaming, so the letter goes to that and
     // find keeps `f`.
     (Context::Global, "<Leader>sg", Action::GoLive),
+    // Deliberately not next to `sg` on the keyboard: `se`, `sr`, `sy` are all
+    // harmless, and this one ends the broadcast. It also asks a second time.
+    (Context::Global, "<Leader>sx", Action::EndStream),
     (Context::Global, "<Leader>se", Action::EditStreamInfo),
     (Context::Global, "<Leader>sr", Action::RefreshStats),
     (Context::Global, "<Leader>sy", Action::CopyTwitchKey),

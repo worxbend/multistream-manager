@@ -120,6 +120,13 @@ pub struct LogLine {
     pub at: chrono::DateTime<chrono::Local>,
 }
 
+/// How long the second press of "finish the broadcast" is accepted for.
+///
+/// Long enough to read the warning and decide, short enough that the decision
+/// belongs to the moment it was made. A key pressed by accident five minutes
+/// later must not end a stream.
+const END_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The autocomplete list that drops down under a field.
 #[derive(Debug, Clone)]
 pub struct Popup {
@@ -233,6 +240,16 @@ pub struct App {
     /// `true` while the worker is busy, so the UI can show a spinner and refuse
     /// to submit the same plan twice.
     pub busy: bool,
+    /// When "finish the broadcast" was first pressed, if it is waiting for the
+    /// second press that confirms it.
+    ///
+    /// Ending cannot be undone — a completed YouTube broadcast cannot be
+    /// reopened — so it is the one streaming action that asks twice. The same
+    /// shape as the chat pane's moderation confirmation: press once and the
+    /// program says what will happen, press again and it happens. The instant
+    /// is kept rather than a bare flag so a press five minutes ago cannot be
+    /// completed by a stray keystroke now.
+    pub end_armed: Option<std::time::Instant>,
     pub should_quit: bool,
     /// Notifications: what is popped up now, and everything said so far.
     pub toasts: super::toast::Toasts,
@@ -422,6 +439,7 @@ impl App {
             auto_start: plan.youtube_auto_start,
             auto_stop: plan.youtube_auto_stop,
             popup: None,
+            end_armed: None,
             search_generation: 0,
             go_generation: 0,
             log: VecDeque::new(),
@@ -705,6 +723,15 @@ impl App {
         use crate::keys::Action;
         use crate::obs::task::Command as ObsCommand;
 
+        // Doing anything else at all cancels a half-confirmed "finish the
+        // broadcast". Somebody who armed it and then went off to change a
+        // scene has stopped answering the question, and the answer must not
+        // be left lying around waiting for a keystroke that means something
+        // else.
+        if action != Action::EndStream {
+            self.end_armed = None;
+        }
+
         match action {
             Action::Quit => self.should_quit = true,
             Action::CommandPalette => {
@@ -758,6 +785,7 @@ impl App {
             }
 
             Action::GoLive => return self.submit(),
+            Action::EndStream => return self.end_stream(),
             Action::EditStreamInfo => {
                 self.go_to(Screen::Form);
                 self.ensure_field_visible();
@@ -1864,6 +1892,55 @@ impl App {
                     self.go_to(Screen::Platforms);
                     self.busy = true;
                     return vec![Command::Connect(connected)];
+                }
+            }
+
+            Event::Ended { results } => {
+                self.busy = false;
+                self.end_armed = None;
+                let ended = results
+                    .iter()
+                    .filter(|(_, outcome)| {
+                        outcome
+                            .as_ref()
+                            .map(|o| o.changed_anything())
+                            .unwrap_or(false)
+                    })
+                    .count();
+                let failed = results.iter().any(|(_, outcome)| outcome.is_err());
+
+                // The statistics on hand describe a broadcast that is over.
+                // Left on screen they would keep reporting its viewers and
+                // uptime until the next poll, which is a lie with a clock on
+                // it.
+                if ended > 0 {
+                    self.stats.clear();
+                }
+
+                if failed {
+                    self.notify(
+                        super::toast::Level::Error,
+                        "The broadcast could not be finished everywhere. See the log.",
+                    );
+                    self.notify_stream_state(
+                        "Could not finish the broadcast",
+                        "At least one platform refused. Check the activity log.",
+                        crate::notify::Urgency::Critical,
+                    );
+                } else if ended > 0 {
+                    self.notify(super::toast::Level::Success, "The broadcast is finished.");
+                    self.notify_stream_state(
+                        "Broadcast finished",
+                        "You can stop streaming in OBS.",
+                        crate::notify::Urgency::Normal,
+                    );
+                } else {
+                    // Nothing had to be closed — Twitch alone, most likely.
+                    // Silence would look like the key had not worked.
+                    self.notify(
+                        super::toast::Level::Info,
+                        "Nothing needed finishing — see the log for each platform.",
+                    );
                 }
             }
 
@@ -3214,6 +3291,52 @@ impl App {
     }
 
     /// Validate and submit, or explain why it cannot be submitted.
+    /// Finish the broadcast on every connected platform.
+    ///
+    /// The other half of going live, and the only streaming action that asks
+    /// twice. Ending is irreversible in a way going live is not: a completed
+    /// YouTube broadcast cannot be reopened, the watch page becomes a
+    /// recording, and everybody watching is watching the past. So the first
+    /// press arms it and says exactly what will happen, and the second press
+    /// within the confirmation window does it. Anything else that arms a
+    /// confirmation disarms this one.
+    ///
+    /// Note what this does *not* do: it does not stop OBS. Ending the
+    /// broadcast and stopping the encoder are two separate acts, and doing
+    /// both from one key would mean this program deciding, on your behalf,
+    /// that the scene you are still showing is finished. The OBS tab's
+    /// streaming toggle is one keystroke away for when it is.
+    fn end_stream(&mut self) -> Vec<Command> {
+        if self.busy {
+            self.notify(super::toast::Level::Warning, "Already working — hold on.");
+            return vec![];
+        }
+        if self.accounts.is_empty() {
+            self.notify(
+                super::toast::Level::Warning,
+                "Not connected to anything yet.",
+            );
+            return vec![];
+        }
+
+        let armed = self
+            .end_armed
+            .is_some_and(|at| at.elapsed() < END_CONFIRM_WINDOW);
+        if !armed {
+            self.end_armed = Some(std::time::Instant::now());
+            self.notify(
+                super::toast::Level::Warning,
+                "Finish the broadcast? Press again to confirm. This cannot be undone.",
+            );
+            return vec![];
+        }
+
+        self.end_armed = None;
+        self.busy = true;
+        self.push_log(LogLevel::Info, "Finishing the broadcast…");
+        vec![Command::EndLive]
+    }
+
     fn submit(&mut self) -> Vec<Command> {
         self.popup = None;
 
@@ -5380,6 +5503,114 @@ mod tests {
             },
         )]));
         assert_eq!(app.desktop.queued(), 0);
+    }
+
+    /// Ending is irreversible, so it asks twice — and the first press must
+    /// send nothing at all.
+    #[test]
+    fn finishing_the_broadcast_asks_before_it_does_it() {
+        let mut app = app();
+        app.accounts
+            .insert(Platform::Twitch, Ok("somechannel".into()));
+
+        let first = app.end_stream();
+        assert!(first.is_empty(), "the first press must not end anything");
+        assert!(app.end_armed.is_some());
+        assert!(app
+            .toasts
+            .visible_text()
+            .iter()
+            .any(|text| text.contains("cannot be undone")));
+
+        let second = app.end_stream();
+        assert!(
+            matches!(second.as_slice(), [Command::EndLive]),
+            "the second press ends it"
+        );
+        assert!(app.end_armed.is_none(), "the confirmation is spent");
+    }
+
+    /// A confirmation left lying around must not be completed by a keystroke
+    /// that arrived long afterwards, nor by one that meant something else.
+    #[test]
+    fn a_stale_or_interrupted_confirmation_does_not_end_the_stream() {
+        let mut app = app();
+        app.accounts
+            .insert(Platform::Twitch, Ok("somechannel".into()));
+
+        // Armed, then aged past the window.
+        app.end_stream();
+        app.end_armed = Some(std::time::Instant::now() - std::time::Duration::from_secs(600));
+        assert!(
+            app.end_stream().is_empty(),
+            "an old confirmation must re-arm, not fire"
+        );
+
+        // Armed, then something else happened.
+        app.end_armed = None;
+        app.end_stream();
+        app.run_action(crate::keys::Action::RefreshStats);
+        assert!(app.end_armed.is_none(), "any other action disarms it");
+        assert!(app.end_stream().is_empty(), "so the next press only arms");
+    }
+
+    /// With nothing connected there is nothing to end, and saying so beats
+    /// sending the worker a command it can only refuse.
+    #[test]
+    fn finishing_needs_something_to_finish() {
+        let mut app = app();
+        assert!(app.end_stream().is_empty());
+        assert!(app.end_armed.is_none());
+    }
+
+    /// "Nothing needed ending" is the normal answer for a Twitch-only stream
+    /// and must not read as either success or failure.
+    #[test]
+    fn the_end_result_distinguishes_ended_from_nothing_to_end() {
+        use crate::model::EndOutcome;
+
+        let mut app = app();
+        app.busy = true;
+        app.stats.insert(
+            Platform::Twitch,
+            PlatformStats {
+                live: true,
+                ..Default::default()
+            },
+        );
+        app.handle_event(Event::Ended {
+            results: vec![(
+                Platform::Twitch,
+                Ok(EndOutcome::NothingToEnd {
+                    reason: "nothing to close".into(),
+                }),
+            )],
+        });
+        assert!(!app.busy);
+        assert!(
+            !app.stats.is_empty(),
+            "nothing ended, so the numbers are still true"
+        );
+        assert!(app
+            .toasts
+            .visible_text()
+            .iter()
+            .any(|text| text.contains("Nothing needed finishing")));
+
+        // And when something really did end, the stale numbers go.
+        app.toasts.dismiss_all();
+        app.handle_event(Event::Ended {
+            results: vec![(
+                Platform::YouTube,
+                Ok(EndOutcome::Ended {
+                    note: "finished".into(),
+                }),
+            )],
+        });
+        assert!(
+            app.stats.is_empty(),
+            "statistics for a finished broadcast are a lie with a clock on it"
+        );
     }
 
     /// The self-check starts processes (it looks for clipboard helpers by

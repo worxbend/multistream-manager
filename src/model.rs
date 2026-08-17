@@ -541,6 +541,37 @@ pub struct GoLiveOutcome {
     pub notes: Vec<String>,
 }
 
+/// What happened when a platform was asked to finish the broadcast.
+///
+/// Two outcomes rather than one, because "there was nothing to end" is a
+/// perfectly good result and must not read as a failure. Twitch answers that
+/// way every time: a Twitch channel is permanently there and the stream stops
+/// when OBS stops sending, so there is no object to close. YouTube answers it
+/// when nothing was created in this session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EndOutcome {
+    /// The broadcast was finished. The note says what that means for the
+    /// recording, since that is the next thing anybody wonders.
+    Ended { note: String },
+    /// There was nothing to finish, and this is why.
+    NothingToEnd { reason: String },
+}
+
+impl EndOutcome {
+    /// What to show, whichever way it went.
+    pub fn message(&self) -> &str {
+        match self {
+            EndOutcome::Ended { note } => note,
+            EndOutcome::NothingToEnd { reason } => reason,
+        }
+    }
+
+    /// Whether anything actually changed on the platform.
+    pub fn changed_anything(&self) -> bool {
+        matches!(self, EndOutcome::Ended { .. })
+    }
+}
+
 /// One of the RTMP ingest endpoints a platform holds for your account — what
 /// YouTube calls a "stream" and everybody else calls a stream key.
 ///

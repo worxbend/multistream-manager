@@ -15,7 +15,9 @@ use std::collections::HashMap;
 use crate::auth;
 use crate::backend::{Backend, PlatformResult};
 use crate::config::Config;
-use crate::model::{Category, IngestEndpoint, Platform, PlatformStats, StaleBroadcast, StreamPlan};
+use crate::model::{
+    Category, EndOutcome, IngestEndpoint, Platform, PlatformStats, StaleBroadcast, StreamPlan,
+};
 use crate::twitch::TwitchBackend;
 use crate::youtube::YouTubeBackend;
 
@@ -228,6 +230,32 @@ impl Engine {
         // Sort into the canonical platform order so the UI does not reshuffle
         // its panels depending on which request happened to finish first.
         results.sort_by_key(|r| r.platform);
+        results
+    }
+
+    /// Ask every connected platform to finish its broadcast.
+    ///
+    /// The counterpart of [`Engine::go_live`], and the same partial-success
+    /// rule applies: one platform refusing must not stop the other being
+    /// closed, so every answer comes back and the caller shows them side by
+    /// side. Results are in canonical platform order for the same reason
+    /// go-live's are — a list that reshuffles depending on which request
+    /// finished first is a list nobody can read twice.
+    ///
+    /// Sequential rather than concurrent, deliberately. Ending is two or three
+    /// requests per platform, it happens once, and it is the last thing that
+    /// happens to a broadcast: the fan-out machinery `go_live` needs to keep a
+    /// go-live quick would buy nothing here except a harder failure to
+    /// explain.
+    pub async fn end_live(&mut self) -> Vec<(Platform, Result<EndOutcome, String>)> {
+        self.refresh_tokens().await;
+
+        let mut results = Vec::new();
+        for (platform, backend) in self.backends.iter_mut() {
+            let outcome = backend.end_stream().await.map_err(|err| format!("{err:#}"));
+            results.push((*platform, outcome));
+        }
+        results.sort_by_key(|(platform, _)| *platform);
         results
     }
 

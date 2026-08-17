@@ -53,14 +53,18 @@ totals, likes and uptime side by side, so neither website needs to be open.
 | 🌍 Language | ✅ | ✅ |
 | 👁️ Visibility | ❌ | ✅ public / unlisted / private |
 | 📺 Creates the broadcast | ❌ not needed — the channel always exists | ✅ a new broadcast per session |
+| 🏁 Finishes the broadcast | ❌ nothing to finish — stopping OBS is enough | ✅ <kbd>Space</kbd> <kbd>s</kbd> <kbd>x</kbd>, asks twice |
 | 🔑 Stream key | 🔒 copy-only, never shown | 🔒 copy-only, reused and never regenerated |
 | 👥 Live viewer count | ✅ | ✅ |
 | ⭐ Followers / subscribers | ✅ | ✅ |
 | 👍 Likes | ❌ | ✅ |
 
 > [!IMPORTANT]
-> **It does not control OBS.** It gets the platforms ready; you decide when you
-> actually go live. Partial success is normal and supported: if one platform
+> **It does not control OBS** from the streaming flow. It gets the platforms
+> ready; you decide when you actually go live, and *Finish the broadcast* closes
+> the YouTube broadcast without touching your encoder — those are two separate
+> decisions. (The OBS tab can start and stop streaming, when you want that to
+> be one keystroke.) Partial success is normal and supported: if one platform
 > fails, the other is still configured, still usable, and the failure is shown
 > in its own panel rather than rolling everything back.
 

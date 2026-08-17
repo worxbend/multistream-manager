@@ -74,6 +74,7 @@ pub enum Action {
 
     // --- streaming --------------------------------------------------------
     GoLive,
+    EndStream,
     EditStreamInfo,
     RefreshStats,
     CopyTwitchKey,
@@ -146,6 +147,7 @@ impl Action {
         Action::CycleAnimations,
         Action::ToggleTelemetry,
         Action::GoLive,
+        Action::EndStream,
         Action::EditStreamInfo,
         Action::RefreshStats,
         Action::CopyTwitchKey,
@@ -215,6 +217,7 @@ impl Action {
             Action::ToggleTelemetry => "ui.telemetry",
 
             Action::GoLive => "stream.go_live",
+            Action::EndStream => "stream.end",
             Action::EditStreamInfo => "stream.edit",
             Action::RefreshStats => "stream.refresh",
             Action::CopyTwitchKey => "stream.copy_twitch_key",
@@ -295,6 +298,7 @@ impl Action {
             Action::ToggleTelemetry => "Toggle telemetry",
 
             Action::GoLive => "Go live",
+            Action::EndStream => "Finish the broadcast",
             Action::EditStreamInfo => "Edit stream info",
             Action::RefreshStats => "Refresh statistics",
             Action::CopyTwitchKey => "Copy Twitch stream key",

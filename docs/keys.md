@@ -165,6 +165,7 @@ rather read a list than remember a letter.
 | Key | Action name | What it does |
 |---|---|---|
 | <kbd>s</kbd> <kbd>g</kbd> | `stream.go_live` | Go live |
+| <kbd>s</kbd> <kbd>x</kbd> | `stream.end` | Finish the broadcast (asks twice) |
 | <kbd>s</kbd> <kbd>e</kbd> | `stream.edit` | Edit the stream info |
 | <kbd>s</kbd> <kbd>r</kbd> | `stream.refresh` | Refresh statistics |
 | <kbd>s</kbd> <kbd>y</kbd> | `stream.copy_twitch_key` | Copy the Twitch stream key |
@@ -548,6 +549,7 @@ dot is the group the action appears under in the which-key popup.
 | Name | What it does |
 |---|---|
 | `stream.go_live` | Go live |
+| `stream.end` | Finish the broadcast |
 | `stream.edit` | Edit stream info |
 | `stream.refresh` | Refresh statistics |
 | `stream.copy_twitch_key` | Copy Twitch stream key |

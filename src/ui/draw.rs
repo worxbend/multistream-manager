@@ -629,7 +629,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         Screen::Platforms => "↑↓ move   Space toggle   a all   Enter connect   q quit",
         Screen::Dashboard => {
             "r refresh   o open watch page   y copy Twitch key   Y copy YouTube key   \
-             e edit   q quit"
+             e edit   space,s,x finish   q quit"
         }
         Screen::Form => unreachable!("handled above"),
     };

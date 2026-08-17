@@ -44,7 +44,8 @@ use std::time::{Duration as StdDuration, Instant};
 
 use crate::backend::{Backend, BoxFuture, AUDIENCE_REFRESH};
 use crate::model::{
-    Category, GoLiveOutcome, IngestEndpoint, PlatformStats, StaleBroadcast, Stat, StreamPlan,
+    Category, EndOutcome, GoLiveOutcome, IngestEndpoint, PlatformStats, StaleBroadcast, Stat,
+    StreamPlan,
 };
 
 const API: &str = "https://www.googleapis.com/youtube/v3";
@@ -597,6 +598,54 @@ impl YouTubeBackend {
         Ok(())
     }
 
+    /// Read one broadcast's `lifeCycleStatus`.
+    ///
+    /// Asked before finishing a broadcast, because the answer decides whether
+    /// finishing it is even a legal move — YouTube only accepts a transition
+    /// to `complete` from `live` or `testing` — and because "it had already
+    /// ended" deserves to be reported as that, rather than as whatever error
+    /// the transition would have produced.
+    async fn broadcast_status(&self, id: &str) -> Result<Option<String>> {
+        let base = &self.base;
+        let url = format!(
+            "{base}/liveBroadcasts?part=status&id={}",
+            urlencoding::encode(id)
+        );
+        let response = self
+            .request(reqwest::Method::GET, &url)
+            .send()
+            .await
+            .context("reading the state of your YouTube broadcast")?;
+        let response = check(response, "reading the state of your YouTube broadcast").await?;
+        let body: ListResponse<LiveBroadcastResource> = response
+            .json()
+            .await
+            .context("reading the state of your YouTube broadcast")?;
+        Ok(body
+            .items
+            .into_iter()
+            .next()
+            .and_then(|broadcast| broadcast.status)
+            .map(|status| status.life_cycle_status))
+    }
+
+    /// Move a broadcast to `complete`, which is what "end the stream" means to
+    /// YouTube.
+    async fn complete_broadcast(&self, id: &str) -> Result<()> {
+        let base = &self.base;
+        let url = format!(
+            "{base}/liveBroadcasts/transition?broadcastStatus=complete&id={}&part=id,status",
+            urlencoding::encode(id)
+        );
+        let response = self
+            .request(reqwest::Method::POST, &url)
+            .send()
+            .await
+            .context("ending your YouTube broadcast")?;
+        check(response, "ending your YouTube broadcast").await?;
+        Ok(())
+    }
+
     /// The video category list, fetched from the API only the first time.
     ///
     /// The autocomplete calls this on every keystroke. The list does not change
@@ -749,6 +798,54 @@ impl Backend for YouTubeBackend {
                 ingest_url: ingestion.as_ref().map(|i| i.ingestion_address.clone()),
                 stream_key: ingestion.as_ref().map(|i| i.stream_name.clone()),
                 notes,
+            })
+        })
+    }
+
+    fn end_stream(&mut self) -> BoxFuture<'_, Result<EndOutcome>> {
+        Box::pin(async move {
+            let Some(broadcast_id) = self.broadcast_id.clone() else {
+                // Only this session's own broadcast is ever ended. Hunting
+                // the channel for something that looks live and closing it
+                // would be a program deciding to end a stream it did not
+                // start, which is not a decision it gets to make.
+                return Ok(EndOutcome::NothingToEnd {
+                    reason: "no YouTube broadcast was created in this session, so there is \
+                             nothing here to end"
+                        .to_string(),
+                });
+            };
+
+            let status = self.broadcast_status(&broadcast_id).await?;
+            match status.as_deref() {
+                // Already over. Saying so beats sending a transition that
+                // YouTube would refuse and reporting its refusal as a fault.
+                Some("complete") | Some("revoked") => {
+                    return Ok(EndOutcome::NothingToEnd {
+                        reason: "that broadcast has already finished".to_string(),
+                    })
+                }
+                // Created or bound but never fed. There is nothing to end,
+                // and the thing to do with it is delete it — which is what
+                // Config → Housekeeping's cleanup is for, so point there
+                // rather than silently deleting a broadcast nobody asked to
+                // lose.
+                Some("created") | Some("ready") => {
+                    return Ok(EndOutcome::NothingToEnd {
+                        reason: "that broadcast never went live, so there is nothing to end. \
+                                 Config → Housekeeping can delete it."
+                            .to_string(),
+                    })
+                }
+                _ => {}
+            }
+
+            self.complete_broadcast(&broadcast_id).await?;
+            Ok(EndOutcome::Ended {
+                note: format!(
+                    "the broadcast is finished. YouTube is processing the recording at \
+                     https://youtube.com/watch?v={broadcast_id}"
+                ),
             })
         })
     }
@@ -1332,6 +1429,134 @@ mod tests {
         assert!(
             !requests[0].contains("pageToken") && requests[1].contains("pageToken=PAGE2"),
             "the second request must carry the token the first one returned: {requests:?}"
+        );
+    }
+
+    /// A stand-in that answers `liveBroadcasts?part=status` with whatever
+    /// lifecycle state the test asks for, and records everything it was sent
+    /// so the transition can be checked for.
+    async fn fake_broadcast_api(status: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let recorded = recorded.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 4096];
+                    let read = socket.read(&mut buffer).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                    let target = request.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    recorded.lock().unwrap().push(target.clone());
+
+                    let body = if target.contains("transition") {
+                        r#"{"id":"abc","status":{"lifeCycleStatus":"complete"}}"#.to_string()
+                    } else {
+                        format!(
+                            r#"{{"items":[{{"id":"abc","status":{{"lifeCycleStatus":"{status}"}}}}]}}"#
+                        )
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+
+        (base, seen)
+    }
+
+    async fn backend_with(base: String, broadcast: Option<&str>) -> YouTubeBackend {
+        let mut backend =
+            YouTubeBackend::new(reqwest::Client::new(), "token".into(), true, String::new());
+        backend.base = base;
+        backend.broadcast_id = broadcast.map(|id| id.to_string());
+        backend
+    }
+
+    /// The half of going live that was missing: a live broadcast is moved to
+    /// `complete`, which is what "end the stream" means to YouTube.
+    #[tokio::test]
+    async fn a_live_broadcast_is_transitioned_to_complete() {
+        let (base, seen) = fake_broadcast_api("live").await;
+        let mut backend = backend_with(base, Some("abc")).await;
+
+        let outcome = backend.end_stream().await.expect("the fake API answers");
+        assert!(matches!(outcome, EndOutcome::Ended { .. }));
+
+        let requests = seen.lock().unwrap().clone();
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.contains("transition") && r.contains("broadcastStatus=complete")),
+            "the transition must be sent: {requests:?}"
+        );
+    }
+
+    /// A broadcast that never received a feed cannot be completed — YouTube
+    /// refuses the transition — and the thing to do with it is delete it. The
+    /// answer says so instead of sending a request that can only fail.
+    #[tokio::test]
+    async fn a_broadcast_that_never_went_live_is_not_transitioned() {
+        for status in ["created", "ready"] {
+            let (base, seen) = fake_broadcast_api(status).await;
+            let mut backend = backend_with(base, Some("abc")).await;
+
+            let outcome = backend.end_stream().await.expect("the fake API answers");
+            match outcome {
+                EndOutcome::NothingToEnd { reason } => {
+                    assert!(reason.contains("Housekeeping"), "{reason}")
+                }
+                other => panic!("expected nothing to end, got {other:?}"),
+            }
+            assert!(
+                !seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.contains("transition")),
+                "nothing may be transitioned"
+            );
+        }
+    }
+
+    /// Ending something already over is not a failure, and must not be
+    /// reported as one.
+    #[tokio::test]
+    async fn a_finished_broadcast_reports_that_it_is_already_finished() {
+        for status in ["complete", "revoked"] {
+            let (base, _) = fake_broadcast_api(status).await;
+            let mut backend = backend_with(base, Some("abc")).await;
+            assert!(matches!(
+                backend.end_stream().await.expect("answers"),
+                EndOutcome::NothingToEnd { .. }
+            ));
+        }
+    }
+
+    /// Only this session's own broadcast is ever ended. Going looking for
+    /// something on the channel that appears to be live and closing it would
+    /// be the program ending a stream it did not start.
+    #[tokio::test]
+    async fn nothing_is_ended_when_this_session_created_nothing() {
+        let (base, seen) = fake_broadcast_api("live").await;
+        let mut backend = backend_with(base, None).await;
+
+        assert!(matches!(
+            backend.end_stream().await.expect("answers"),
+            EndOutcome::NothingToEnd { .. }
+        ));
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "the channel must not even be asked"
         );
     }
 

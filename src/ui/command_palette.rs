@@ -185,6 +185,23 @@ pub const ENTRIES: &[Entry] = &[
         needs_chat: false,
     },
     Entry {
+        title: "Finish the broadcast",
+        keys: &[Key::char(' '), Key::char('s'), Key::char('x')],
+        shortcut: "space s x",
+        keywords: &[
+            "end",
+            "finish",
+            "stop",
+            "close",
+            "complete",
+            "broadcast",
+            "stream",
+            "offline",
+        ],
+        action: Some(crate::keys::Action::EndStream),
+        needs_chat: false,
+    },
+    Entry {
         title: "Edit the stream title, category and tags",
         keys: &[Key::char('e')],
         shortcut: "e",

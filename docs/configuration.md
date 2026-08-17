@@ -846,6 +846,14 @@ it sees OBS's feed. You never open YouTube Studio. With it off, you must press
 OBS crash or network blip ends the broadcast for good rather than letting you
 reconnect into the same one.
 
+With it off, something has to end the broadcast when you are actually finished,
+or it stays open on YouTube's side after you stop streaming. That is what
+<kbd>Space</kbd> <kbd>s</kbd> <kbd>x</kbd> — *Finish the broadcast* — is for.
+It asks a second time before doing it, because a completed broadcast cannot be
+reopened. It does **not** stop OBS: ending the broadcast and stopping the
+encoder are two decisions, and the OBS tab's streaming toggle
+(<kbd>Alt</kbd>+<kbd>4</kbd>, then <kbd>s</kbd>) is the other one.
+
 ---
 
 ## A full worked example
