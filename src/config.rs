@@ -833,6 +833,14 @@ pub struct PresetConfig {
     pub made_for_kids: bool,
     pub youtube_auto_start: bool,
     pub youtube_auto_stop: bool,
+    /// A picture file to upload as the YouTube thumbnail, if you use the same
+    /// one every time. Empty leaves whatever YouTube generates.
+    ///
+    /// The *start time* deliberately has no equivalent here. A saved absolute
+    /// time would be in the past by the next session, and "always start in two
+    /// hours" is not a default anybody wants — it is a decision made per
+    /// stream, so the field starts empty every time.
+    pub thumbnail: String,
     /// Which platforms are ticked when the application starts.
     pub platforms: Vec<Platform>,
 }
@@ -852,6 +860,7 @@ impl Default for PresetConfig {
             made_for_kids: plan.made_for_kids,
             youtube_auto_start: plan.youtube_auto_start,
             youtube_auto_stop: plan.youtube_auto_stop,
+            thumbnail: plan.thumbnail_path,
             platforms: vec![Platform::Twitch, Platform::YouTube],
         }
     }
@@ -883,6 +892,8 @@ impl PresetConfig {
             made_for_kids: self.made_for_kids,
             youtube_auto_start: self.youtube_auto_start,
             youtube_auto_stop: self.youtube_auto_stop,
+            scheduled_start: None,
+            thumbnail_path: self.thumbnail.clone(),
         }
     }
 
@@ -909,6 +920,7 @@ impl PresetConfig {
             made_for_kids: plan.made_for_kids,
             youtube_auto_start: plan.youtube_auto_start,
             youtube_auto_stop: plan.youtube_auto_stop,
+            thumbnail: plan.thumbnail_path.clone(),
             platforms: platforms.to_vec(),
         }
     }

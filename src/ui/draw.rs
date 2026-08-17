@@ -755,6 +755,8 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &App) {
                     | Field::MadeForKids
                     | Field::AutoStart
                     | Field::AutoStop
+                    | Field::StartTime
+                    | Field::Thumbnail
             )
         {
             continue;
@@ -865,6 +867,26 @@ fn field_value(app: &App, field: Field) -> String {
                 "(not set)".to_string()
             } else {
                 format!("{code}  ({})", lang::name_for(code))
+            }
+        }
+        // Echo back the time that was understood, not the text that was
+        // typed. "+2h" is quick to write and impossible to check; "Tuesday 20
+        // August at 21:30" is what you actually meant, and seeing it is how
+        // you notice you meant tomorrow.
+        Field::StartTime => {
+            let typed = app.input(Field::StartTime).map(|i| i.value()).unwrap_or("");
+            if typed.trim().is_empty() {
+                "now".to_string()
+            } else {
+                match crate::model::parse_start_time(typed, chrono::Local::now()) {
+                    Ok(None) => "now".to_string(),
+                    Ok(Some(at)) => format!(
+                        "{typed}  →  {}",
+                        at.with_timezone(&chrono::Local)
+                            .format("%A %-d %B at %H:%M")
+                    ),
+                    Err(_) => format!("{typed}  →  not a time"),
+                }
             }
         }
         other => {

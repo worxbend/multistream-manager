@@ -174,6 +174,24 @@ pub struct StreamPlan {
     /// stops. Handy, but it means a brief OBS crash can end your stream, so it
     /// is exposed as a setting rather than hard-coded.
     pub youtube_auto_stop: bool,
+
+    /// When the YouTube broadcast is scheduled to start.
+    ///
+    /// `None` means now, which is what going live from a terminal usually
+    /// means. A time in the future creates the broadcast without starting it,
+    /// so the watch page exists to be shared in advance and viewers can set a
+    /// reminder — the one thing YouTube offers that a Twitch channel does not,
+    /// and until now it could only be done in Studio.
+    ///
+    /// Twitch ignores this entirely: a Twitch channel is always there and has
+    /// nothing to schedule.
+    pub scheduled_start: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// A picture file to upload as the YouTube thumbnail.
+    ///
+    /// Empty means leave whatever YouTube generates from the video, which is
+    /// a frame of your face mid-blink often enough to be worth avoiding.
+    pub thumbnail_path: String,
 }
 
 impl Default for StreamPlan {
@@ -190,6 +208,8 @@ impl Default for StreamPlan {
             made_for_kids: false,
             youtube_auto_start: true,
             youtube_auto_stop: false,
+            scheduled_start: None,
+            thumbnail_path: String::new(),
         }
     }
 }
@@ -239,11 +259,15 @@ pub enum Field {
     MadeForKids,
     AutoStart,
     AutoStop,
+    /// When the YouTube broadcast should be scheduled to start.
+    StartTime,
+    /// A picture file to set as the YouTube thumbnail.
+    Thumbnail,
 }
 
 impl Field {
     /// Tab order for the form.
-    pub const ORDER: [Field; 10] = [
+    pub const ORDER: [Field; 12] = [
         Field::Title,
         Field::Description,
         Field::Tags,
@@ -254,6 +278,8 @@ impl Field {
         Field::MadeForKids,
         Field::AutoStart,
         Field::AutoStop,
+        Field::StartTime,
+        Field::Thumbnail,
     ];
 
     pub fn label(self) -> &'static str {
@@ -268,6 +294,8 @@ impl Field {
             Field::MadeForKids => "Made for kids (YouTube)",
             Field::AutoStart => "Auto-start (YouTube)",
             Field::AutoStop => "Auto-stop (YouTube)",
+            Field::StartTime => "Start time (YouTube)",
+            Field::Thumbnail => "Thumbnail (YouTube)",
         }
     }
 
@@ -284,6 +312,8 @@ impl Field {
             Field::MadeForKids => "Space to toggle. YouTube legally requires this declaration.",
             Field::AutoStart => "Space to toggle. YouTube starts the broadcast when it sees the OBS feed.",
             Field::AutoStop => "Space to toggle. Off is safer: a brief OBS crash will not end the stream.",
+            Field::StartTime => "Empty means now. Also accepts 20:00, 2026-08-20 20:00, or +90m.",
+            Field::Thumbnail => "Path to a JPEG or PNG, up to 2MB. Empty leaves YouTube's auto-generated one.",
         }
     }
 
@@ -298,8 +328,105 @@ impl Field {
                 | Field::TwitchCategory
                 | Field::YouTubeCategory
                 | Field::Language
+                | Field::StartTime
+                | Field::Thumbnail
         )
     }
+}
+
+/// YouTube's own ceiling on a thumbnail file, in bytes.
+pub const YOUTUBE_THUMBNAIL_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Picture formats YouTube accepts for a thumbnail.
+pub const THUMBNAIL_EXTENSIONS: [&str; 3] = ["jpg", "jpeg", "png"];
+
+/// Read what somebody typed into the start-time field.
+///
+/// Four spellings, because a start time gets typed in whichever way is
+/// shortest for the occasion:
+///
+/// * empty, or `now` — start immediately, which is what going live from a
+///   terminal nearly always means;
+/// * `+90m`, `+2h`, `+45` — that long from now, minutes when no unit is given;
+/// * `20:00` — today at that time, or tomorrow if it has already gone;
+/// * `2026-08-20 20:00` — a date and a time.
+///
+/// Everything is read in *local* time, because that is the clock the person
+/// typing is looking at, and returned in UTC, because that is what the API
+/// wants. `now` is passed as `None` rather than as the current instant: a
+/// timestamp computed here and sent a second later would be a moment in the
+/// past, and YouTube is entitled to object to that.
+pub fn parse_start_time(
+    raw: &str,
+    now: chrono::DateTime<chrono::Local>,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
+    use chrono::{Duration, NaiveDate, TimeZone as _};
+
+    let text = raw.trim();
+    if text.is_empty() || text.eq_ignore_ascii_case("now") {
+        return Ok(None);
+    }
+
+    // Relative: "+2h", "+90m", "+45".
+    if let Some(rest) = text.strip_prefix('+') {
+        let rest = rest.trim();
+        let (number, unit) = rest.split_at(
+            rest.find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len()),
+        );
+        let amount: i64 = number
+            .parse()
+            .map_err(|_| format!("{text:?} is not a length of time — try +90m or +2h."))?;
+        let delta = match unit.trim().to_ascii_lowercase().as_str() {
+            "" | "m" | "min" | "mins" | "minute" | "minutes" => Duration::minutes(amount),
+            "h" | "hr" | "hrs" | "hour" | "hours" => Duration::hours(amount),
+            "d" | "day" | "days" => Duration::days(amount),
+            other => return Err(format!("{other:?} is not a unit — use m, h or d.")),
+        };
+        return Ok(Some((now + delta).with_timezone(&chrono::Utc)));
+    }
+
+    // A date and a time, separated by a space or a T.
+    let normalised = text.replace('T', " ");
+    if let Some((date, time)) = normalised.split_once(' ') {
+        let date = NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d")
+            .map_err(|_| format!("{date:?} is not a date — write it as 2026-08-20."))?;
+        let time = parse_clock(time.trim())?;
+        let naive = date.and_time(time);
+        return match now.timezone().from_local_datetime(&naive).single() {
+            Some(local) => Ok(Some(local.with_timezone(&chrono::Utc))),
+            // The hour that does not exist, on the night the clocks go
+            // forward. Better to say so than to silently pick one of the two
+            // adjacent hours on somebody's behalf.
+            None => Err(format!(
+                "{naive} does not exist in your time zone — the clocks change that night."
+            )),
+        };
+    }
+
+    // A bare time: today, or tomorrow if it has already gone. "Start at 20:00"
+    // typed at nine in the evening means tomorrow; the alternative is a
+    // scheduled start in the past, which is not a thing anybody means.
+    let time = parse_clock(&normalised)?;
+    let today = now.date_naive().and_time(time);
+    let candidate = if today > now.naive_local() {
+        today
+    } else {
+        today + Duration::days(1)
+    };
+    match now.timezone().from_local_datetime(&candidate).single() {
+        Some(local) => Ok(Some(local.with_timezone(&chrono::Utc))),
+        None => Err(format!(
+            "{candidate} does not exist in your time zone — the clocks change that night."
+        )),
+    }
+}
+
+/// `20:00`, or `20:00:00`.
+fn parse_clock(text: &str) -> Result<chrono::NaiveTime, String> {
+    chrono::NaiveTime::parse_from_str(text, "%H:%M")
+        .or_else(|_| chrono::NaiveTime::parse_from_str(text, "%H:%M:%S"))
+        .map_err(|_| format!("{text:?} is not a time — write it as 20:00."))
 }
 
 impl StreamPlan {
@@ -433,6 +560,59 @@ impl StreamPlan {
                     limits::YOUTUBE_TITLE
                 ),
             });
+        }
+
+        if youtube {
+            // A thumbnail that is not there is a typed path with a typo in
+            // it, and finding that out after the broadcast has been created
+            // is finding it out too late to fix quietly.
+            let path = self.thumbnail_path.trim();
+            if !path.is_empty() {
+                let file = std::path::Path::new(path);
+                let extension = file
+                    .extension()
+                    .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
+                    .unwrap_or_default();
+                if !file.is_file() {
+                    issues.push(ValidationIssue {
+                        field: Field::Thumbnail,
+                        blocking: true,
+                        message: format!("There is no file at {path}."),
+                    });
+                } else if !THUMBNAIL_EXTENSIONS.contains(&extension.as_str()) {
+                    issues.push(ValidationIssue {
+                        field: Field::Thumbnail,
+                        blocking: true,
+                        message: "YouTube takes a JPEG or a PNG for a thumbnail.".into(),
+                    });
+                } else if let Ok(meta) = std::fs::metadata(file) {
+                    if meta.len() > YOUTUBE_THUMBNAIL_MAX_BYTES {
+                        issues.push(ValidationIssue {
+                            field: Field::Thumbnail,
+                            blocking: true,
+                            message: format!(
+                                "That picture is {:.1}MB; YouTube's limit is 2MB.",
+                                meta.len() as f64 / (1024.0 * 1024.0)
+                            ),
+                        });
+                    }
+                }
+            }
+
+            // A scheduled start in the past is either a typo or a
+            // misunderstanding, and YouTube would refuse it anyway.
+            if let Some(start) = self.scheduled_start {
+                let past = start < chrono::Utc::now() - chrono::Duration::minutes(1);
+                if past {
+                    issues.push(ValidationIssue {
+                        field: Field::StartTime,
+                        blocking: true,
+                        message: "That start time has already passed. Leave it empty to start \
+                                  now."
+                            .into(),
+                    });
+                }
+            }
         }
 
         if youtube && self.description.chars().count() > limits::YOUTUBE_DESCRIPTION {
@@ -644,6 +824,166 @@ mod tests {
             tags: tags.iter().map(|t| t.to_string()).collect(),
             ..Default::default()
         }
+    }
+
+    fn at(hour: u32, minute: u32) -> chrono::DateTime<chrono::Local> {
+        use chrono::TimeZone as _;
+        chrono::Local
+            .with_ymd_and_hms(2026, 8, 18, hour, minute, 0)
+            .single()
+            .expect("a real local time")
+    }
+
+    /// Empty means now, and "now" is passed on as `None` rather than as this
+    /// instant: a timestamp computed here and sent a second later is a moment
+    /// in the past, which YouTube is entitled to refuse.
+    #[test]
+    fn an_empty_start_time_means_now() {
+        assert_eq!(parse_start_time("", at(12, 0)), Ok(None));
+        assert_eq!(parse_start_time("  ", at(12, 0)), Ok(None));
+        assert_eq!(parse_start_time("now", at(12, 0)), Ok(None));
+        assert_eq!(parse_start_time("NOW", at(12, 0)), Ok(None));
+    }
+
+    #[test]
+    fn a_relative_start_time_is_counted_from_now() {
+        let now = at(12, 0);
+        let ninety = parse_start_time("+90m", now).expect("valid").expect("set");
+        assert_eq!(ninety, (now + chrono::Duration::minutes(90)).to_utc());
+
+        // No unit means minutes, which is the unit anybody typing a bare
+        // number in this field means.
+        let bare = parse_start_time("+45", now).expect("valid").expect("set");
+        assert_eq!(bare, (now + chrono::Duration::minutes(45)).to_utc());
+
+        let hours = parse_start_time("+2h", now).expect("valid").expect("set");
+        assert_eq!(hours, (now + chrono::Duration::hours(2)).to_utc());
+
+        let days = parse_start_time("+1d", now).expect("valid").expect("set");
+        assert_eq!(days, (now + chrono::Duration::days(1)).to_utc());
+    }
+
+    /// "Start at 20:00", typed at nine in the evening, means tomorrow. The
+    /// alternative is a scheduled start in the past, which is not a thing
+    /// anybody means.
+    #[test]
+    fn a_bare_time_that_has_already_gone_means_tomorrow() {
+        let evening = at(21, 0);
+        let scheduled = parse_start_time("20:00", evening)
+            .expect("valid")
+            .expect("set");
+        assert_eq!(
+            scheduled.with_timezone(&chrono::Local).date_naive(),
+            evening.date_naive() + chrono::Duration::days(1)
+        );
+
+        let morning = at(9, 0);
+        let today = parse_start_time("20:00", morning)
+            .expect("valid")
+            .expect("set");
+        assert_eq!(
+            today.with_timezone(&chrono::Local).date_naive(),
+            morning.date_naive()
+        );
+    }
+
+    #[test]
+    fn a_date_and_time_is_read_in_local_time() {
+        let scheduled = parse_start_time("2026-08-20 20:30", at(12, 0))
+            .expect("valid")
+            .expect("set")
+            .with_timezone(&chrono::Local);
+        assert_eq!(
+            scheduled.format("%Y-%m-%d %H:%M").to_string(),
+            "2026-08-20 20:30"
+        );
+
+        // The ISO spelling works too, since it is what anybody copying a
+        // timestamp from elsewhere will paste.
+        assert!(parse_start_time("2026-08-20T20:30", at(12, 0)).is_ok());
+    }
+
+    #[test]
+    fn nonsense_is_refused_with_an_example_of_what_would_work() {
+        for text in [
+            "tomorrow",
+            "8pm",
+            "+2 fortnights",
+            "25:00",
+            "2026-13-40 10:00",
+        ] {
+            let err = parse_start_time(text, at(12, 0)).expect_err(&format!("{text} must fail"));
+            assert!(!err.is_empty(), "the refusal has to say something");
+        }
+    }
+
+    /// A start time already gone is either a typo or a misunderstanding, and
+    /// finding out from YouTube's refusal is finding out late.
+    #[test]
+    fn a_scheduled_start_in_the_past_is_blocked() {
+        let plan = StreamPlan {
+            title: "Test".into(),
+            scheduled_start: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+            ..Default::default()
+        };
+        let issues = plan.validate(&[Platform::YouTube]);
+        assert!(issues
+            .iter()
+            .any(|issue| issue.field == Field::StartTime && issue.blocking));
+    }
+
+    /// A thumbnail that is not there is a path with a typo in it, and the
+    /// moment to catch that is before the broadcast is created.
+    #[test]
+    fn a_missing_thumbnail_file_is_blocked() {
+        let plan = StreamPlan {
+            title: "Test".into(),
+            thumbnail_path: "/nowhere/at/all/thumb.png".into(),
+            ..Default::default()
+        };
+        let issues = plan.validate(&[Platform::YouTube]);
+        assert!(issues
+            .iter()
+            .any(|issue| issue.field == Field::Thumbnail && issue.blocking));
+
+        // And Twitch alone does not care: there is no thumbnail to set.
+        assert!(plan
+            .validate(&[Platform::Twitch])
+            .iter()
+            .all(|issue| issue.field != Field::Thumbnail));
+    }
+
+    #[test]
+    fn a_thumbnail_that_is_not_a_picture_is_blocked() {
+        let dir = std::env::temp_dir().join(format!("msm-thumb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("notes.txt");
+        std::fs::write(&path, b"not a picture").expect("write");
+
+        let plan = StreamPlan {
+            title: "Test".into(),
+            thumbnail_path: path.display().to_string(),
+            ..Default::default()
+        };
+        assert!(plan
+            .validate(&[Platform::YouTube])
+            .iter()
+            .any(|issue| issue.field == Field::Thumbnail && issue.blocking));
+
+        // A real picture of a sensible size passes.
+        let png = dir.join("thumb.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\n").expect("write");
+        let ok = StreamPlan {
+            title: "Test".into(),
+            thumbnail_path: png.display().to_string(),
+            ..Default::default()
+        };
+        assert!(ok
+            .validate(&[Platform::YouTube])
+            .iter()
+            .all(|issue| issue.field != Field::Thumbnail));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

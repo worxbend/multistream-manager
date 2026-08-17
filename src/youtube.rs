@@ -49,6 +49,8 @@ use crate::model::{
 };
 
 const API: &str = "https://www.googleapis.com/youtube/v3";
+/// Media uploads — thumbnails — go to a different host from everything else.
+const UPLOAD_API: &str = "https://www.googleapis.com/upload/youtube/v3";
 
 /// The YouTube API client.
 pub struct YouTubeBackend {
@@ -62,6 +64,9 @@ pub struct YouTubeBackend {
     broadcast_id: Option<String>,
     /// The channel id, resolved during `connect`.
     channel_id: Option<String>,
+    /// Where media uploads go. A different host from the rest of the API, and
+    /// separately overridable so tests can point it at a local socket.
+    upload_base: String,
     /// The subscriber count, cached so statistics polls do not re-fetch the
     /// whole channel every few seconds. Subscriber totals change on a scale of
     /// hours, but every `channels.list` call spends daily API quota, so at a
@@ -250,6 +255,7 @@ impl YouTubeBackend {
             category_cache: None,
             quota: QuotaBackoff::default(),
             base: API.to_string(),
+            upload_base: UPLOAD_API.to_string(),
         }
     }
 
@@ -431,9 +437,17 @@ impl YouTubeBackend {
     /// Create the broadcast — the event with a title and a watch page.
     async fn create_broadcast(&self, plan: &StreamPlan) -> Result<LiveBroadcastResource> {
         // YouTube requires a scheduled start time and rejects one in the past.
-        // A minute into the future is far enough to survive clock skew between
-        // this machine and Google's servers.
-        let start = Utc::now() + Duration::minutes(1);
+        //
+        // With no time asked for, a minute into the future is far enough to
+        // survive clock skew between this machine and Google's servers — the
+        // broadcast is going live now, and the timestamp is a formality.
+        //
+        // With one asked for, it is the whole point: the broadcast exists from
+        // now, its watch page can be shared, and viewers can set a reminder,
+        // which is the one thing YouTube offers that a Twitch channel does not.
+        let start = plan
+            .scheduled_start
+            .unwrap_or_else(|| Utc::now() + Duration::minutes(1));
 
         let body = serde_json::json!({
             "snippet": {
@@ -535,6 +549,55 @@ impl YouTubeBackend {
             "setting the tags and category on your YouTube broadcast",
         )
         .await?;
+        Ok(())
+    }
+
+    /// Upload a picture as the broadcast's thumbnail.
+    ///
+    /// A different host from everything else here — `googleapis.com/upload/…`
+    /// rather than the plain API — because this is a media upload rather than
+    /// a JSON call. The picture goes up as the raw request body with its own
+    /// content type, which is Google's "simple upload" and is all a file of at
+    /// most 2MB needs.
+    ///
+    /// Called after the broadcast exists, and its failure is never fatal: a
+    /// broadcast that is live with the wrong picture on it is an inconvenience,
+    /// and one that was abandoned because a JPEG could not be uploaded is a
+    /// lost stream.
+    async fn set_thumbnail(&self, video_id: &str, path: &str) -> Result<()> {
+        let file = std::path::Path::new(path);
+        let bytes = std::fs::read(file)
+            .with_context(|| format!("reading the thumbnail at {}", file.display()))?;
+        if bytes.len() as u64 > crate::model::YOUTUBE_THUMBNAIL_MAX_BYTES {
+            bail!(
+                "that picture is {:.1}MB and YouTube's limit is 2MB",
+                bytes.len() as f64 / (1024.0 * 1024.0)
+            );
+        }
+        let mime = match file
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default()
+            .as_str()
+        {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            other => bail!("YouTube takes a JPEG or a PNG; this is a .{other}"),
+        };
+
+        let url = format!(
+            "{}/thumbnails/set?videoId={}&uploadType=media",
+            self.upload_base,
+            urlencoding::encode(video_id)
+        );
+        let response = self
+            .request(reqwest::Method::POST, &url)
+            .header(reqwest::header::CONTENT_TYPE, mime)
+            .body(bytes)
+            .send()
+            .await
+            .context("uploading your YouTube thumbnail")?;
+        check(response, "uploading your YouTube thumbnail").await?;
         Ok(())
     }
 
@@ -769,6 +832,31 @@ impl Backend for YouTubeBackend {
                     "Warning: the broadcast is ready, but its tags and category could not be \
                      set ({err}). You can still stream; fix them in YouTube Studio if it matters."
                 )),
+            }
+
+            // The thumbnail, if one was named. Like the tags above, a failure
+            // is a note rather than an abort: the broadcast exists and is
+            // bound, and a wrong picture is worth far less than a lost
+            // stream.
+            let thumbnail = plan.thumbnail_path.trim();
+            if !thumbnail.is_empty() {
+                match self.set_thumbnail(&broadcast.id, thumbnail).await {
+                    Ok(()) => notes.push("Thumbnail uploaded.".to_string()),
+                    Err(err) => notes.push(format!(
+                        "Warning: the broadcast is ready, but the thumbnail could not be \
+                         uploaded ({err:#}). Everything else is set."
+                    )),
+                }
+            }
+
+            if let Some(start) = plan.scheduled_start {
+                notes.push(format!(
+                    "Scheduled for {}. The watch page is live now, so it can be shared and \
+                     viewers can set a reminder.",
+                    start
+                        .with_timezone(&chrono::Local)
+                        .format("%A %-d %B at %H:%M")
+                ));
             }
 
             if plan.youtube_auto_start {

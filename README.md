@@ -51,6 +51,8 @@ totals, likes and uptime side by side, so neither website needs to be open.
 | 🏷️ Tags | ✅ up to 10, spaces stripped | ✅ as typed |
 | 🎮 Category | ✅ searched live against Twitch's list | ✅ picked from YouTube's list |
 | 🌍 Language | ✅ | ✅ |
+| 🖼️ Thumbnail | ❌ | ✅ JPEG or PNG, up to 2MB |
+| 🗓️ Scheduled start | ❌ nothing to schedule | ✅ `20:00`, `2026-08-20 20:00`, `+2h` |
 | 👁️ Visibility | ❌ | ✅ public / unlisted / private |
 | 📺 Creates the broadcast | ❌ not needed — the channel always exists | ✅ a new broadcast per session |
 | 🏁 Finishes the broadcast | ❌ nothing to finish — stopping OBS is enough | ✅ <kbd>Space</kbd> <kbd>s</kbd> <kbd>x</kbd>, asks twice |

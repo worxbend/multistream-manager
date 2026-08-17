@@ -795,6 +795,7 @@ back here, so you can build a preset once by hand and never retype it.
 | `made_for_kids` | boolean | `false` | YouTube requires this declaration on every broadcast. |
 | `youtube_auto_start` | boolean | `true` | Let YouTube go live by itself as soon as it sees the feed from OBS. |
 | `youtube_auto_stop` | boolean | `false` | Let YouTube end the broadcast when the feed stops. |
+| `thumbnail` | string | `""` | A JPEG or PNG (max 2MB) to upload as the YouTube thumbnail. Empty leaves YouTube's own. |
 | `platforms` | array of strings | `["twitch", "youtube"]` | Which platforms are ticked when the interface opens. |
 
 ### Why there are two Twitch category keys
@@ -870,6 +871,25 @@ A value that is not two letters is refused outright when Twitch is selected, and
 merely flagged when it is not. YouTube's language field is omitted from the
 update unless the code is two characters, because an invalid one makes YouTube
 reject the whole request.
+
+### `thumbnail`, and the start time that is not here
+
+`thumbnail` is a path to a JPEG or a PNG of at most 2MB, uploaded to the
+broadcast after it is created. Leaving it empty means YouTube picks a frame of
+the video, which is a frame of your face mid-blink often enough to be worth
+avoiding. A thumbnail that fails to upload is reported as a note and does not
+stop the go-live: a broadcast that is live with the wrong picture is an
+inconvenience, and one abandoned over a JPEG is a lost stream.
+
+There is deliberately **no** saved start time. A saved absolute time would be in
+the past by the next session, and "always start in two hours" is not a default
+anybody wants — it is a decision made per stream. The *Start time (YouTube)*
+field on the form starts empty every time, and empty means now. It also
+accepts `20:00` (today, or tomorrow if that has gone), `2026-08-20 20:00`, and
+`+90m` / `+2h` / `+1d`. Whatever you type, the form shows the time it
+understood next to it, because "+2h" is quick to write and impossible to check
+at a glance. Scheduling ahead creates the broadcast without starting it, so the
+watch page exists immediately and can be shared for viewers to set a reminder.
 
 ### `youtube_auto_start` and `youtube_auto_stop`
 
@@ -954,6 +974,9 @@ made_for_kids = false
 youtube_auto_start = true
 # Off, so a brief OBS crash does not end the broadcast.
 youtube_auto_stop = false
+
+# The same thumbnail every stream. Empty leaves YouTube's own.
+thumbnail = "~/pictures/stream-thumbnail.png"
 
 platforms = ["twitch", "youtube"]
 ```

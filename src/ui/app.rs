@@ -519,7 +519,9 @@ impl App {
             | Field::Privacy
             | Field::MadeForKids
             | Field::AutoStart
-            | Field::AutoStop => self.is_selected(Platform::YouTube),
+            | Field::AutoStop
+            | Field::StartTime
+            | Field::Thumbnail => self.is_selected(Platform::YouTube),
             Field::TwitchCategory => self.is_selected(Platform::Twitch),
             // Title, Tags and Language apply to every platform.
             Field::Title | Field::Tags | Field::Language => true,
@@ -591,6 +593,23 @@ impl App {
             made_for_kids: self.made_for_kids,
             youtube_auto_start: self.auto_start,
             youtube_auto_stop: self.auto_stop,
+            // An unreadable start time becomes "now" here and a blocking
+            // validation issue in `validate`, which is where the explanation
+            // belongs. Refusing to build a plan at all would leave the form
+            // unable to say what was wrong with it.
+            scheduled_start: crate::model::parse_start_time(
+                self.inputs
+                    .get(&Field::StartTime)
+                    .map(|i| i.value())
+                    .unwrap_or(""),
+                chrono::Local::now(),
+            )
+            .unwrap_or(None),
+            thumbnail_path: self
+                .inputs
+                .get(&Field::Thumbnail)
+                .map(|i| i.value().trim().to_string())
+                .unwrap_or_default(),
         }
     }
 
