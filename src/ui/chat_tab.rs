@@ -717,6 +717,7 @@ impl ChatTabState {
     /// A refused send (the per-chat command queue is momentarily full) keeps
     /// the draft and says so, rather than losing what was typed.
     pub fn compose_send(&mut self) {
+        let platform = self.focus;
         let Some(chat) = self.active_chat_mut() else {
             return;
         };
@@ -724,10 +725,30 @@ impl ChatTabState {
         if text.is_empty() {
             return;
         }
+
+        // Anything beginning with a slash is a command until proved
+        // otherwise. See `classify_command` for why that has to be the
+        // default rather than "send it and let the platform decide".
+        let text = match classify_command(&text, platform) {
+            SlashVerdict::NotACommand => text,
+            // `//text` escaped a leading slash; send what is left of it.
+            SlashVerdict::Literal(message) => {
+                chat.state.draft = message.clone();
+                message
+            }
+            SlashVerdict::Refused(reason) => {
+                chat.state
+                    .apply(ChatEvent::Message(Box::new(local_notice(&reason))));
+                return;
+            }
+        };
+        if text.is_empty() {
+            return;
+        }
+
         // Composer commands that never reach the platform (twi's /channels,
         // yc's /chats): bare opens the join prompt, with an argument joins
-        // directly. Everything else — including other /commands — is sent
-        // verbatim; /me is handled by the Twitch adapter.
+        // directly.
         if text == "/clip" {
             chat.state.draft.clear();
             self.mode = ChatFocus::Normal;
@@ -1021,6 +1042,103 @@ pub fn parse_timeout(text: &str) -> Option<u64> {
 }
 
 /// A locally generated notice row (never sent anywhere).
+/// What the composer should do with a draft that starts with a slash.
+enum SlashVerdict {
+    /// Not a command at all, or one handled further down `compose_send`.
+    NotACommand,
+    /// An escaped slash (`//text`): send this text instead.
+    Literal(String),
+    /// Refuse to send, and say this instead.
+    Refused(String),
+}
+
+/// Commands this program handles itself, before anything reaches a platform.
+const HANDLED_HERE: [&str; 5] = ["/clip", "/chats", "/channels", "/channel", "/me"];
+
+/// Decide what a draft beginning with `/` means.
+///
+/// Slash-prefixed text used to be sent verbatim, on the reasoning that the
+/// platform would understand its own commands. That stopped being true in
+/// February 2023, when Twitch removed chat commands from IRC: `/ban someone`
+/// typed here was not a moderation action, it was a public message reading
+/// "/ban someone", posted to everybody watching. YouTube never had chat
+/// commands at all, so the same is true there for everything.
+///
+/// Being wrong in that direction is expensive and cannot be undone — the
+/// message is on stream before you have finished reading it. So the default
+/// flipped: anything starting with a slash is refused unless this program
+/// knows what it means, and the refusal names what to do instead. `//text`
+/// escapes the slash for the rare case of genuinely wanting to open a message
+/// with one.
+fn classify_command(text: &str, platform: Platform) -> SlashVerdict {
+    let Some(rest) = text.strip_prefix('/') else {
+        return SlashVerdict::NotACommand;
+    };
+    // `//anything` is an escaped leading slash, IRC's own convention.
+    if let Some(literal) = rest.strip_prefix('/') {
+        return SlashVerdict::Literal(format!("/{literal}"));
+    }
+
+    let word = rest
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let command = format!("/{word}");
+
+    if command == "/me" {
+        // Twitch turns this into a CTCP ACTION in the adapter. YouTube has no
+        // equivalent, so it would be posted as the literal text "/me waves".
+        return if platform == Platform::Twitch {
+            SlashVerdict::NotACommand
+        } else {
+            SlashVerdict::Refused(
+                "YouTube chat has no /me — that would be posted as literal text.                  Send it without the /me, or type //me to post the slash on purpose."
+                    .to_string(),
+            )
+        };
+    }
+    if HANDLED_HERE.contains(&command.as_str()) {
+        return SlashVerdict::NotACommand;
+    }
+
+    SlashVerdict::Refused(format!(
+        "{} is not a command here — it would have been posted as a public message. {}          Type //{} to post it as text on purpose.",
+        command,
+        advice_for(&command, platform),
+        word
+    ))
+}
+
+/// What to do instead of the command somebody typed.
+///
+/// Specific advice where there is any, because "unknown command" tells
+/// somebody they were wrong without telling them what would be right.
+fn advice_for(command: &str, platform: Platform) -> &'static str {
+    match command {
+        "/ban" | "/timeout" | "/delete" | "/unban" | "/untimeout" => match platform {
+            Platform::YouTube => {
+                "Select the message with K and press b to ban, t to time out, or d to delete."
+            }
+            Platform::Twitch => {
+                "Twitch removed moderation commands from IRC in 2023; use the Twitch mod tools                  for this channel."
+            }
+        },
+        "/raid" | "/unraid" | "/host" | "/unhost" => {
+            "Raiding is not supported from here yet; start it from the Twitch dashboard."
+        }
+        "/announce" | "/shoutout" | "/so" | "/marker" | "/commercial" | "/poll"
+        | "/prediction" => "That is a Twitch dashboard feature, not a chat message.",
+        "/w" | "/whisper" => "Whispers are not supported here.",
+        "/mod" | "/unmod" | "/vip" | "/unvip" | "/slow" | "/slowoff" | "/subscribers"
+        | "/subscribersoff" | "/followers" | "/followersoff" | "/emoteonly"
+        | "/emoteonlyoff" | "/uniquechat" | "/clear" | "/color" | "/block" | "/unblock" => {
+            "Channel settings live in the platform's own dashboard."
+        }
+        _ => "If you meant to say it, say it without the slash.",
+    }
+}
+
 fn local_notice(text: &str) -> ChatMessage {
     ChatMessage {
         id: String::new(),
@@ -2321,7 +2439,9 @@ mod tests {
         assert!(state.render.full_username);
     }
 
-    /// A command must be the whole word: "/chatstats" is a message.
+    /// A command must be the whole word: "/chatstats" must not be read as
+    /// "join the channel tats". It is refused as an unknown command rather
+    /// than posted, but the point stands — nothing is joined.
     #[tokio::test]
     async fn a_slash_word_that_merely_starts_with_a_command_is_not_hijacked() {
         let config = Config::default();
@@ -2336,11 +2456,124 @@ mod tests {
             state.compose_push(ch);
         }
         state.compose_send();
-        match rx.try_recv().expect("the text must be sent, not hijacked") {
-            ChatCommand::Send { text, .. } => assert_eq!(text, "/chatstats"),
+        assert!(rx.try_recv().is_err(), "an unknown command is not sent");
+        assert_eq!(state.open.len(), 1, "no bogus channel was joined");
+    }
+
+    /// The expensive mistake this guards against: before, a mistyped
+    /// moderation command was posted to everybody watching. Twitch removed
+    /// chat commands from IRC in 2023 and YouTube never had them, so there is
+    /// no platform left that would have understood it.
+    #[tokio::test]
+    async fn a_moderation_command_is_refused_rather_than_broadcast() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+        let (tx, mut rx) = mpsc::channel(8);
+        state.open.get_mut(&key).unwrap().handle.commands = tx;
+
+        for ch in "/ban someviewer".chars() {
+            state.compose_push(ch);
+        }
+        state.compose_send();
+        assert!(rx.try_recv().is_err(), "nothing may reach the platform");
+
+        // And the refusal has to be visible, with what to do instead.
+        let said = state.open[&key]
+            .state
+            .messages
+            .iter()
+            .any(|msg| msg.text.contains("/ban") && msg.text.contains("mod tools"));
+        assert!(said, "the refusal must explain itself");
+    }
+
+    /// The escape hatch, for the rare message that really does start with a
+    /// slash. The leading slash is dropped and the rest is sent as typed.
+    #[tokio::test]
+    async fn a_doubled_slash_posts_the_text_verbatim() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+        let (tx, mut rx) = mpsc::channel(8);
+        state.open.get_mut(&key).unwrap().handle.commands = tx;
+
+        for ch in "//ban is not a command".chars() {
+            state.compose_push(ch);
+        }
+        state.compose_send();
+        match rx.try_recv().expect("an escaped slash is sent") {
+            ChatCommand::Send { text, .. } => assert_eq!(text, "/ban is not a command"),
             other => panic!("expected a send, got {other:?}"),
         }
-        assert_eq!(state.open.len(), 1, "no bogus channel was joined");
+    }
+
+    /// `/me` is real on Twitch (the adapter turns it into a CTCP ACTION) and
+    /// meaningless on YouTube, where it would be posted as literal text.
+    #[test]
+    fn me_is_a_command_on_twitch_and_a_mistake_on_youtube() {
+        assert!(matches!(
+            classify_command("/me waves", Platform::Twitch),
+            SlashVerdict::NotACommand
+        ));
+        assert!(matches!(
+            classify_command("/me waves", Platform::YouTube),
+            SlashVerdict::Refused(_)
+        ));
+    }
+
+    /// Everything the composer handles itself has to survive the guard, or
+    /// the guard would have broken the features it sits in front of.
+    #[test]
+    fn the_commands_this_program_owns_are_never_refused() {
+        for command in [
+            "/clip",
+            "/chats",
+            "/chats somechannel",
+            "/channels",
+            "/channel x",
+        ] {
+            assert!(
+                matches!(
+                    classify_command(command, Platform::Twitch),
+                    SlashVerdict::NotACommand
+                ),
+                "{command} must reach its handler"
+            );
+        }
+    }
+
+    /// Case and arguments must not smuggle a command past the guard.
+    #[test]
+    fn a_command_is_recognised_whatever_its_case_or_arguments() {
+        for text in [
+            "/BAN someone",
+            "/Timeout someone 600",
+            "/raid otherstreamer",
+        ] {
+            assert!(
+                matches!(
+                    classify_command(text, Platform::Twitch),
+                    SlashVerdict::Refused(_)
+                ),
+                "{text} must be refused"
+            );
+        }
+    }
+
+    /// Ordinary text is untouched — including text that merely contains a
+    /// slash somewhere other than the start.
+    #[test]
+    fn ordinary_text_is_not_a_command() {
+        for text in ["hello", "and/or", "http://example.invalid", ""] {
+            assert!(matches!(
+                classify_command(text, Platform::Twitch),
+                SlashVerdict::NotACommand
+            ));
+        }
     }
 
     /// View scrolling drops the selection so moderation can never act on an
