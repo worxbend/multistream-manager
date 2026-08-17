@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Advisories are published against code that has not changed, so waiting for
+  # somebody to push is waiting for the wrong signal. Monday morning, UTC.
+  schedule:
+    - cron: "0 7 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -61,3 +65,20 @@ jobs:
 
       - name: Build
         run: cargo build
+
+  # Known vulnerabilities and licence problems in the dependency tree.
+  #
+  # This program handles OAuth tokens and talks to two APIs over TLS, and
+  # nothing else in CI would notice an advisory published against a crate three
+  # levels down. cargo-deny is used rather than cargo-audit alone because it
+  # checks licences and duplicate versions in the same pass, and this is an MIT
+  # project that should not be shipping a dependency nobody may redistribute.
+  supply-chain:
+    name: Advisories and licences
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses sources

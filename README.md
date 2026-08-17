@@ -700,7 +700,10 @@ adding a variant to `Platform`; the interface does not need to change.
 
 Contributions are welcome. Please run `cargo fmt`, `cargo clippy --all-targets`
 and `cargo test` before opening a pull request — CI runs all three, plus a build
-against Rust 1.88 to hold the minimum supported version.
+against Rust 1.88 to hold the minimum supported version, and `cargo deny check`
+for advisories and licences across the dependency tree.
+
+What changed between releases is in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
