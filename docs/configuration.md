@@ -535,7 +535,9 @@ Server Settings**, and note the port and password it shows you.
 [obs]
 enabled = true
 host = "127.0.0.1"
+host_env = "OBS_WEBSOCKET_HOST"            # used when host is empty
 port = 4455
+port_env = "OBS_WEBSOCKET_PORT"            # used when port is 0
 password = ""                              # prefer the environment variable
 password_env = "OBS_WEBSOCKET_PASSWORD"
 ```
@@ -548,6 +550,27 @@ retries in the background, which looks the same as having it turned off.
 
 Set it to `false` to stop even trying — the OBS tab then says so rather than
 sitting on "waiting for OBS".
+
+### `host`, `port`, and their environment variables
+
+`127.0.0.1:4455` is right for the usual case, where OBS is on the same machine
+as this program. Change them when it is not — a second machine doing the
+encoding, or OBS reached over a tunnel.
+
+Both can come from the environment as well, on the same terms as everything
+else here: leave `host` empty or set `port = 0` and the matching `*_env`
+variable is read instead. Zero is an unambiguous "not set" because nothing can
+listen on port zero.
+
+This exists for the setup where one dotfiles repository follows you between
+machines. The credentials could already come from the environment; the address
+could not, so a shared config had to be edited to point at a laptop's own OBS
+one day and a studio machine's the next. Now `OBS_WEBSOCKET_HOST` in each
+machine's shell profile is enough.
+
+A port that is not a number between 1 and 65535 is ignored, with a line in the
+log, and OBS's own default is used. Refusing to start the whole interface over
+a mistyped variable would be a poor trade.
 
 ### `password` and `password_env`
 
@@ -1045,13 +1068,14 @@ Everything here is optional: `msm` runs with none of them set.
 | `MSM_YOUTUBE_CLIENT_ID` | The Google client id, when `[youtube] client_id` is empty. |
 | `MSM_YOUTUBE_CLIENT_SECRET` | The Google client secret, when `[youtube] client_secret` is empty. |
 | `OBS_WEBSOCKET_PASSWORD` | The OBS WebSocket password, when `[obs] password` is empty. |
+| `OBS_WEBSOCKET_HOST` | The host OBS is on, when `[obs] host` is empty. |
+| `OBS_WEBSOCKET_PORT` | The OBS WebSocket port, when `[obs] port` is `0`. |
 | `MSM_CONFIG_DIR` | Use this directory for config, tokens and the log instead of the OS default. Created if it does not exist. |
 | `MSM_LOG` | Log verbosity, in the usual `tracing` syntax: `MSM_LOG=debug`, or something narrower like `MSM_LOG=multistream_manager::youtube=trace`. Defaults to `info`. |
 | `COLORTERM` | Not read for configuration, but `truecolor` here is what tells the interface your terminal can show a theme's exact colours. |
 
-The four credential variables and the OBS one are the *default* names. Each is
-set by the matching `*_env` key, so you can point them wherever your setup
-already keeps things:
+Every one of these is a *default* name. Each is set by the matching `*_env`
+key, so you can point them wherever your setup already keeps things:
 
 ```toml
 [twitch]

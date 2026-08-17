@@ -347,8 +347,23 @@ pub struct ObsConfig {
     /// The host OBS is on. Almost always this machine.
     pub host: String,
 
+    /// The name of an environment variable holding the host instead.
+    ///
+    /// Used when `host` is empty. Every credential in this file can already
+    /// come from the environment; the address could not, which made one
+    /// config file per machine the only way to point a shared dotfiles
+    /// repository at a laptop's own OBS one day and a studio machine's the
+    /// next.
+    pub host_env: String,
+
     /// The port from OBS's WebSocket Server Settings.
     pub port: u16,
+
+    /// The name of an environment variable holding the port instead.
+    ///
+    /// Used when `port` is 0, which is not a port anything can listen on and
+    /// therefore an unambiguous "not set".
+    pub port_env: String,
 
     /// The password from that same settings window, if one is set.
     ///
@@ -391,8 +406,10 @@ impl Default for ObsConfig {
         Self {
             enabled: true,
             host: "127.0.0.1".to_string(),
+            host_env: "OBS_WEBSOCKET_HOST".to_string(),
             // obs-websocket's own default port.
             port: 4455,
+            port_env: "OBS_WEBSOCKET_PORT".to_string(),
             password: String::new(),
             password_env: "OBS_WEBSOCKET_PASSWORD".to_string(),
             scene_aliases: std::collections::BTreeMap::new(),
@@ -404,16 +421,61 @@ impl Default for ObsConfig {
 }
 
 impl ObsConfig {
+    /// The host to connect to: the file's value, the environment's, or this
+    /// machine.
+    ///
+    /// Same precedence as every credential — the file wins when both are set,
+    /// because naming a value explicitly should beat inheriting one.
+    pub fn host(&self) -> String {
+        let literal = self.host.trim();
+        if !literal.is_empty() {
+            return literal.to_string();
+        }
+        let from_env = resolve_credential("", &self.host_env);
+        if from_env.is_empty() {
+            "127.0.0.1".to_string()
+        } else {
+            from_env
+        }
+    }
+
+    /// The port to connect to.
+    ///
+    /// A zero in the file means "not set" — nothing can listen on port zero,
+    /// so it cannot be a real answer — and the environment is consulted next.
+    /// A variable holding something that is not a port is ignored with a log
+    /// line rather than crashing the interface at start-up; obs-websocket's
+    /// own default is a far better answer than refusing to run.
+    pub fn port(&self) -> u16 {
+        if self.port != 0 {
+            return self.port;
+        }
+        let raw = resolve_credential("", &self.port_env);
+        if raw.is_empty() {
+            return 4455;
+        }
+        match raw.parse::<u16>() {
+            Ok(0) | Err(_) => {
+                tracing::warn!(
+                    variable = %self.port_env,
+                    value = %raw,
+                    "ignoring an OBS port that is not a number between 1 and 65535"
+                );
+                4455
+            }
+            Ok(port) => port,
+        }
+    }
+
     /// The WebSocket address to connect to.
     pub fn url(&self) -> String {
-        let host = self.host.trim();
-        let host = if host.is_empty() { "127.0.0.1" } else { host };
+        let host = self.host();
         // An IPv6 literal has to be bracketed in a URL, or the colons in the
         // address are read as the port separator.
         if host.contains(':') && !host.starts_with('[') {
-            format!("ws://[{host}]:{}", self.port)
+            format!("ws://[{host}]:{}", self.port())
         } else {
-            format!("ws://{host}:{}", self.port)
+            format!("ws://{host}:{}", self.port())
         }
     }
 
@@ -1268,9 +1330,88 @@ mod tests {
     fn an_empty_obs_host_falls_back_to_this_machine() {
         let config = ObsConfig {
             host: "   ".into(),
+            // Named explicitly and left unset, so the test does not depend on
+            // whether whoever is running it happens to have the real variable
+            // exported.
+            host_env: "MSM_TEST_OBS_HOST_NOT_SET".into(),
+            port_env: "MSM_TEST_OBS_PORT_NOT_SET".into(),
             ..Default::default()
         };
         assert_eq!(config.url(), "ws://127.0.0.1:4455");
+    }
+
+    /// The address can come from the environment too, so one dotfiles
+    /// repository can point at a laptop's own OBS one day and a studio
+    /// machine's the next without editing anything.
+    #[test]
+    fn the_obs_address_can_come_from_the_environment() {
+        let config = ObsConfig {
+            host: String::new(),
+            port: 0,
+            host_env: "MSM_TEST_OBS_HOST".into(),
+            port_env: "MSM_TEST_OBS_PORT".into(),
+            ..Default::default()
+        };
+        with_envs(
+            &[
+                ("MSM_TEST_OBS_HOST", Some("studio.local")),
+                ("MSM_TEST_OBS_PORT", Some("4466")),
+            ],
+            || assert_eq!(config.url(), "ws://studio.local:4466"),
+        );
+    }
+
+    /// Same precedence as every credential: naming a value explicitly beats
+    /// inheriting one.
+    #[test]
+    fn an_obs_address_in_the_file_wins_over_the_environment() {
+        let config = ObsConfig {
+            host: "written.local".into(),
+            port: 1234,
+            host_env: "MSM_TEST_OBS_HOST".into(),
+            port_env: "MSM_TEST_OBS_PORT".into(),
+            ..Default::default()
+        };
+        with_envs(
+            &[
+                ("MSM_TEST_OBS_HOST", Some("studio.local")),
+                ("MSM_TEST_OBS_PORT", Some("4466")),
+            ],
+            || assert_eq!(config.url(), "ws://written.local:1234"),
+        );
+    }
+
+    /// A port that is not a port must not stop the interface starting. OBS's
+    /// own default is a far better answer than refusing to run.
+    #[test]
+    fn an_unusable_obs_port_falls_back_rather_than_failing() {
+        for value in ["not-a-number", "0", "70000", "-1"] {
+            let config = ObsConfig {
+                host: "localhost".into(),
+                port: 0,
+                host_env: "MSM_TEST_OBS_HOST_NOT_SET".into(),
+                port_env: "MSM_TEST_OBS_PORT".into(),
+                ..Default::default()
+            };
+            with_env("MSM_TEST_OBS_PORT", Some(value), || {
+                assert_eq!(config.url(), "ws://localhost:4455", "{value}");
+            });
+        }
+    }
+
+    /// An IPv6 literal has to survive coming from the environment as well as
+    /// from the file, brackets and all.
+    #[test]
+    fn an_ipv6_host_from_the_environment_is_bracketed() {
+        let config = ObsConfig {
+            host: String::new(),
+            port: 4455,
+            host_env: "MSM_TEST_OBS_HOST".into(),
+            ..Default::default()
+        };
+        with_env("MSM_TEST_OBS_HOST", Some("::1"), || {
+            assert_eq!(config.url(), "ws://[::1]:4455");
+        });
     }
 
     #[test]
