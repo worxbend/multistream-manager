@@ -711,6 +711,25 @@ pub struct NotificationsConfig {
     /// Stream state: going live, a platform failing to go live, and a
     /// broadcast that stops while the program is watching it.
     pub stream_state: bool,
+
+    /// Watch Twitch for the events that never reach chat.
+    ///
+    /// Raids, subscriptions and cheers arrive over the chat connection, so
+    /// they need nothing extra. Follows, channel-point redemptions, hype
+    /// trains, polls and predictions are not chat and never have been: they
+    /// come over a second connection (EventSub), which this switch opens.
+    ///
+    /// Off means the connection is never made at all — this is not a display
+    /// filter, it is whether to hold a second WebSocket open.
+    pub twitch_events: bool,
+    /// New followers.
+    pub follows: bool,
+    /// Channel-point redemptions, with whatever the viewer typed.
+    pub redemptions: bool,
+    /// Hype trains starting and finishing.
+    pub hype_trains: bool,
+    /// Polls and predictions starting.
+    pub polls: bool,
 }
 
 impl Default for NotificationsConfig {
@@ -725,11 +744,29 @@ impl Default for NotificationsConfig {
             paid: true,
             memberships: true,
             stream_state: true,
+            twitch_events: true,
+            follows: true,
+            // On, but quieter by nature: a busy channel redeems points
+            // constantly, and this is the first switch anybody will want.
+            redemptions: true,
+            hype_trains: true,
+            polls: true,
         }
     }
 }
 
 impl NotificationsConfig {
+    /// Whether an EventSub event class is wanted on the desktop.
+    pub fn wants(&self, kind: crate::eventsub::EventKind) -> bool {
+        use crate::eventsub::EventKind;
+        match kind {
+            EventKind::Follow => self.follows,
+            EventKind::Redemption => self.redemptions,
+            EventKind::HypeTrain => self.hype_trains,
+            EventKind::Poll | EventKind::Prediction => self.polls,
+        }
+    }
+
     /// The settings the notifier itself needs, with the pacing clamped to
     /// something a desktop can survive.
     ///

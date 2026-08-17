@@ -104,8 +104,17 @@ impl ProviderSpec {
                 "channel:manage:broadcast",
                 // Lets us show you the RTMP stream key in the dashboard.
                 "channel:read:stream_key",
-                // Follower total on the stats panel.
+                // Follower total on the stats panel — and, with the same
+                // scope, the EventSub subscription that reports each new
+                // follower as it happens.
                 "moderator:read:followers",
+                // The rest of what EventSub delivers that chat cannot:
+                // channel-point redemptions, hype trains, polls and
+                // predictions. Read-only, every one of them.
+                "channel:read:redemptions",
+                "channel:read:hype_train",
+                "channel:read:polls",
+                "channel:read:predictions",
                 // Subscriber total on the stats panel.
                 "channel:read:subscriptions",
             ],

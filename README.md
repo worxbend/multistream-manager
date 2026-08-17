@@ -550,12 +550,22 @@ Notified by default, each with its own switch:
 
 | Event | Where it comes from |
 |---|---|
-| **Raids** | Twitch |
-| **Subscriptions, renewals, upgrades, gifted subs** | Twitch |
-| **Cheers and bits milestones** | Twitch |
-| **Super Chats and Super Stickers** | YouTube |
-| **Memberships** | YouTube |
-| **Stream ready / stream stopped / going live failed** | Both |
+| **Raids** | Twitch chat |
+| **Subscriptions, renewals, upgrades, gifted subs** | Twitch chat |
+| **Cheers and bits milestones** | Twitch chat |
+| **Super Chats and Super Stickers** | YouTube chat |
+| **Memberships** | YouTube chat |
+| **New followers** | Twitch events |
+| **Channel-point redemptions**, with the viewer's text | Twitch events |
+| **Hype trains**, starting and finishing | Twitch events |
+| **Polls and predictions** starting | Twitch events |
+| **Stream ready / stream stopped / going live failed** | Both platforms |
+
+The ones marked *Twitch events* arrive over a second connection (EventSub),
+because they are not chat and never have been — a follow does not appear in any
+chat window, so without it the program simply could not see one. It opens
+itself when you log in, reconnects on its own, and can be switched off in
+**Config → Notifications** if you would rather hold one connection than two.
 
 *Stream stopped* is the quiet one worth having. A platform that was reporting an
 incoming broadcast and suddenly is not means a dead encoder, a dropped

@@ -311,6 +311,11 @@ Linux-first and the Windows toast API is not worth the maintenance.
 | `paid` | boolean | `true` | YouTube Super Chats and Super Stickers. |
 | `memberships` | boolean | `true` | YouTube channel memberships. |
 | `stream_state` | boolean | `true` | Going live, a platform refusing to, and a broadcast that stops. |
+| `twitch_events` | boolean | `true` | Hold a second Twitch connection open for the events chat cannot carry. |
+| `follows` | boolean | `true` | New followers. |
+| `redemptions` | boolean | `true` | Channel-point redemptions, with whatever the viewer typed. |
+| `hype_trains` | boolean | `true` | Hype trains starting and finishing. |
+| `polls` | boolean | `true` | Polls and predictions starting. |
 
 ```toml
 [notifications]
@@ -323,7 +328,37 @@ cheers = true
 paid = true
 memberships = true
 stream_state = true
+twitch_events = true
+follows = true
+redemptions = true
+hype_trains = true
+polls = true
 ```
+
+### `twitch_events`: the second connection
+
+Raids, subscriptions, gifts and cheers all travel over the chat connection,
+which is already open — so they cost nothing extra and arrive whether or not
+this setting is on.
+
+Follows do not. Neither do channel-point redemptions, hype trains, polls or
+predictions. None of those are chat and none of them ever have been; the only
+way to hear about them is to ask Twitch to tell you, over a second connection
+called EventSub. `twitch_events = true` opens it.
+
+This is not a display filter. With it off, the connection is never made at all
+and the four settings under it do nothing. With it on, the connection opens as
+soon as a Twitch login is known, reconnects by itself when it drops, and
+follows Twitch's own scheduled reconnections without losing anything.
+
+It needs permissions your saved login may not have — `channel:read:redemptions`,
+`channel:read:hype_train`, `channel:read:polls`, `channel:read:predictions`,
+and `moderator:read:followers`, which was already requested for the follower
+count. Twitch grants permissions when you authorise, so an older login cannot
+gain one: **log in again under Config → Accounts**. Whatever *can* be
+subscribed to still is, and the activity log names the ones that were
+declined — a login missing only the hype-train permission still reports
+follows.
 
 Every one of these is a switch in **Config → Notifications**
 (<kbd>Alt</kbd>+<kbd>5</kbd>), changed with <kbd>Enter</kbd> and saved as you

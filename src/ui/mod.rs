@@ -153,7 +153,12 @@ pub async fn run(config: Config) -> Result<()> {
     // Start the OBS connection from inside the runtime, which is where
     // spawning a task is possible.
     app.connect_obs();
+    // And the Twitch event connection, which carries what chat cannot:
+    // follows, channel points, hype trains. It needs a saved Twitch login, so
+    // it may well do nothing here and start later, when one arrives.
+    app.connect_events();
     let mut obs_updates = app.obs_updates.take();
+    let mut events_updates = app.events_updates.take();
     // The chat tasks' shared event stream. Taken out of the tab state here
     // because only this loop may await on it.
     let mut chat_events = app
@@ -195,6 +200,15 @@ pub async fn run(config: Config) -> Result<()> {
     let mut applied_background: Option<String> = None;
 
     loop {
+        // A Twitch login can arrive long after start-up — on a first run it
+        // certainly does — and the event connection is opened the moment one
+        // does. Adopting its receiver here is what lets a connection made
+        // mid-session be selected on, without this loop having to know when
+        // logging in happened.
+        if events_updates.is_none() {
+            events_updates = app.events_updates.take();
+        }
+
         if app.config.appearance.terminal_background {
             let wanted = app.palette.canvas();
             if applied_background.as_deref() != Some(wanted.as_str()) {
@@ -284,6 +298,18 @@ pub async fn run(config: Config) -> Result<()> {
                 }
             } => {
                 app.handle_obs_update(update);
+            }
+
+            // Twitch events that never touch chat. `None` until a Twitch
+            // login is known — and a `select!` branch whose future is never
+            // ready costs nothing, so this is free until then.
+            Some(update) = async {
+                match events_updates.as_mut() {
+                    Some(updates) => updates.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                app.handle_events_update(update);
             }
 
             // Messages and state changes from the chat tasks. After the

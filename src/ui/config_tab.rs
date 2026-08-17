@@ -171,7 +171,7 @@ impl ConfigTab {
 pub const APPEARANCE_ROWS: usize = 7;
 
 /// How many switches the Notifications section lists.
-pub const NOTIFICATION_ROWS: usize = 8;
+pub const NOTIFICATION_ROWS: usize = 13;
 
 /// The housekeeping jobs, in the order they are listed.
 pub const MAINTENANCE_JOBS: [(&str, &str); 3] = [
@@ -426,6 +426,13 @@ fn draw_notifications(frame: &mut Frame, area: Rect, app: &App, config: &ConfigT
             "Only when chat is hidden",
             on_off(settings.only_when_hidden),
         ),
+        // Everything below needs the second Twitch connection, so the switch
+        // that opens it comes first and the rest are meaningless without it.
+        ("Watch Twitch events", on_off(settings.twitch_events)),
+        ("  New followers", on_off(settings.follows)),
+        ("  Channel points", on_off(settings.redemptions)),
+        ("  Hype trains", on_off(settings.hype_trains)),
+        ("  Polls & predictions", on_off(settings.polls)),
     ];
 
     let mut lines: Vec<Line> = rows
@@ -433,9 +440,11 @@ fn draw_notifications(frame: &mut Frame, area: Rect, app: &App, config: &ConfigT
         .enumerate()
         .map(|(index, (name, value))| {
             let selected = index == config.cursor && config.focus == Focus::Contents;
-            // Every switch below the first is meaningless while the master
-            // switch is off, and greying them says that without hiding them.
-            let dimmed = index > 0 && !settings.enabled;
+            // A switch under one that is off does nothing, and greying it
+            // says so without hiding it: the master switch dims everything,
+            // and the Twitch-events switch dims the four that need it.
+            let dimmed = (index > 0 && !settings.enabled)
+                || (index > TWITCH_EVENTS_ROW && !settings.twitch_events);
             let name_colour = if dimmed { sk.muted } else { sk.foreground };
             let value_colour = if dimmed { sk.muted } else { sk.accent };
             let mut line = Line::from(vec![
@@ -465,6 +474,10 @@ fn draw_notifications(frame: &mut Frame, area: Rect, app: &App, config: &ConfigT
         "Needs no setup: notify-send, then gdbus, then kdialog, then the bell.",
         Style::new().fg(sk.muted),
     )));
+    lines.push(Line::from(Span::styled(
+        "Raids, subs and cheers come over chat; the four below need Twitch events.",
+        Style::new().fg(sk.muted),
+    )));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "enter change · every change is saved straight away",
@@ -473,6 +486,10 @@ fn draw_notifications(frame: &mut Frame, area: Rect, app: &App, config: &ConfigT
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
 }
+
+/// Which row opens the Twitch event connection. The four rows after it are
+/// its children.
+const TWITCH_EVENTS_ROW: usize = 8;
 
 fn on_off(value: bool) -> String {
     if value { "on" } else { "off" }.to_string()

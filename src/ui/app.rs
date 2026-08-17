@@ -277,6 +277,15 @@ pub struct App {
     pub obs: crate::obs::state::ObsState,
     /// The connection to OBS, when one has been started.
     pub obs_handle: Option<crate::obs::task::Handle>,
+    /// The Twitch EventSub connection: follows, channel points, hype trains.
+    ///
+    /// Separate from the chat connection because it carries what chat cannot.
+    /// `None` until a Twitch login is known, and dropped if the account
+    /// changes — dropping the handle ends the task.
+    pub events_handle: Option<crate::eventsub::Handle>,
+    /// The receiving end of that connection's updates, taken by the event
+    /// loop the same way the OBS one is.
+    pub events_updates: Option<tokio::sync::mpsc::UnboundedReceiver<crate::eventsub::Update>>,
     /// Updates from that connection. Taken out by the event loop, which is
     /// the only place allowed to await on it.
     pub obs_updates: Option<tokio::sync::mpsc::UnboundedReceiver<crate::obs::task::Update>>,
@@ -411,6 +420,8 @@ impl App {
             obs: crate::obs::state::ObsState::default(),
             obs_handle: None,
             obs_updates: None,
+            events_handle: None,
+            events_updates: None,
             telemetry: crate::telemetry::Telemetry::default(),
             command_palette: None,
             animation: config.appearance.animation_mode(),
@@ -610,6 +621,78 @@ impl App {
         self.obs_handle = Some(crate::obs::task::spawn(params, updates_tx));
         self.obs_updates = Some(updates_rx);
         self.obs.connection = crate::obs::state::Connection::Connecting;
+    }
+
+    /// Start watching for the Twitch events that never reach chat.
+    ///
+    /// Follows, channel-point redemptions, hype trains, polls and predictions
+    /// arrive over EventSub rather than IRC — they are not chat and never have
+    /// been — so this is a second connection alongside the chat one.
+    ///
+    /// Needs the channel's own numeric user id, which is saved with the login.
+    /// A login saved before identities were recorded has none, and rather than
+    /// spend a request working it out at start-up this simply does not run:
+    /// logging in again fills it in, and everything else keeps working
+    /// meanwhile.
+    ///
+    /// Called from inside the runtime, for the same reason `connect_obs` is.
+    pub fn connect_events(&mut self) {
+        if !self.config.notifications.twitch_events || self.events_handle.is_some() {
+            return;
+        }
+        let Some(broadcaster_id) = self.twitch_user_id() else {
+            return;
+        };
+        let (updates_tx, updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let params = crate::eventsub::Params::new(
+            broadcaster_id,
+            crate::chat::source::token_provider(&self.config, Platform::Twitch.slug()),
+            self.config.twitch.client_id(),
+            reqwest::Client::new(),
+            updates_tx,
+        );
+        tracing::info!("watching Twitch events");
+        self.events_handle = Some(crate::eventsub::spawn(params));
+        self.events_updates = Some(updates_rx);
+    }
+
+    /// The primary Twitch account's numeric user id, as saved with its login.
+    fn twitch_user_id(&self) -> Option<String> {
+        let store = crate::auth::store::TokenStore::load().ok()?;
+        store
+            .get(Platform::Twitch)
+            .and_then(|tokens| tokens.identity.as_ref())
+            .map(|identity| identity.id.clone())
+            .filter(|id| !id.is_empty())
+    }
+
+    /// Fold one EventSub update into the interface.
+    ///
+    /// Everything lands in the activity log, because the log is the record of
+    /// what happened. Only the events themselves also reach the desktop —
+    /// trouble with the connection is worth writing down and not worth
+    /// interrupting a stream for.
+    pub fn handle_events_update(&mut self, update: crate::eventsub::Update) {
+        match update {
+            crate::eventsub::Update::Trouble(message) => {
+                self.push_log(LogLevel::Warning, message);
+            }
+            crate::eventsub::Update::Event(event) => {
+                let line = if event.detail.is_empty() {
+                    event.title.clone()
+                } else {
+                    format!("{} — {}", event.title, event.detail)
+                };
+                self.push_log(LogLevel::Info, line);
+                if self.config.notifications.wants(event.kind) {
+                    self.desktop.send(crate::notify::Notification::new(
+                        event.title,
+                        event.detail,
+                        crate::notify::Urgency::Normal,
+                    ));
+                }
+            }
+        }
     }
 
     /// Whether the screen showing now claims plain keys for itself.
@@ -1271,7 +1354,23 @@ impl App {
             4 => settings.paid = !settings.paid,
             5 => settings.memberships = !settings.memberships,
             6 => settings.stream_state = !settings.stream_state,
-            _ => settings.only_when_hidden = !settings.only_when_hidden,
+            7 => settings.only_when_hidden = !settings.only_when_hidden,
+            8 => settings.twitch_events = !settings.twitch_events,
+            9 => settings.follows = !settings.follows,
+            10 => settings.redemptions = !settings.redemptions,
+            11 => settings.hype_trains = !settings.hype_trains,
+            _ => settings.polls = !settings.polls,
+        }
+
+        // The Twitch event switch is not a display filter: it decides whether
+        // a second WebSocket is held open at all. Turning it on opens it now
+        // rather than at the next start-up; turning it off drops the handle,
+        // which ends the task.
+        if self.config.notifications.twitch_events {
+            self.connect_events();
+        } else {
+            self.events_handle = None;
+            self.events_updates = None;
         }
 
         // Take effect now rather than at the next start-up. The notifier is
@@ -1861,6 +1960,12 @@ impl App {
             }
 
             Event::LoggedIn { platform, result } => {
+                // A fresh Twitch login is the moment the event connection
+                // becomes possible: it needs the user id that login just
+                // saved. Harmless when one is already running.
+                if platform == Platform::Twitch && result.is_ok() {
+                    self.connect_events();
+                }
                 self.busy = false;
                 match result {
                     Ok(_) => {
@@ -5411,6 +5516,11 @@ mod tests {
                 n.memberships,
                 n.stream_state,
                 n.only_when_hidden,
+                n.twitch_events,
+                n.follows,
+                n.redemptions,
+                n.hype_trains,
+                n.polls,
             ]
         };
         let before = read(&app);
@@ -5505,7 +5615,65 @@ mod tests {
         assert_eq!(app.desktop.queued(), 0);
     }
 
-    /// Ending is irreversible, so it asks twice — and the first press must
+    /// A follow is the event no other part of the program can see: it is not
+    /// chat, and without EventSub it never arrived at all.
+    #[test]
+    fn a_twitch_event_reaches_the_log_and_the_desktop() {
+        use crate::eventsub::{EventKind, StreamEvent, Update};
+
+        let mut app = app();
+        app.handle_events_update(Update::Event(StreamEvent {
+            title: "New follower".into(),
+            detail: "Alice".into(),
+            kind: EventKind::Follow,
+        }));
+
+        assert!(
+            app.log.iter().any(|line| line.message.contains("Alice")),
+            "the log is the record of what happened"
+        );
+        assert_eq!(app.desktop.delivered(), 1);
+    }
+
+    /// Each class of event has its own switch, because a channel that redeems
+    /// points every thirty seconds is a different problem from one that gets
+    /// a follower an hour.
+    #[test]
+    fn an_event_class_that_is_switched_off_stays_in_the_log_only() {
+        use crate::eventsub::{EventKind, StreamEvent, Update};
+
+        let mut app = app();
+        app.config.notifications.redemptions = false;
+        app.handle_events_update(Update::Event(StreamEvent {
+            title: "Channel points".into(),
+            detail: "Bob redeemed Hydrate".into(),
+            kind: EventKind::Redemption,
+        }));
+
+        assert!(app.log.iter().any(|line| line.message.contains("Bob")));
+        assert_eq!(
+            app.desktop.delivered(),
+            0,
+            "switched off means no pop-up, not no record"
+        );
+    }
+
+    /// Trouble with the connection is worth writing down and not worth
+    /// interrupting a stream for.
+    #[test]
+    fn connection_trouble_is_logged_without_a_pop_up() {
+        use crate::eventsub::Update;
+
+        let mut app = app();
+        app.handle_events_update(Update::Trouble("Twitch events: gone — reconnecting".into()));
+        assert!(app
+            .log
+            .iter()
+            .any(|line| line.message.contains("reconnecting")));
+        assert_eq!(app.desktop.delivered(), 0);
+    }
+
+    /// Ending is irreversible, so it asks twice    /// Ending is irreversible, so it asks twice — and the first press must
     /// send nothing at all.
     #[test]
     fn finishing_the_broadcast_asks_before_it_does_it() {

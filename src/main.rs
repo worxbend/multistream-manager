@@ -21,6 +21,7 @@ mod clipboard;
 mod config;
 mod diagnostics;
 mod engine;
+mod eventsub;
 mod keys;
 mod lang;
 mod layout;
