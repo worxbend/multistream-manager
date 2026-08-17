@@ -104,6 +104,27 @@ pub struct ConfigTab {
     /// Whether the draft differs from what is saved, so the tab can say so
     /// rather than leaving somebody to wonder whether they pressed the key.
     pub dirty: bool,
+    /// The last self-check, and when it was taken.
+    ///
+    /// Cached rather than computed while drawing. The checks look for
+    /// clipboard helpers by *starting* them (`clipboard::is_installed` runs
+    /// `wl-copy --help` and waits for it), read the token store off disk, and
+    /// walk `PATH` for a notification program. Doing that inside the draw
+    /// function meant up to six processes forked and waited on per frame —
+    /// twice a second at rest, ten times a second while anything animated —
+    /// on the thread that has to stay responsive to keys. It is a snapshot of
+    /// the machine, so it is taken when the section is opened and on demand
+    /// afterwards.
+    pub diagnostics: Diagnostics,
+}
+
+/// A cached self-check.
+#[derive(Debug, Clone, Default)]
+pub struct Diagnostics {
+    pub checks: Vec<crate::diagnostics::Check>,
+    /// When it was taken, so the pane can say how old it is. `None` means it
+    /// has not been run yet in this session.
+    pub taken_at: Option<chrono::DateTime<chrono::Local>>,
 }
 
 impl ConfigTab {
@@ -115,7 +136,19 @@ impl ConfigTab {
             draft: layout,
             cleanup_listed: false,
             dirty: false,
+            diagnostics: Diagnostics::default(),
         }
+    }
+
+    /// Run the self-check and keep the result.
+    ///
+    /// Called when the Diagnostics section is opened and when `r` is pressed
+    /// there — never from the drawing code, which must not start processes.
+    pub fn refresh_diagnostics(&mut self, config: &crate::config::Config) {
+        self.diagnostics = Diagnostics {
+            checks: crate::diagnostics::run(config),
+            taken_at: Some(chrono::Local::now()),
+        };
     }
 
     /// How many rows the chosen section offers, for clamping the cursor.
@@ -594,8 +627,11 @@ fn draw_maintenance(frame: &mut Frame, area: Rect, config: &ConfigTab) {
 
 fn draw_diagnostics(frame: &mut Frame, area: Rect, app: &App) {
     let sk = theme::skin();
+    let Some(config) = &app.config_tab else {
+        return;
+    };
     let mut lines = Vec::new();
-    for check in crate::diagnostics::run(&app.config) {
+    for check in &config.diagnostics.checks {
         let (marker, colour) = match check.status {
             crate::diagnostics::Status::Ok => ("[ ok ]", sk.success),
             crate::diagnostics::Status::Warning => ("[warn]", sk.warning),
@@ -612,6 +648,19 @@ fn draw_diagnostics(frame: &mut Frame, area: Rect, app: &App) {
             )));
         }
     }
+
+    // The age matters: these are facts about the machine at the moment they
+    // were gathered, and the usual reason to look twice is having just
+    // changed one of them (logged in, installed a helper).
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        match config.diagnostics.taken_at {
+            Some(at) => format!("checked at {} · r to check again", at.format("%H:%M:%S")),
+            None => "not checked yet · r to check".to_string(),
+        },
+        Style::new().fg(sk.muted),
+    )));
+
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 

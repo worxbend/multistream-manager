@@ -966,6 +966,9 @@ impl App {
                         .unwrap_or(0);
                     config.section = Section::ALL[(index + 1) % Section::ALL.len()];
                     config.cursor = 0;
+                    if config.section == Section::Diagnostics {
+                        config.refresh_diagnostics(&self.config);
+                    }
                 }
                 Focus::Contents => {
                     if rows > 0 {
@@ -982,6 +985,9 @@ impl App {
                     config.section =
                         Section::ALL[(index + Section::ALL.len() - 1) % Section::ALL.len()];
                     config.cursor = 0;
+                    if config.section == Section::Diagnostics {
+                        config.refresh_diagnostics(&self.config);
+                    }
                 }
                 Focus::Contents => {
                     if rows > 0 {
@@ -1016,6 +1022,11 @@ impl App {
             KeyCode::Enter if config.section == Section::Appearance => {
                 self.config_tab = Some(config);
                 return self.change_appearance_setting();
+            }
+            KeyCode::Char('r') if config.section == Section::Diagnostics => {
+                config.refresh_diagnostics(&self.config);
+                self.config_tab = Some(config);
+                return vec![];
             }
             KeyCode::Enter if config.section == Section::Notifications => {
                 self.config_tab = Some(config);
@@ -5369,6 +5380,48 @@ mod tests {
             },
         )]));
         assert_eq!(app.desktop.queued(), 0);
+    }
+
+    /// The self-check starts processes (it looks for clipboard helpers by
+    /// running them) and reads the token store off disk. Doing that while
+    /// drawing meant six forks a frame; it is a snapshot now, taken when the
+    /// section opens and when `r` is pressed.
+    #[test]
+    fn the_self_check_is_taken_on_arrival_and_on_demand_only() {
+        let mut app = app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::ALT));
+        assert!(
+            app.config_tab
+                .as_ref()
+                .expect("state")
+                .diagnostics
+                .taken_at
+                .is_none(),
+            "opening the tab on Layout must not run the checks"
+        );
+
+        go_to_config_section(&mut app, super::super::config_tab::Section::Diagnostics);
+        let first = app.config_tab.as_ref().expect("state").diagnostics.clone();
+        assert!(first.taken_at.is_some(), "arriving runs them once");
+        assert!(!first.checks.is_empty());
+
+        // Drawing must not touch them. (The draw path takes &App, so this is
+        // structural — but the test states the invariant the bug broke.)
+        let taken = first.taken_at;
+        assert_eq!(
+            app.config_tab.as_ref().expect("state").diagnostics.taken_at,
+            taken
+        );
+
+        // And `r` takes a fresh one.
+        app.handle_key(KeyEvent::from(KeyCode::Char('r')));
+        assert!(app
+            .config_tab
+            .as_ref()
+            .expect("state")
+            .diagnostics
+            .taken_at
+            .is_some());
     }
 
     /// Open the Configuration tab and move the section cursor onto `wanted`.

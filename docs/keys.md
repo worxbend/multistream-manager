@@ -385,8 +385,14 @@ this are in [Configuration](configuration.md#layout).
 
 What used to be `msm doctor`. Each check reports `ok`, `warn` or `fail`, and
 every warning says what to do about it rather than only what is wrong: config
-file, credentials, saved logins, the clipboard tool, the terminal's
-capabilities, and the OBS connection.
+file, credentials, saved logins, the clipboard tool, the desktop notification
+program, the terminal's capabilities, and the OBS connection.
+
+The checks are a snapshot of the machine, taken when you arrive in this
+section — they look for helper programs by running them, so they are not
+something to repeat on every redraw. The line at the bottom says when the
+snapshot was taken; <kbd>r</kbd> takes a fresh one, which is what you want
+after logging in or installing something.
 
 ### Files
 
