@@ -1841,6 +1841,10 @@ impl Poller {
                     Some(ChatCommand::Clip) => {
                         self.emit_local_notice("clips are a Twitch feature; YouTube has no clip API here")
                     }
+                    Some(ChatCommand::Raid { .. }) | Some(ChatCommand::Unraid) => self
+                        .emit_local_notice(
+                            "raiding is a Twitch feature; YouTube has no equivalent",
+                        ),
                 },
             }
         }
@@ -1862,6 +1866,9 @@ impl Poller {
                 }) => self.handle_ban(channel_id, timeout_secs).await,
                 Some(ChatCommand::Clip) => self
                     .emit_local_notice("clips are a Twitch feature; YouTube has no clip API here"),
+                Some(ChatCommand::Raid { .. }) | Some(ChatCommand::Unraid) => {
+                    self.emit_local_notice("raiding is a Twitch feature; YouTube has no equivalent")
+                }
             }
         }
     }

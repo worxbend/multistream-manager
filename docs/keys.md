@@ -284,6 +284,33 @@ out), the view filters (<kbd>1</kbd>–<kbd>4</kbd>, <kbd>0</kbd> to reset) and 
 display toggles are handled by the chat pane itself rather than through the
 keymap, so they are not rebindable and do not appear in the table above.
 
+Moderation works on both platforms, and on both it takes two presses: the first
+arms the action against the selected message and the second carries it out.
+Behind the scenes the two are quite different — YouTube's live-chat API on one
+side, Twitch's Helix moderation endpoints on the other, because Twitch removed
+moderation commands from IRC in 2023 — but nothing about that shows in the
+keys. Moderating a Twitch channel you do not own works if you are a moderator
+there; Twitch checks that itself and says so if you are not.
+
+### Composer commands
+
+Typed into the message box rather than pressed as keys.
+
+| Command | Platform | What it does |
+|---|---|---|
+| `/me <text>` | Twitch | Sends as an action, the way IRC always has |
+| `/clip` | Twitch | Clips your own live stream and answers with the edit URL |
+| `/raid <channel>` | Twitch | Sends your viewers to another channel — the usual way a stream ends |
+| `/unraid` | Twitch | Calls the raid off during its countdown |
+| `/chats [target]` | both | Opens the join prompt, or joins the target directly |
+
+**Everything else beginning with a slash is refused rather than sent.** Twitch
+removed chat commands from IRC in 2023 and YouTube never had any, so `/ban
+someone` typed into a chat box is not a moderation action — it is a public
+message that reads "/ban someone". The refusal appears in the pane and names
+what to use instead. If you genuinely want a message that starts with a slash,
+`//like this` posts it verbatim.
+
 ---
 
 ## OBS

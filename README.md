@@ -148,8 +148,17 @@ chat_log_dir = ""              # empty = chatlog/ under the config directory
 ```
 
 Composer commands: `/me` (Twitch action), `/clip` (clip your own live Twitch
-stream — answers with the edit URL), `/chats [target]` (join prompt or direct
-join). With `chat_logging` on, **Config → Housekeeping → *Export paid events to
+stream — answers with the edit URL), `/raid <channel>` and `/unraid` (send your
+viewers somewhere else, the usual way a Twitch stream ends), `/chats [target]`
+(join prompt or direct join). Anything else beginning with a slash is refused
+with an explanation instead of being posted: Twitch removed chat commands from
+IRC in 2023 and YouTube never had them, so `/ban someone` typed into a chat box
+is a public message, not a moderation action. `//text` posts a leading slash on
+purpose.
+
+Moderation — <kbd>d</kbd> delete, <kbd>b</kbd> ban, <kbd>t</kbd> time out, each
+confirmed by a second press — works on **both** platforms: YouTube's live-chat
+API on one side, Twitch's Helix moderation endpoints on the other. With `chat_logging` on, **Config → Housekeeping → *Export paid events to
 CSV*** turns the logs into a spreadsheet of every paid event — integer-exact
 amounts, zero API quota.
 

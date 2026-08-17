@@ -35,13 +35,15 @@ pub enum ChatCommand {
     /// Tear the connection down and reconnect now (the user pressed the
     /// reconnect key, or wants to override a quota pause).
     Reconnect,
-    /// Remove one message (YouTube `liveChatMessages.delete`). Twitch chats
-    /// answer with a notice: the reference implementation performs no
-    /// client-side moderation, because Twitch removed moderation commands
-    /// from IRC in 2023.
+    /// Remove one message (YouTube `liveChatMessages.delete`, Twitch
+    /// `DELETE /helix/moderation/chat`).
     Delete { message_id: String },
     /// Ban an author permanently (`timeout_secs: None`) or time them out
-    /// (YouTube `liveChatBans.insert`). Same Twitch caveat as `Delete`.
+    /// (YouTube `liveChatBans.insert`, Twitch `POST /helix/moderation/bans`).
+    ///
+    /// `channel_id` is whatever the platform calls the person: a YouTube
+    /// channel id, a Twitch user id. Both arrive from the same field of the
+    /// normalized author, so the UI needs no platform special case.
     Ban {
         channel_id: String,
         timeout_secs: Option<u64>,
@@ -50,6 +52,12 @@ pub enum ChatCommand {
     /// Clip, twi's `/clip`). YouTube chats answer with a notice — clips are
     /// a Twitch feature.
     Clip,
+    /// Send this channel's viewers to another channel (Twitch `/raid`, now a
+    /// Helix call). The usual way a Twitch stream ends. YouTube chats answer
+    /// with a notice: it has no equivalent.
+    Raid { target: String },
+    /// Call off a raid during its countdown.
+    Unraid,
 }
 
 /// One running chat: its identity, its command channel, and its task.

@@ -114,6 +114,7 @@ pub fn spawn(params: TwitchParams) -> ChatHandle {
         dupes: DuplicateSuppressor::new(),
         identity: None,
         echo_counter: 0,
+        channel_id: None,
     };
     let task = tokio::spawn(run(state, command_rx));
     ChatHandle {
@@ -141,6 +142,15 @@ struct TaskState {
     /// echoes. `None` until the first USERSTATE of the session arrives.
     identity: Option<EchoIdentity>,
     echo_counter: u64,
+    /// The channel's numeric id, learned from the traffic rather than asked
+    /// for.
+    ///
+    /// Every Helix moderation call needs it, and every PRIVMSG, USERNOTICE
+    /// and ROOMSTATE carries it as `room-id` — so taking it from whatever
+    /// arrives costs nothing, where resolving the login through
+    /// `GET /helix/users` would be a request, a failure mode and a delay
+    /// before the first moderation action of a session could work.
+    channel_id: Option<String>,
 }
 
 impl TaskState {
@@ -178,6 +188,57 @@ impl TaskState {
         ));
     }
 
+    fn remember_channel_id(&mut self, id: &str) {
+        if !id.is_empty() && self.channel_id.as_deref() != Some(id) {
+            self.channel_id = Some(id.to_string());
+        }
+    }
+
+    /// Everything a Helix call from this task needs, or a reason it cannot be
+    /// made yet.
+    ///
+    /// The two identities are different things and both are required by every
+    /// moderation endpoint: `broadcaster_id` is the channel being moderated,
+    /// `moderator_id` is us. Twitch checks that the second is a moderator of
+    /// the first, which is how moderating a channel you were invited to works
+    /// without any special case here.
+    fn helix(&self) -> Result<HelixCall, String> {
+        let Some(channel_id) = self.channel_id.clone() else {
+            return Err(
+                "still waiting for Twitch to say which channel this is — try again in a moment"
+                    .to_string(),
+            );
+        };
+        if self.account_user_id.is_empty() {
+            return Err("this needs to know your own user id; log in again under \
+                        Config → Accounts to refresh the saved account identity"
+                .to_string());
+        }
+        Ok(HelixCall {
+            broadcaster_id: channel_id,
+            moderator_id: self.account_user_id.clone(),
+            client_id: self.client_id.clone(),
+            http: self.http.clone(),
+            tokens: self.tokens.clone(),
+            events: self.events.clone(),
+            key: self.key.clone(),
+        })
+    }
+
+    /// Moderation and raids run as their own tasks, for the same reason
+    /// `/clip` does: a Helix request can take the full HTTP timeout, and
+    /// awaiting it inline would stall the loop that answers PINGs and
+    /// forwards incoming messages. Chat must not freeze because a ban is
+    /// slow.
+    fn start_moderation(&self, action: ModerationAction) {
+        match self.helix() {
+            Ok(call) => {
+                tokio::spawn(run_moderation(call, action));
+            }
+            Err(reason) => self.emit_notice(reason),
+        }
+    }
+
     // (handle_clip moved to the free fn run_clip below so it can run as its
     // own task.)
 
@@ -204,12 +265,24 @@ async fn park(commands: &mut mpsc::Receiver<ChatCommand>, state: &TaskState) -> 
         match commands.recv().await {
             None => return ParkOutcome::Shutdown,
             Some(ChatCommand::Reconnect) => return ParkOutcome::Reconnect,
-            Some(ChatCommand::Delete { .. }) | Some(ChatCommand::Ban { .. }) => {
-                state.emit_notice(
-                    "moderation from here works for YouTube chats only; \
-                     use the Twitch mod tools for this channel",
-                );
+            // Moderation is an HTTP request to Helix, not a line on the
+            // IRC connection, so it still works while chat itself is down —
+            // which is exactly when somebody may be trying to ban whoever
+            // caused the mess.
+            Some(ChatCommand::Delete { message_id }) => {
+                state.start_moderation(ModerationAction::Delete { message_id })
             }
+            Some(ChatCommand::Ban {
+                channel_id,
+                timeout_secs,
+            }) => state.start_moderation(ModerationAction::Ban {
+                user_id: channel_id,
+                seconds: timeout_secs,
+            }),
+            Some(ChatCommand::Raid { target }) => {
+                state.start_moderation(ModerationAction::Raid { target })
+            }
+            Some(ChatCommand::Unraid) => state.start_moderation(ModerationAction::Unraid),
             Some(ChatCommand::Clip) => state.start_clip(),
             Some(ChatCommand::Send { .. }) => {
                 state.emit_notice("not connected to Twitch chat; press ctrl+r to reconnect");
@@ -270,11 +343,21 @@ async fn run(mut state: TaskState, mut commands: mpsc::Receiver<ChatCommand>) {
                                 "not connected to Twitch chat; reconnecting — try again shortly",
                             );
                         }
-                        Some(ChatCommand::Delete { .. }) | Some(ChatCommand::Ban { .. }) => {
-                            state.emit_notice(
-                                "moderation from here works for YouTube chats only; \
-                                 use the Twitch mod tools for this channel",
-                            );
+                        Some(ChatCommand::Delete { message_id }) => {
+                            state.start_moderation(ModerationAction::Delete { message_id })
+                        }
+                        Some(ChatCommand::Ban {
+                            channel_id,
+                            timeout_secs,
+                        }) => state.start_moderation(ModerationAction::Ban {
+                            user_id: channel_id,
+                            seconds: timeout_secs,
+                        }),
+                        Some(ChatCommand::Raid { target }) => {
+                            state.start_moderation(ModerationAction::Raid { target })
+                        }
+                        Some(ChatCommand::Unraid) => {
+                            state.start_moderation(ModerationAction::Unraid)
                         }
                         Some(ChatCommand::Clip) => state.start_clip(),
                     }
@@ -343,15 +426,25 @@ async fn run(mut state: TaskState, mut commands: mpsc::Receiver<ChatCommand>) {
                     Some(ChatCommand::Send { text, reply_to }) => {
                         state.handle_send(&client, connected, text, reply_to).await;
                     }
-                    Some(ChatCommand::Delete { .. }) | Some(ChatCommand::Ban { .. }) => {
-                        // Deliberate parity with twi, which performs no
-                        // client-side moderation: Twitch removed moderation
-                        // commands from IRC in 2023, and the Helix moderation
-                        // endpoints are outside this chat transport's scope.
-                        state.emit_notice(
-                            "moderation from here works for YouTube chats only; \
-                             use the Twitch mod tools for this channel",
-                        );
+                    // Twitch removed moderation from IRC in 2023, so these
+                    // are Helix requests rather than lines on the wire —
+                    // each one spawned as its own task so a slow ban cannot
+                    // stall the chat that is still arriving.
+                    Some(ChatCommand::Delete { message_id }) => {
+                        state.start_moderation(ModerationAction::Delete { message_id })
+                    }
+                    Some(ChatCommand::Ban {
+                        channel_id,
+                        timeout_secs,
+                    }) => state.start_moderation(ModerationAction::Ban {
+                        user_id: channel_id,
+                        seconds: timeout_secs,
+                    }),
+                    Some(ChatCommand::Raid { target }) => {
+                        state.start_moderation(ModerationAction::Raid { target })
+                    }
+                    Some(ChatCommand::Unraid) => {
+                        state.start_moderation(ModerationAction::Unraid)
                     }
                     Some(ChatCommand::Clip) => state.start_clip(),
                 },
@@ -406,9 +499,11 @@ impl TaskState {
     fn handle_message(&mut self, msg: ServerMessage) {
         match msg {
             ServerMessage::Privmsg(m) => {
+                self.remember_channel_id(&m.channel_id);
                 self.emit(ChatEvent::Message(Box::new(normalize_privmsg(&m))));
             }
             ServerMessage::UserNotice(m) => {
+                self.remember_channel_id(&m.channel_id);
                 self.emit(ChatEvent::Message(Box::new(normalize_usernotice(&m))));
             }
             ServerMessage::ClearChat(m) => self.emit(normalize_clearchat(&m)),
@@ -423,9 +518,15 @@ impl TaskState {
                 // in this channel, and it only matters for local echo.
                 self.identity = Some(remember_userstate(&m));
             }
+            ServerMessage::RoomState(m) => {
+                // Nothing to render — but it is the first thing Twitch sends
+                // after a join, so it is where the channel id usually comes
+                // from, before anybody has said anything.
+                self.remember_channel_id(&m.channel_id);
+            }
             other => {
-                // ROOMSTATE, GLOBALUSERSTATE, JOIN/PART, PING/PONG, RECONNECT
-                // and unrecognized lines: nothing to render, but worth a debug
+                // GLOBALUSERSTATE, JOIN/PART, PING/PONG, RECONNECT and
+                // unrecognized lines: nothing to render, but worth a debug
                 // line when diagnosing a misbehaving channel.
                 tracing::debug!(channel = %self.channel, message = ?other, "ignoring Twitch IRC message");
             }
@@ -569,6 +670,260 @@ pub(crate) fn reconnect_delay(attempt: u32) -> Option<Duration> {
 /// token can only clip channels it may; twi clips self, so do we. Needs the
 /// `clips:edit` scope; logins predating it get told to re-login. A 404 means
 /// "you are not live", per twi. Runs as its own task (see `start_clip`).
+/// One Helix moderation-or-raid request's worth of context.
+struct HelixCall {
+    broadcaster_id: String,
+    moderator_id: String,
+    client_id: String,
+    http: reqwest::Client,
+    tokens: TokenProvider,
+    events: EventSender,
+    key: ChatKey,
+}
+
+/// What the chat pane asked Twitch to do.
+enum ModerationAction {
+    /// Remove one message from the channel.
+    Delete { message_id: String },
+    /// Ban permanently, or time out for `seconds`.
+    Ban {
+        user_id: String,
+        seconds: Option<u64>,
+    },
+    /// Send this channel's viewers to another channel.
+    Raid { target: String },
+    /// Call off a raid before its countdown finishes.
+    Unraid,
+}
+
+impl ModerationAction {
+    /// The Twitch scope this needs, named so a 401 can say which permission
+    /// to go and grant rather than "unauthorized".
+    fn scope(&self) -> &'static str {
+        match self {
+            ModerationAction::Delete { .. } => "moderator:manage:chat_messages",
+            ModerationAction::Ban { .. } => "moderator:manage:banned_users",
+            ModerationAction::Raid { .. } | ModerationAction::Unraid => "channel:manage:raids",
+        }
+    }
+
+    /// What to say when it worked.
+    fn done(&self) -> String {
+        match self {
+            ModerationAction::Delete { .. } => "message deleted".to_string(),
+            ModerationAction::Ban { seconds: None, .. } => "banned".to_string(),
+            ModerationAction::Ban {
+                seconds: Some(secs),
+                ..
+            } => format!("timed out for {secs}s"),
+            ModerationAction::Raid { target } => {
+                format!("raid to {target} started — it goes ahead after the countdown")
+            }
+            ModerationAction::Unraid => "raid cancelled".to_string(),
+        }
+    }
+}
+
+/// Perform one moderation or raid request against Helix.
+///
+/// Twitch removed these from IRC in February 2023; they are ordinary HTTP
+/// calls now, which is why this exists at all. Every failure is reported into
+/// the chat pane the action was taken in, because that is where the person
+/// who pressed the key is looking.
+async fn run_moderation(call: HelixCall, action: ModerationAction) {
+    let notice = |text: String| {
+        let _ = call.events.send((
+            call.key.clone(),
+            ChatEvent::Message(Box::new(notice_row(String::new(), text, Some(Utc::now())))),
+        ));
+    };
+
+    let token = match (call.tokens)().await {
+        Ok(token) => token,
+        Err(err) => {
+            notice(format!("could not get a Twitch token: {err:#}"));
+            return;
+        }
+    };
+
+    // Raiding names the other channel by login, and Helix wants its numeric
+    // id, so that one call has a resolve step in front of it.
+    let action = match action {
+        ModerationAction::Raid { target } => {
+            let login = target.trim().trim_start_matches('#').to_ascii_lowercase();
+            if login.is_empty() {
+                notice("raid needs a channel to raid: /raid somechannel".into());
+                return;
+            }
+            match resolve_user_id(&call, &token, &login).await {
+                Ok(Some(_id)) => ModerationAction::Raid { target: login },
+                Ok(None) => {
+                    notice(format!("there is no Twitch channel called {login}"));
+                    return;
+                }
+                Err(err) => {
+                    notice(err);
+                    return;
+                }
+            }
+        }
+        other => other,
+    };
+
+    let (method, url, body) = match &action {
+        ModerationAction::Delete { message_id } => (
+            reqwest::Method::DELETE,
+            format!(
+                "https://api.twitch.tv/helix/moderation/chat?broadcaster_id={}&moderator_id={}&message_id={}",
+                urlencoding::encode(&call.broadcaster_id),
+                urlencoding::encode(&call.moderator_id),
+                urlencoding::encode(message_id),
+            ),
+            None,
+        ),
+        ModerationAction::Ban { user_id, seconds } => {
+            let mut data = serde_json::json!({ "user_id": user_id });
+            if let Some(seconds) = seconds {
+                data["duration"] = serde_json::json!(seconds);
+            }
+            (
+                reqwest::Method::POST,
+                format!(
+                    "https://api.twitch.tv/helix/moderation/bans?broadcaster_id={}&moderator_id={}",
+                    urlencoding::encode(&call.broadcaster_id),
+                    urlencoding::encode(&call.moderator_id),
+                ),
+                Some(serde_json::json!({ "data": data })),
+            )
+        }
+        ModerationAction::Raid { target } => {
+            // Resolved a moment ago, and re-resolved here only because the id
+            // is what the request needs; the login is what the message says.
+            let to = match resolve_user_id(&call, &token, target).await {
+                Ok(Some(id)) => id,
+                Ok(None) => {
+                    notice(format!("there is no Twitch channel called {target}"));
+                    return;
+                }
+                Err(err) => {
+                    notice(err);
+                    return;
+                }
+            };
+            (
+                reqwest::Method::POST,
+                format!(
+                    "https://api.twitch.tv/helix/raids?from_broadcaster_id={}&to_broadcaster_id={}",
+                    urlencoding::encode(&call.broadcaster_id),
+                    urlencoding::encode(&to),
+                ),
+                None,
+            )
+        }
+        ModerationAction::Unraid => (
+            reqwest::Method::DELETE,
+            format!(
+                "https://api.twitch.tv/helix/raids?broadcaster_id={}",
+                urlencoding::encode(&call.broadcaster_id)
+            ),
+            None,
+        ),
+    };
+
+    let mut request = call
+        .http
+        .request(method, &url)
+        .header("Client-Id", &call.client_id)
+        .bearer_auth(&token);
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(_) => {
+            notice("could not reach Twitch".into());
+            return;
+        }
+    };
+
+    match response.status().as_u16() {
+        200..=299 => notice(action.done()),
+        401 | 403 => notice(format!(
+            "your Twitch login is missing the {} permission (or you are not a moderator \
+             of this channel); log in again under Config → Accounts to grant it",
+            action.scope()
+        )),
+        // Helix explains these well and the explanation is specific — you are
+        // not live, the user is already banned, you cannot raid yourself — so
+        // its own words are worth more than a generic sentence.
+        400 | 404 | 409 | 422 => {
+            let detail = twitch_error_message(response).await;
+            notice(format!("Twitch refused: {detail}"));
+        }
+        429 => notice("Twitch is rate-limiting moderation actions; try again in a moment".into()),
+        status => notice(format!("that failed (HTTP {status})")),
+    }
+}
+
+/// Look up a channel's numeric id from its login.
+async fn resolve_user_id(
+    call: &HelixCall,
+    token: &str,
+    login: &str,
+) -> Result<Option<String>, String> {
+    let url = format!(
+        "https://api.twitch.tv/helix/users?login={}",
+        urlencoding::encode(login)
+    );
+    let response = call
+        .http
+        .get(&url)
+        .header("Client-Id", &call.client_id)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|_| "could not reach Twitch to look that channel up".to_string())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "could not look that channel up (HTTP {})",
+            response.status().as_u16()
+        ));
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Users {
+        #[serde(default)]
+        data: Vec<User>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct User {
+        #[serde(default)]
+        id: String,
+    }
+    let body = response.json::<Users>().await.unwrap_or_default();
+    Ok(body
+        .data
+        .into_iter()
+        .map(|user| user.id)
+        .find(|id| !id.is_empty()))
+}
+
+/// Twitch's own explanation of a refusal, when it gave one.
+async fn twitch_error_message(response: reqwest::Response) -> String {
+    let status = response.status().as_u16();
+    #[derive(serde::Deserialize, Default)]
+    struct HelixError {
+        #[serde(default)]
+        message: String,
+    }
+    let body = response.json::<HelixError>().await.unwrap_or_default();
+    if body.message.is_empty() {
+        format!("HTTP {status}")
+    } else {
+        body.message
+    }
+}
+
 async fn run_clip(
     account_user_id: String,
     client_id: String,

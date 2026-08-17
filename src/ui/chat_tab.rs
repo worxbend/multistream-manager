@@ -746,6 +746,33 @@ impl ChatTabState {
             return;
         }
 
+        // Raiding: the standard way a Twitch stream ends, and a Helix call
+        // rather than a chat line since 2023. The adapter does the work; this
+        // only has to get the target to it.
+        if let Some(rest) = command_argument(&text, "/raid") {
+            let target = rest.trim().to_string();
+            if target.is_empty() {
+                chat.state.apply(ChatEvent::Message(Box::new(local_notice(
+                    "raid needs a channel to raid: /raid somechannel",
+                ))));
+                return;
+            }
+            chat.state.draft.clear();
+            self.mode = ChatFocus::Normal;
+            if let Some(chat) = self.active_chat_mut() {
+                let _ = chat.handle.commands.try_send(ChatCommand::Raid { target });
+            }
+            return;
+        }
+        if command_argument(&text, "/unraid").is_some() {
+            chat.state.draft.clear();
+            self.mode = ChatFocus::Normal;
+            if let Some(chat) = self.active_chat_mut() {
+                let _ = chat.handle.commands.try_send(ChatCommand::Unraid);
+            }
+            return;
+        }
+
         // Composer commands that never reach the platform (twi's /channels,
         // yc's /chats): bare opens the join prompt, with an argument joins
         // directly.
@@ -1053,7 +1080,34 @@ enum SlashVerdict {
 }
 
 /// Commands this program handles itself, before anything reaches a platform.
-const HANDLED_HERE: [&str; 5] = ["/clip", "/chats", "/channels", "/channel", "/me"];
+const HANDLED_HERE: [&str; 7] = [
+    "/clip",
+    "/chats",
+    "/channels",
+    "/channel",
+    "/me",
+    "/raid",
+    "/unraid",
+];
+
+/// The argument of `text` if it is this command, `None` otherwise.
+///
+/// Two rules, and both matter.
+///
+/// The whole-word check keeps "/raidersofthelostark" a message rather than a
+/// raid on "ersofthelostark".
+///
+/// The comparison ignores case, because `classify_command` does. If the guard
+/// recognises "/RAID" as a command somebody else handles and no handler here
+/// agrees, the text falls through both and is posted to chat — which is the
+/// exact failure the guard exists to prevent, arriving through the back door.
+fn command_argument<'a>(text: &'a str, command: &str) -> Option<&'a str> {
+    let (head, rest) = match text.find(' ') {
+        Some(space) => text.split_at(space),
+        None => (text, ""),
+    };
+    head.eq_ignore_ascii_case(command).then_some(rest)
+}
 
 /// Decide what a draft beginning with `/` means.
 ///
@@ -1124,9 +1178,12 @@ fn advice_for(command: &str, platform: Platform) -> &'static str {
                 "Twitch removed moderation commands from IRC in 2023; use the Twitch mod tools                  for this channel."
             }
         },
-        "/raid" | "/unraid" | "/host" | "/unhost" => {
-            "Raiding is not supported from here yet; start it from the Twitch dashboard."
+        "/host" | "/unhost" => {
+            "Hosting was retired by Twitch in 2022. /raid does what it used to."
         }
+        // Only reachable on YouTube: on Twitch these are handled before the
+        // guard ever sees them.
+        "/raid" | "/unraid" => "Raiding is a Twitch feature; YouTube has no equivalent.",
         "/announce" | "/shoutout" | "/so" | "/marker" | "/commercial" | "/poll"
         | "/prediction" => "That is a Twitch dashboard feature, not a chat message.",
         "/w" | "/whisper" => "Whispers are not supported here.",
@@ -2511,6 +2568,55 @@ mod tests {
         }
     }
 
+    /// The guard and the handlers have to agree about what a command is. If
+    /// the guard lets "/RAID x" through as "a command somebody else handles"
+    /// and no handler recognises it, it is posted to chat — the exact failure
+    /// the guard exists to prevent, arriving through the back door.
+    #[tokio::test]
+    async fn a_command_in_capitals_is_handled_not_posted() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+        let (tx, mut rx) = mpsc::channel(8);
+        state.open.get_mut(&key).unwrap().handle.commands = tx;
+
+        for ch in "/RAID otherstreamer".chars() {
+            state.compose_push(ch);
+        }
+        state.compose_send();
+        match rx.try_recv().expect("a raid must be started") {
+            ChatCommand::Raid { target } => assert_eq!(target, "otherstreamer"),
+            other => panic!("expected a raid, got {other:?}"),
+        }
+    }
+
+    /// Raiding is how a Twitch stream conventionally ends, and it needs a
+    /// target — an empty one is a mistake worth naming rather than a request
+    /// to raid nobody.
+    #[tokio::test]
+    async fn raiding_nobody_is_refused_with_the_usage() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+        let (tx, mut rx) = mpsc::channel(8);
+        state.open.get_mut(&key).unwrap().handle.commands = tx;
+
+        for ch in "/raid".chars() {
+            state.compose_push(ch);
+        }
+        state.compose_send();
+        assert!(rx.try_recv().is_err(), "nothing is sent");
+        assert!(state.open[&key]
+            .state
+            .messages
+            .iter()
+            .any(|msg| msg.text.contains("/raid somechannel")));
+    }
+
     /// `/me` is real on Twitch (the adapter turns it into a CTCP ACTION) and
     /// meaningless on YouTube, where it would be posted as literal text.
     #[test]
@@ -2549,11 +2655,7 @@ mod tests {
     /// Case and arguments must not smuggle a command past the guard.
     #[test]
     fn a_command_is_recognised_whatever_its_case_or_arguments() {
-        for text in [
-            "/BAN someone",
-            "/Timeout someone 600",
-            "/raid otherstreamer",
-        ] {
+        for text in ["/BAN someone", "/Timeout someone 600", "/ANNOUNCE hello"] {
             assert!(
                 matches!(
                     classify_command(text, Platform::Twitch),

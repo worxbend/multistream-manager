@@ -91,6 +91,15 @@ impl ProviderSpec {
                 "chat:edit",
                 // The Chat tab's /clip command (Helix Create Clip).
                 "clips:edit",
+                // Moderating from the Chat tab: d deletes a message, b bans,
+                // t times out. These are Helix calls rather than chat lines —
+                // Twitch removed moderation commands from IRC in 2023 — and
+                // each endpoint has its own scope.
+                "moderator:manage:chat_messages",
+                "moderator:manage:banned_users",
+                // The Chat tab's /raid and /unraid, which is how a Twitch
+                // stream conventionally ends.
+                "channel:manage:raids",
                 // Required to change title, category, language and tags.
                 "channel:manage:broadcast",
                 // Lets us show you the RTMP stream key in the dashboard.
