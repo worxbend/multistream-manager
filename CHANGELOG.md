@@ -10,6 +10,10 @@ would break an existing setup is listed under **Changed** with what to do.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] — 2026-08-18
+
 ### Added
 
 - **Desktop notifications for stream events.** Raids, subscriptions, gifted
@@ -85,5 +89,6 @@ streaming and recording — from a fourth tab. Fifty-seven themes, a configurabl
 keymap with AstroNvim-shaped defaults, an arrangeable combined view for a second
 monitor, and no command line at all.
 
-[Unreleased]: https://github.com/worxbend/multistream-manager/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/worxbend/multistream-manager/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/worxbend/multistream-manager/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/worxbend/multistream-manager/releases/tag/v0.1.0
