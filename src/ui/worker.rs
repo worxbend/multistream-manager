@@ -288,6 +288,22 @@ async fn handle_search_categories(
         // fall back to its built-in list. Staying silent here is
         // what used to leave the YouTube category field apparently
         // dead until the first successful login.
+        //
+        // A real typed query landing here is worth a word in the log: this
+        // and a search that genuinely found nothing both surface as the same
+        // bare "no matches" popup, with no way to tell them apart otherwise —
+        // which is exactly what made a search racing a reconnect look
+        // indistinguishable from Twitch simply not having that category.
+        if !query.trim().is_empty() {
+            let _ = events.send(Event::Log {
+                level: LogLevel::Warning,
+                message: format!(
+                    "{} isn't connected yet, so \"{query}\" couldn't be searched. Try again \
+                     once it finishes connecting.",
+                    platform.label()
+                ),
+            });
+        }
         let _ = events.send(Event::Categories {
             platform,
             results: Vec::new(),
@@ -993,6 +1009,97 @@ mod tests {
         handle.await.unwrap();
     }
 
+    /// A category search before connecting used to answer with a bare empty
+    /// list — indistinguishable, from the popup alone, from Twitch genuinely
+    /// having no match for what was typed. A real typed query now gets a
+    /// warning explaining which of those two it actually was.
+    #[tokio::test]
+    async fn searching_categories_before_connecting_explains_the_empty_reply() {
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        let handle = tokio::spawn(run(
+            Config::default(),
+            command_rx,
+            event_tx,
+            crate::quota::QuotaStore::new(0, None),
+        ));
+
+        command_tx
+            .send(Command::SearchCategories {
+                platform: Platform::Twitch,
+                query: "Science & Technology".to_string(),
+                generation: 1,
+            })
+            .await
+            .unwrap();
+
+        // The warning is sent before the reply, so it arrives first.
+        match event_rx.recv().await.expect("a warning should arrive") {
+            Event::Log { level, message } => {
+                assert_eq!(level, LogLevel::Warning);
+                assert!(message.contains("isn't connected"));
+                assert!(message.contains("Science & Technology"));
+            }
+            other => panic!("expected a warning explaining the empty reply, got {other:?}"),
+        }
+
+        match event_rx
+            .recv()
+            .await
+            .expect("the empty reply should follow")
+        {
+            Event::Categories {
+                platform,
+                results,
+                generation,
+            } => {
+                assert_eq!(platform, Platform::Twitch);
+                assert!(results.is_empty());
+                assert_eq!(generation, 1);
+            }
+            other => panic!("expected the empty reply, got {other:?}"),
+        }
+
+        drop(command_tx);
+        handle.await.unwrap();
+    }
+
+    /// An empty field has nothing to search for regardless of connection
+    /// state, so racing a reconnect is not what is wrong here — it would be
+    /// noise, not a diagnostic, to warn about it the way a real query does.
+    /// The warning, when there is one, is always sent before the reply, so
+    /// the reply arriving first is itself the proof nothing was said.
+    #[tokio::test]
+    async fn searching_an_empty_category_before_connecting_stays_quiet() {
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        let handle = tokio::spawn(run(
+            Config::default(),
+            command_rx,
+            event_tx,
+            crate::quota::QuotaStore::new(0, None),
+        ));
+
+        command_tx
+            .send(Command::SearchCategories {
+                platform: Platform::Twitch,
+                query: String::new(),
+                generation: 1,
+            })
+            .await
+            .unwrap();
+
+        match event_rx.recv().await.expect("an empty reply should arrive") {
+            Event::Categories { results, .. } => assert!(results.is_empty()),
+            other => panic!("expected the empty reply with no warning first, got {other:?}"),
+        }
+
+        drop(command_tx);
+        handle.await.unwrap();
+    }
+
     /// A statistics poll is the one command that is *allowed* to say nothing
     /// when there is no engine: it runs on a timer, and a log line every
     /// fifteen seconds saying "still not connected" would bury everything
@@ -1156,6 +1263,8 @@ mod tests {
         // falls back to its built-in YouTube category list. That only works if
         // an unanswerable search still produces a reply — staying silent is what
         // used to leave the category field looking dead before the first login.
+        // A real typed query also explains itself first, the same as it does
+        // for Twitch (see the dedicated tests above).
         let (command_tx, command_rx) = mpsc::channel(4);
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
@@ -1174,6 +1283,15 @@ mod tests {
             })
             .await
             .unwrap();
+
+        match event_rx.recv().await.expect("a warning should arrive") {
+            Event::Log { level, message } => {
+                assert_eq!(level, LogLevel::Warning);
+                assert!(message.contains("YouTube"));
+                assert!(message.contains("gam"));
+            }
+            other => panic!("expected a warning explaining the empty reply, got {other:?}"),
+        }
 
         match event_rx.recv().await.expect("a reply should arrive") {
             Event::Categories {
