@@ -62,8 +62,6 @@ pub struct YouTubeBackend {
     preferred_stream_id: String,
     /// The broadcast created by `go_live`, remembered so stats can be polled.
     broadcast_id: Option<String>,
-    /// The channel id, resolved during `connect`.
-    channel_id: Option<String>,
     /// Where media uploads go. A different host from the rest of the API, and
     /// separately overridable so tests can point it at a local socket.
     upload_base: String,
@@ -263,7 +261,6 @@ impl YouTubeBackend {
             reuse_stream,
             preferred_stream_id,
             broadcast_id: None,
-            channel_id: None,
             subscriber_cache: None,
             category_cache: None,
             quota: QuotaBackoff::default(),
@@ -383,16 +380,50 @@ impl YouTubeBackend {
     /// page cap bounds quota spend and protects against a reply that keeps
     /// handing back a token.
     async fn list_streams(&self) -> Result<Vec<LiveStreamResource>> {
+        let base = &self.base;
+        let url_prefix =
+            format!("{base}/liveStreams?part=id,snippet,cdn,status&mine=true&maxResults=50");
+        let (streams, truncated) = self
+            .paginate(
+                &url_prefix,
+                crate::quota::cost::LIST_STREAMS,
+                "listing your YouTube stream keys",
+                "parsing your YouTube stream key list",
+            )
+            .await?;
+
+        // The cap is real and was silent: a channel with more than 500 stream
+        // objects had the rest simply disappear, with a pinned `stream_id`
+        // beyond the cap reported as not existing at all.
+        if truncated {
+            tracing::warn!("stopped listing streams at the page cap; more remain");
+        }
+
+        Ok(streams)
+    }
+
+    /// Fetch every page of a `mine=true` list endpoint, following
+    /// `nextPageToken` until the results run out or the page cap is hit.
+    ///
+    /// Returns the accumulated items and whether the cap cut the listing
+    /// short, so each caller can decide what that means for it.
+    async fn paginate<T: serde::de::DeserializeOwned>(
+        &self,
+        url_prefix: &str,
+        cost: u64,
+        action: &str,
+        parse_context: &str,
+    ) -> Result<(Vec<T>, bool)> {
         const MAX_PAGES: usize = 10;
 
         let mut out = Vec::new();
         let mut page_token: Option<String> = None;
 
         for _ in 0..MAX_PAGES {
-            let base = &self.base;
-            self.ledger.charge(crate::quota::cost::LIST_STREAMS);
-            let mut url =
-                format!("{base}/liveStreams?part=id,snippet,cdn,status&mine=true&maxResults=50");
+            // Charged per page, before the request: Google charges a failed
+            // one too.
+            self.ledger.charge(cost);
+            let mut url = url_prefix.to_string();
             if let Some(token) = &page_token {
                 url.push_str(&format!("&pageToken={}", urlencoding::encode(token)));
             }
@@ -401,23 +432,26 @@ impl YouTubeBackend {
                 .request(reqwest::Method::GET, &url)
                 .send()
                 .await
-                .context("listing your YouTube stream keys")?;
-            let response = check(response, "listing your YouTube stream keys").await?;
+                .with_context(|| action.to_string())?;
+            let response = check(response, action).await?;
 
-            let body: ListResponse<LiveStreamResource> = response
+            let body: ListResponse<T> = response
                 .json()
                 .await
-                .context("parsing your YouTube stream key list")?;
+                .with_context(|| parse_context.to_string())?;
 
             out.extend(body.items);
 
             match body.next_page_token {
                 Some(token) if !token.is_empty() => page_token = Some(token),
-                _ => break,
+                _ => {
+                    page_token = None;
+                    break;
+                }
             }
         }
 
-        Ok(out)
+        Ok((out, page_token.is_some()))
     }
 
     /// Create a new reusable RTMP stream.
@@ -514,6 +548,47 @@ impl YouTubeBackend {
             .json()
             .await
             .context("parsing the newly created YouTube broadcast")
+    }
+
+    /// Bind the broadcast to the given stream, falling back to a freshly
+    /// created one if that stream can never be bound to anything.
+    ///
+    /// If the reused stream can never be bound — the usual reason is that it
+    /// belongs to a single past broadcast and is not reusable — fall back to
+    /// a fresh one rather than failing the go-live outright. The user is
+    /// told, because a new key is something they must act on.
+    ///
+    /// A transient failure (timeout, rate limit, YouTube 5xx) is a different
+    /// thing entirely and is reported as-is: minting a new key there would
+    /// abandon the key the user pinned in their config and silently break
+    /// their OBS setup for a problem that fixes itself.
+    ///
+    /// Returns the stream that ended up bound, plus the note explaining which
+    /// branch was taken.
+    async fn bind_with_fallback(
+        &self,
+        broadcast_id: &str,
+        stream: LiveStreamResource,
+        note: String,
+    ) -> Result<(LiveStreamResource, String)> {
+        match self.bind(broadcast_id, &stream.id).await {
+            Ok(()) => Ok((stream, note)),
+            Err(err) if !is_unbindable_stream_error(&err) => Err(err.context(
+                "the broadcast was created but could not be joined to your existing \
+                 stream key. Your stream key was left untouched — try going live \
+                 again in a moment.",
+            )),
+            Err(err) => {
+                tracing::warn!(?err, "could not bind the reused stream; creating a new one");
+                let fresh = self.create_stream().await?;
+                self.bind(broadcast_id, &fresh.id).await?;
+                let note = "Your existing stream key could not be reused, so a new one was \
+                             created. Copy the stream key below into OBS (or Aitum) — it will \
+                             be reused from now on."
+                    .to_string();
+                Ok((fresh, note))
+            }
+        }
     }
 
     /// Join the broadcast to the stream, so the RTMP feed reaches the event.
@@ -636,55 +711,30 @@ impl YouTubeBackend {
     /// an unexpected reply that kept handing back a page token would otherwise
     /// spin here forever.
     async fn list_broadcasts(&mut self) -> Result<Vec<LiveBroadcastResource>> {
-        const MAX_PAGES: usize = 10;
-
-        let mut out = Vec::new();
-        let mut page_token: Option<String> = None;
-
-        for _ in 0..MAX_PAGES {
-            let base = &self.base;
-            // Charged per page, before the request: Google charges a failed
-            // one too, and the housekeeping job runs this twice.
-            self.ledger.charge(crate::quota::cost::LIST_BROADCASTS);
-            let mut url =
-                format!("{base}/liveBroadcasts?part=id,snippet,status&mine=true&maxResults=50");
-            if let Some(token) = &page_token {
-                url.push_str(&format!("&pageToken={}", urlencoding::encode(token)));
-            }
-
-            let response = self
-                .request(reqwest::Method::GET, &url)
-                .send()
-                .await
-                .context("listing your YouTube broadcasts")?;
-            let response = check(response, "listing your YouTube broadcasts").await?;
-
-            let body: ListResponse<LiveBroadcastResource> = response
-                .json()
-                .await
-                .context("parsing your YouTube broadcast list")?;
-
-            out.extend(body.items);
-
-            match body.next_page_token {
-                Some(token) if !token.is_empty() => page_token = Some(token),
-                _ => {
-                    page_token = None;
-                    break;
-                }
-            }
-        }
+        let base = &self.base;
+        let url_prefix =
+            format!("{base}/liveBroadcasts?part=id,snippet,status&mine=true&maxResults=50");
+        // Charged per page, before the request: Google charges a failed one
+        // too, and the housekeeping job runs this twice.
+        let (broadcasts, truncated) = self
+            .paginate(
+                &url_prefix,
+                crate::quota::cost::LIST_BROADCASTS,
+                "listing your YouTube broadcasts",
+                "parsing your YouTube broadcast list",
+            )
+            .await?;
 
         // The cap is real and was silent. A channel with more than 500
         // broadcasts is precisely the one with hundreds to clear, and it was
         // told "12 abandoned broadcasts" while the rest stayed invisible —
         // so the job looked finished and was not.
-        self.broadcasts_truncated = page_token.is_some();
+        self.broadcasts_truncated = truncated;
         if self.broadcasts_truncated {
             tracing::warn!("stopped listing broadcasts at the page cap; more remain");
         }
 
-        Ok(out)
+        Ok(broadcasts)
     }
 
     /// Delete one broadcast from the channel.
@@ -805,7 +855,6 @@ impl Backend for YouTubeBackend {
     fn connect(&mut self) -> BoxFuture<'_, Result<String>> {
         Box::pin(async move {
             let channel = self.my_channel().await?;
-            self.channel_id = Some(channel.id.clone());
             // Seed the subscriber cache from this fetch, so the first stats
             // poll does not need its own channel request. A missing count
             // (hidden in channel settings) is cached too, as "asked, none".
@@ -824,45 +873,16 @@ impl Backend for YouTubeBackend {
 
             // 1. Somewhere for OBS to push to.
             let (stream, stream_note) = self.obtain_stream().await?;
-            notes.push(stream_note);
 
             // 2. The event itself.
             let broadcast = self.create_broadcast(plan).await?;
 
-            // 3. Join them.
-            //
-            // If the reused stream can never be bound — the usual reason is that
-            // it belongs to a single past broadcast and is not reusable — fall
-            // back to a fresh one rather than failing the go-live outright. The
-            // user is told, because a new key is something they must act on.
-            //
-            // A transient failure (timeout, rate limit, YouTube 5xx) is a
-            // different thing entirely and is reported as-is: minting a new key
-            // there would abandon the key the user pinned in their config and
-            // silently break their OBS setup for a problem that fixes itself.
-            let stream = match self.bind(&broadcast.id, &stream.id).await {
-                Ok(()) => stream,
-                Err(err) if !is_unbindable_stream_error(&err) => {
-                    return Err(err.context(
-                        "the broadcast was created but could not be joined to your existing \
-                         stream key. Your stream key was left untouched — try going live \
-                         again in a moment.",
-                    ));
-                }
-                Err(err) => {
-                    tracing::warn!(?err, "could not bind the reused stream; creating a new one");
-                    notes.pop();
-                    let fresh = self.create_stream().await?;
-                    self.bind(&broadcast.id, &fresh.id).await?;
-                    notes.push(
-                        "Your existing stream key could not be reused, so a new one was \
-                         created. Copy the stream key below into OBS (or Aitum) — it will \
-                         be reused from now on."
-                            .to_string(),
-                    );
-                    fresh
-                }
-            };
+            // 3. Join them, falling back to a fresh stream if the reused one
+            // turns out not to be bindable.
+            let (stream, stream_note) = self
+                .bind_with_fallback(&broadcast.id, stream, stream_note)
+                .await?;
+            notes.push(stream_note);
 
             // 4. Tags, category and language, which step 2 could not set.
             //
@@ -1317,7 +1337,6 @@ struct ListResponse<T> {
 
 #[derive(Debug, Deserialize)]
 struct ChannelResource {
-    id: String,
     snippet: ChannelSnippet,
     #[serde(default)]
     statistics: Option<ChannelStatistics>,
