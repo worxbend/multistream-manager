@@ -82,7 +82,10 @@ msm
 
 With nothing configured yet, the interface opens on a screen headed **Set up API
 access**: one box for each platform's client id and client secret, and the
-redirect URL you are about to register printed above them.
+redirect URL you are about to register printed above them. The same form also
+has a redirect-port field, defaulted to `8017`; change it here (not by
+hand-editing `config.toml`) if something else on your machine is already using
+that port — the redirect URL shown above the fields updates as you type.
 
 Leave it open on one side of the screen. The next two steps are about getting
 those four values out of Twitch's and Google's developer consoles, and you will

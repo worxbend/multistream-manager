@@ -12,6 +12,12 @@ would break an existing setup is listed under **Changed** with what to do.
 
 ### Added
 
+- **The OAuth redirect port is now editable on the Setup screen** (`[general]
+  oauth_port`). Previously the only way to work around a port conflict during
+  first-time login was to hand-edit `config.toml`, which contradicted the
+  form's own promise that a fresh install never needs that. The form now
+  shows a live preview of the exact redirect URL as you type the port, and
+  validates it on save.
 - **A pre-flight check before going live.** The go-live key now shows a
   checklist instead of launching straight in: each platform's credentials and
   login, whether a token expires soon *with no refresh token behind it*,

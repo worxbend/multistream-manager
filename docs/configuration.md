@@ -204,7 +204,9 @@ http://localhost:<oauth_port>/callback
 so with the default it is `http://localhost:8017/callback`. If you change the
 port here you must edit the redirect URI in the Twitch developer console and in
 the Google Cloud console to match, character for character, or both logins will
-be rejected before they start.
+be rejected before they start. You can change this from the app's Setup screen
+(first run, or press `c` from the login screen) instead of editing this file by
+hand; editing it here directly still works too.
 
 The listener binds both the IPv4 and the IPv6 loopback address on this port,
 because `localhost` resolves to `127.0.0.1` on some machines and `::1` on

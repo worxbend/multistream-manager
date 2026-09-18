@@ -237,7 +237,13 @@ program that happens to use 8017.
    lsof -nP -iTCP:8017 -sTCP:LISTEN   # macOS
    ```
 
-3. **Move to another port.** This is a three-part change and all three parts
+3. **Change the port from inside msm.** Press `c` from the login screen to
+   return to the Setup form, edit the OAuth redirect port field (the redirect
+   URL preview above it updates as you type), and press Enter to save — `msm`
+   rewrites `config.toml` for you. You still need to update the redirect URI
+   in the Twitch and Google developer consoles to match, character for
+   character.
+4. **Move to another port by hand.** This is a three-part change and all three parts
    must agree, character for character:
 
    ```toml

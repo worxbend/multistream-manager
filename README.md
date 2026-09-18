@@ -258,8 +258,10 @@ msm               # that is the whole command — it walks you through the rest
 On a fresh install the interface opens on a **Set up API access** form: paste
 the client id and client secret each developer console gave you (secrets are
 shown as dots while you type, because this window is often on screen while you
-stream) and press <kbd>Enter</kbd>. It saves them to `config.toml` for you, which
-is the only file this program keeps.
+stream), and set the local OAuth redirect port if the default (`8017`) is
+already taken — the form shows the exact redirect URL to register as you type
+it. Press <kbd>Enter</kbd> and it saves everything to `config.toml` for you,
+which is the only file this program keeps.
 
 Next comes **Authorise your accounts** — tick Twitch, YouTube or both and press
 <kbd>Enter</kbd>. Your browser opens for each in turn; approve the access and

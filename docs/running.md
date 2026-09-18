@@ -90,7 +90,10 @@ password.
 
    This is where Twitch sends your browser back to after you approve the login,
    and `msm` listens on that port for the moment it takes to catch it. If you
-   change `oauth_port` in the config, change it here to match.
+   change `oauth_port` in the config, change it here to match. If you need a
+   different port, set it on the Setup screen (press `c` from the login screen
+   to get back there) instead of editing `config.toml` directly — just
+   remember to update the redirect URI in both developer consoles to match.
 5. **Category**: *Application Integration*.
 6. **Client Type**: *Confidential*.
 7. Click **Create**, then open the application you just made.
