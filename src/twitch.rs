@@ -304,6 +304,13 @@ impl Backend for TwitchBackend {
         })
     }
 
+    // Twitch's channel is permanently there — nothing about the title or
+    // category depends on a broadcast object existing, so this is exactly
+    // the same call `go_live` makes, on its own.
+    fn update_info<'a>(&'a mut self, plan: &'a StreamPlan) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move { self.update_channel(plan).await })
+    }
+
     fn fetch_stats(&mut self) -> BoxFuture<'_, Result<PlatformStats>> {
         Box::pin(async move {
             let id = self.broadcaster_id()?.to_string();

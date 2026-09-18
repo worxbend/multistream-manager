@@ -78,6 +78,23 @@ pub trait Backend: Send {
     /// Streaming" in OBS and the broadcast will go out.
     fn go_live<'a>(&'a mut self, plan: &'a StreamPlan) -> BoxFuture<'a, Result<GoLiveOutcome>>;
 
+    /// Push the plan's title, category, tags and language to the channel right
+    /// now, without creating whatever object accepting a feed needs.
+    ///
+    /// Lets an edit reach the platform the moment it is saved rather than only
+    /// once you go live — for setting up well ahead of time, or fixing a typo
+    /// mid-stream with no need to restart OBS. The default refuses: a platform
+    /// whose title and category exist only as part of a broadcast object it
+    /// has not created yet (YouTube) has nothing to update in isolation.
+    fn update_info<'a>(&'a mut self, _plan: &'a StreamPlan) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async {
+            anyhow::bail!(
+                "this platform's title and category are set when you go live, not before \
+                 (there is no broadcast yet to attach them to)"
+            )
+        })
+    }
+
     /// Finish the broadcast this session started.
     ///
     /// The other half of [`Backend::go_live`], and for a long time it was

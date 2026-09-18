@@ -231,6 +231,64 @@ impl Engine {
         results
     }
 
+    /// Push the plan's title, category, tags and language to every connected
+    /// platform's channel right now, without going live. See
+    /// [`crate::backend::Backend::update_info`] for which platforms support
+    /// this — a platform that does not comes back with its own `Err`
+    /// explaining why, rather than being silently skipped.
+    ///
+    /// Concurrent and structured the same way as `go_live`, for the same
+    /// reason: updating two platforms should not cost the sum of their two
+    /// round trips.
+    pub async fn update_info(&mut self, plan: &StreamPlan) -> Vec<(Platform, Result<(), String>)> {
+        self.refresh_tokens().await;
+
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut task_platforms = HashMap::new();
+
+        for (platform, mut backend) in self.backends.drain() {
+            let plan = plan.clone();
+            let handle = tasks.spawn(async move {
+                let outcome = backend
+                    .update_info(&plan)
+                    .await
+                    .map_err(|err| format!("{err:#}"));
+                (platform, backend, outcome)
+            });
+            task_platforms.insert(handle.id(), platform);
+        }
+
+        let mut results = Vec::new();
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok((platform, backend, outcome)) => {
+                    self.backends.insert(platform, backend);
+                    results.push((platform, outcome));
+                }
+                Err(err) => {
+                    let Some(platform) = task_platforms.get(&err.id()).copied() else {
+                        tracing::error!(?err, "a platform task failed with an unknown id");
+                        continue;
+                    };
+                    tracing::error!(
+                        platform = platform.slug(),
+                        ?err,
+                        "a platform task panicked while updating info"
+                    );
+                    results.push((
+                        platform,
+                        Err(format!(
+                            "internal error: the platform task stopped unexpectedly ({err})"
+                        )),
+                    ));
+                }
+            }
+        }
+
+        results.sort_by_key(|(platform, _)| *platform);
+        results
+    }
+
     /// Ask every connected platform to finish its broadcast.
     ///
     /// The counterpart of [`Engine::go_live`], and the same partial-success
@@ -516,6 +574,30 @@ mod tests {
                 .contains("unexpectedly"),
             "the panicking platform must carry an error snapshot: {youtube:?}"
         );
+    }
+
+    /// `Backend::update_info`'s default refuses, since a platform with no
+    /// override has no way to apply channel info in isolation. `update_info`
+    /// has to carry that refusal back per platform, in the stable sorted
+    /// order every other multi-platform result already uses, rather than
+    /// losing it or panicking.
+    #[tokio::test]
+    async fn update_info_reports_each_platform_that_does_not_support_it() {
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("engine-update-info");
+
+        let mut engine = engine_with(vec![(Platform::Twitch, false), (Platform::YouTube, false)]);
+
+        let results = engine.update_info(&StreamPlan::default()).await;
+
+        assert_eq!(results.len(), 2, "both platforms must be reported");
+        assert_eq!(results[0].0, Platform::Twitch);
+        assert_eq!(results[1].0, Platform::YouTube);
+        for (platform, outcome) in &results {
+            assert!(
+                outcome.is_err(),
+                "{platform:?}'s default update_info must refuse, not silently succeed"
+            );
+        }
     }
 
     /// Ending has to follow the same partial-success rule as going live: one

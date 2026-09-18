@@ -4469,6 +4469,9 @@ impl App {
         match key.code {
             // Submit. Ctrl+G for "go", and F5 as an alternative bound elsewhere.
             KeyCode::Char('g') => return self.submit(),
+            // Apply the title/category/tags to every selected platform right
+            // now, without going live.
+            KeyCode::Char('a') => return self.apply_info_now(),
             // Save the current form values back to config.toml as the
             // defaults. The commands are forwarded rather than dropped: the
             // worker has to be told, or it keeps building backends from the
@@ -4899,6 +4902,55 @@ impl App {
             plan: Box::new(plan),
             generation: self.go_generation,
         }]
+    }
+
+    /// Push the current form's title, category, tags and language to every
+    /// selected platform's channel right now, without going live.
+    ///
+    /// `submit` (Ctrl+G) is the only way any of this ever reached a platform
+    /// before this existed — so preparing a title and category ahead of time,
+    /// or fixing one mid-stream, meant either going live again for real or
+    /// editing the channel by hand outside the program. Twitch has no
+    /// separate "create a broadcast" step, so there is nothing wrong with
+    /// applying its channel info independently of going live; a platform
+    /// that cannot (YouTube, where the title and category belong to a
+    /// broadcast object that going live is what creates) says so per
+    /// platform rather than pretending to have done something.
+    fn apply_info_now(&mut self) -> Vec<Command> {
+        self.popup = None;
+
+        if self.busy {
+            self.notify(super::toast::Level::Warning, "Already working — hold on.");
+            return vec![];
+        }
+
+        let plan = self.plan();
+        let issues = plan.validate(&self.selected);
+        let blocking: Vec<_> = issues.iter().filter(|i| i.blocking).collect();
+
+        if !blocking.is_empty() {
+            if let Some(index) = Field::ORDER.iter().position(|f| *f == blocking[0].field) {
+                self.field_cursor = index;
+            }
+            for issue in &blocking {
+                self.push_log(
+                    LogLevel::Error,
+                    format!("{}: {}", issue.field.label(), issue.message),
+                );
+            }
+            let message = blocking[0].message.clone();
+            self.notify(super::toast::Level::Warning, message);
+            return vec![];
+        }
+
+        for issue in issues.iter().filter(|i| !i.blocking) {
+            self.push_log(
+                LogLevel::Warning,
+                format!("{}: {}", issue.field.label(), issue.message),
+            );
+        }
+
+        vec![Command::UpdateInfo(Box::new(plan))]
     }
 
     /// Write the current form values back to `config.toml` as the new defaults.
@@ -5662,6 +5714,38 @@ mod tests {
         let commands = app.submit();
         assert!(matches!(commands.as_slice(), [Command::GoLive { .. }]));
         assert!(app.busy);
+    }
+
+    /// Ctrl+A applies the current form to the platform without going live,
+    /// so it has to be gated by the same blocking validation Ctrl+G is — an
+    /// unresolved category cannot reach `update_channel` any more than it
+    /// could reach `go_live`.
+    #[test]
+    fn applying_info_without_a_twitch_category_is_blocked_the_same_way_submitting_is() {
+        let mut app = app_on_form();
+        app.selected = vec![Platform::Twitch];
+        app.inputs.get_mut(&Field::Title).unwrap().set("A title");
+        app.twitch_category = None;
+
+        assert!(app.apply_info_now().is_empty());
+        assert_eq!(app.field(), Field::TwitchCategory);
+    }
+
+    /// Unlike `submit`, applying now must not mark the interface busy — it
+    /// is a small side action, not the start of a broadcast that other keys
+    /// (`go_live_key` in particular) should refuse to double up on.
+    #[test]
+    fn a_valid_plan_is_applied_without_marking_the_ui_busy() {
+        let mut app = app_on_form();
+        app.selected = vec![Platform::YouTube];
+        app.inputs
+            .get_mut(&Field::Title)
+            .unwrap()
+            .set("A good title");
+
+        let commands = app.apply_info_now();
+        assert!(matches!(commands.as_slice(), [Command::UpdateInfo(_)]));
+        assert!(!app.busy);
     }
 
     /// Going live opens the checklist rather than launching straight in.

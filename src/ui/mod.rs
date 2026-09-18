@@ -151,6 +151,7 @@ fn describe(command: &worker::Command) -> &'static str {
         C::Connect(_) => "connecting",
         C::SearchCategories { .. } => "a category search",
         C::GoLive { .. } => "going live",
+        C::UpdateInfo(_) => "updating the channel info",
         C::EndLive => "ending the broadcast",
         C::PollStats => "a statistics refresh",
         C::Login(_) | C::LoginAdd(_) => "the login",

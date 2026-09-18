@@ -977,6 +977,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::raw("   "));
         spans.push(Span::styled(go_hint, go_style));
         spans.push(Span::raw("   "));
+        spans.extend(hint_pair("Ctrl+A", "apply now", &sk));
+        spans.push(Span::raw("   "));
         spans.extend(hint_pair("Ctrl+S", "save defaults", &sk));
         spans.push(Span::raw("   "));
         spans.extend(hint_pair("Esc", "back", &sk));

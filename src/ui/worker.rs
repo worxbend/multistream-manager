@@ -45,6 +45,9 @@ pub enum Command {
     /// cannot be reopened, and viewers watching it are watching a recording
     /// from the moment it completes.
     EndLive,
+    /// Push the plan's title/category/tags/language to every connected
+    /// platform right now, without going live — see `Engine::update_info`.
+    UpdateInfo(Box<StreamPlan>),
     /// Refresh the statistics.
     PollStats,
     /// Run the browser login for these platforms, one after another, and save
@@ -185,6 +188,7 @@ pub async fn run(
                 handle_go_live(&mut engine, &events, plan, generation).await
             }
             Command::EndLive => handle_end_live(&mut engine, &events).await,
+            Command::UpdateInfo(plan) => handle_update_info(&mut engine, &events, *plan).await,
             Command::PollStats => handle_poll_stats(&mut engine, &events).await,
             Command::ReloadConfig(fresh) => {
                 handle_reload_config(&mut config, &mut engine, fresh).await
@@ -390,6 +394,37 @@ async fn handle_go_live(
         results,
         generation,
     });
+}
+
+async fn handle_update_info(
+    engine: &mut Option<Engine>,
+    events: &mpsc::UnboundedSender<Event>,
+    plan: StreamPlan,
+) {
+    let Some(engine) = engine.as_mut() else {
+        let _ = events.send(Event::Log {
+            level: LogLevel::Error,
+            message: "Not connected to any platform yet.".into(),
+        });
+        return;
+    };
+
+    for (platform, outcome) in engine.update_info(&plan).await {
+        match outcome {
+            Ok(()) => {
+                let _ = events.send(Event::Log {
+                    level: LogLevel::Success,
+                    message: format!("{} updated.", platform.label()),
+                });
+            }
+            Err(err) => {
+                let _ = events.send(Event::Log {
+                    level: LogLevel::Warning,
+                    message: format!("{} could not be updated: {err}", platform.label()),
+                });
+            }
+        }
+    }
 }
 
 async fn handle_end_live(engine: &mut Option<Engine>, events: &mpsc::UnboundedSender<Event>) {
@@ -939,6 +974,37 @@ mod tests {
             Event::Log { level, message } => {
                 assert_eq!(level, LogLevel::Warning);
                 assert!(message.contains("at least one platform"));
+            }
+            other => panic!("expected a log line, got {other:?}"),
+        }
+
+        drop(command_tx);
+        handle.await.unwrap();
+    }
+
+    /// `UpdateInfo` needs an engine exactly the way `GoLive`/`EndLive` do —
+    /// there is nothing to push a title/category to without one.
+    #[tokio::test]
+    async fn updating_info_before_connecting_reports_an_error() {
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        let handle = tokio::spawn(run(
+            Config::default(),
+            command_rx,
+            event_tx,
+            crate::quota::QuotaStore::new(0, None),
+        ));
+
+        command_tx
+            .send(Command::UpdateInfo(Box::default()))
+            .await
+            .unwrap();
+
+        match event_rx.recv().await.expect("an error should arrive") {
+            Event::Log { level, message } => {
+                assert_eq!(level, LogLevel::Error);
+                assert!(message.contains("Not connected"));
             }
             other => panic!("expected a log line, got {other:?}"),
         }
