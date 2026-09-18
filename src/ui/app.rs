@@ -1192,7 +1192,14 @@ impl App {
             Action::ConfigAddAccount => return self.config_add_account_key(),
             Action::ConfigForgetAccount => return self.config_forget_account_key(),
             Action::ConfigRefreshChecks => return self.config_refresh_checks(),
-            Action::ChatReconnect => self.chat.reconnect_active(),
+            Action::ChatReconnect => {
+                if !self.chat.reconnect_active() {
+                    self.notify(
+                        super::toast::Level::Warning,
+                        "no chat is open, so there is nothing to reconnect",
+                    );
+                }
+            }
             Action::ChatNextChat => self.chat.cycle_chat(true),
             Action::ChatPreviousChat => self.chat.cycle_chat(false),
             Action::ChatNextAccount => self.chat.cycle_account(true, &self.config),
@@ -1248,6 +1255,11 @@ impl App {
                 if let Some(input) = self.obs.audio.get(self.obs_audio_cursor) {
                     let name = input.name.clone();
                     self.obs_command(ObsCommand::ToggleMute(name));
+                } else {
+                    self.notify(
+                        super::toast::Level::Warning,
+                        "OBS has no audio inputs yet — it isn't connected.",
+                    );
                 }
             }
             Action::ObsMuteAll => self.mute_all_obs_audio(),
@@ -1365,12 +1377,22 @@ impl App {
                 if let Some(scene) = self.obs.scenes.get(self.obs_scene_cursor) {
                     let name = scene.name.clone();
                     self.obs_command(ObsCommand::SetScene(name));
+                } else {
+                    self.notify(
+                        super::toast::Level::Warning,
+                        "OBS has no scenes yet — it isn't connected.",
+                    );
                 }
             }
             ObsFocus::Audio => {
                 if let Some(input) = self.obs.audio.get(self.obs_audio_cursor) {
                     let name = input.name.clone();
                     self.obs_command(ObsCommand::ToggleMute(name));
+                } else {
+                    self.notify(
+                        super::toast::Level::Warning,
+                        "OBS has no audio inputs yet — it isn't connected.",
+                    );
                 }
             }
         }
@@ -2317,6 +2339,10 @@ impl App {
     /// Mute every audio input, or unmute them all if none is live.
     fn mute_all_obs_audio(&mut self) {
         if self.obs.audio.is_empty() {
+            self.notify(
+                super::toast::Level::Warning,
+                "OBS has no audio inputs to mute — check it's connected.",
+            );
             return;
         }
         // If anything can still be heard, the intent is silence. Only when
@@ -2397,6 +2423,10 @@ impl App {
     /// Change the selected input's volume by `delta` of unity gain.
     fn nudge_obs_volume(&mut self, delta: f64) {
         let Some(input) = self.obs.audio.get(self.obs_audio_cursor) else {
+            self.notify(
+                super::toast::Level::Warning,
+                "OBS has no audio inputs yet — nothing to adjust.",
+            );
             return;
         };
         let Some(current) = input.volume_mul else {
@@ -3422,7 +3452,15 @@ impl App {
                     KeyCode::Esc => self.chat.mode = ChatFocus::Normal,
                     KeyCode::Enter => {
                         self.chat.mode = ChatFocus::Normal;
-                        self.chat.join_target(&self.config, &buffer);
+                        if !self.chat.join_target(&self.config, &buffer) {
+                            self.notify(
+                                super::toast::Level::Warning,
+                                format!(
+                                    "not logged in to {} yet — nothing to join",
+                                    self.chat.focus.label()
+                                ),
+                            );
+                        }
                     }
                     KeyCode::Backspace => {
                         buffer.pop();
@@ -3561,7 +3599,14 @@ impl App {
 
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
-                KeyCode::Char('r') => self.chat.reconnect_active(),
+                KeyCode::Char('r') => {
+                    if !self.chat.reconnect_active() {
+                        self.notify(
+                            super::toast::Level::Warning,
+                            "no chat is open, so there is nothing to reconnect",
+                        );
+                    }
+                }
                 // Same guard as entering the composer: with no chat open
                 // there is no draft an emoji could land in.
                 KeyCode::Char('e') if self.chat.active_key(self.chat.focus).is_some() => {
@@ -4785,7 +4830,16 @@ impl App {
     /// The checks read the token store, so this is done once here rather than
     /// while drawing.
     fn open_preflight(&mut self) {
-        let store = crate::auth::store::TokenStore::load().unwrap_or_default();
+        let store = match crate::auth::store::TokenStore::load() {
+            Ok(store) => store,
+            Err(err) => {
+                self.notify(
+                    super::toast::Level::Warning,
+                    format!("Couldn't read the saved logins: {err:#}"),
+                );
+                crate::auth::store::TokenStore::default()
+            }
+        };
         let plan = self.plan();
         let obs = self.config.obs.enabled.then_some(&self.obs);
         let tokens = |platform: Platform| store.get(platform).cloned();
@@ -7440,6 +7494,141 @@ mod tests {
         );
         // And from below, unity is still the ceiling.
         assert_eq!((0.98f64 + 0.05).clamp(0.0, 0.98f64.max(1.0)), 1.0);
+    }
+
+    /// Activating an empty scene list means OBS is not connected yet, not
+    /// "no scene selected" — the same gap `obs_command` already warns about.
+    #[test]
+    fn activating_an_empty_scene_list_says_obs_is_not_connected() {
+        let mut app = app();
+        app.obs_focus = ObsFocus::Scenes;
+        assert!(app.obs.scenes.is_empty());
+
+        app.obs_activate();
+
+        assert!(
+            app.toasts
+                .history()
+                .iter()
+                .any(|toast| toast.text.contains("isn't connected")),
+            "an empty scene list must say OBS is not connected, not stay silent"
+        );
+    }
+
+    /// Same gap, for the Audio pane.
+    #[test]
+    fn activating_an_empty_audio_list_says_obs_is_not_connected() {
+        let mut app = app();
+        app.obs_focus = ObsFocus::Audio;
+        assert!(app.obs.audio.is_empty());
+
+        app.obs_activate();
+
+        assert!(
+            app.toasts
+                .history()
+                .iter()
+                .any(|toast| toast.text.contains("isn't connected")),
+            "an empty audio list must say OBS is not connected, not stay silent"
+        );
+    }
+
+    /// `ObsToggleMute` is a second, separately-bound call site that hits the
+    /// same empty-audio-list precondition as `obs_activate`'s Audio arm.
+    #[test]
+    fn toggling_mute_with_no_audio_inputs_says_obs_is_not_connected() {
+        let mut app = app();
+        assert!(app.obs.audio.is_empty());
+
+        app.run_action(crate::keys::Action::ObsToggleMute);
+
+        assert!(
+            app.toasts
+                .history()
+                .iter()
+                .any(|toast| toast.text.contains("isn't connected")),
+            "toggling mute with no inputs must say OBS is not connected, not stay silent"
+        );
+    }
+
+    /// `ChatReconnect` with no chat open used to reach `reconnect_active`'s
+    /// own `notify_local` guard, which is a no-op here because there is no
+    /// active chat pane for it to write into — leaving the keypress with no
+    /// observable effect at all. The fix moved the notice to this call site,
+    /// where a toast can be seen with no chat open.
+    #[test]
+    fn reconnecting_with_no_chat_open_says_so_via_toast() {
+        let mut app = app();
+        assert!(app.chat.active_key(app.chat.focus).is_none());
+
+        app.run_action(crate::keys::Action::ChatReconnect);
+
+        assert!(
+            app.toasts
+                .history()
+                .iter()
+                .any(|toast| toast.text.contains("nothing to reconnect")),
+            "reconnecting with no chat open must say so, not stay silent"
+        );
+    }
+
+    /// `mute_all_obs_audio` used to just `return` on an empty list — the same
+    /// silent gap `cycle_obs` already warns about for its own empty lists.
+    #[test]
+    fn muting_all_with_no_audio_inputs_says_check_the_connection() {
+        let mut app = app();
+        assert!(app.obs.audio.is_empty());
+
+        app.mute_all_obs_audio();
+
+        assert!(
+            app.toasts
+                .history()
+                .iter()
+                .any(|toast| toast.text.contains("check it's connected")),
+            "muting all with no inputs must say to check the connection, not stay silent"
+        );
+    }
+
+    /// `nudge_obs_volume`'s first guard (no input at all) used to stay silent
+    /// while its second guard (volume not known yet) already warns.
+    #[test]
+    fn nudging_volume_with_no_audio_inputs_says_nothing_to_adjust() {
+        let mut app = app();
+        assert!(app.obs.audio.is_empty());
+
+        app.nudge_obs_volume(VOLUME_STEP);
+
+        assert!(
+            app.toasts
+                .history()
+                .iter()
+                .any(|toast| toast.text.contains("nothing to adjust")),
+            "nudging volume with no inputs must say so, not stay silent"
+        );
+    }
+
+    /// A corrupted `tokens.json` must not be rendered identically to "never
+    /// logged in" on the pre-flight checklist — the load error is real and
+    /// actionable, and swallowing it hides that a login might actually still
+    /// be there, just unreadable.
+    #[test]
+    fn a_corrupted_token_store_warns_instead_of_looking_like_no_logins() {
+        let scratch = crate::paths::test_support::ScratchConfigDir::new("preflight-corrupt-tokens");
+        std::fs::write(scratch.path().join("tokens.json"), "{ not json")
+            .expect("writing a corrupted token store");
+
+        let mut app = app_on_form();
+
+        app.open_preflight();
+
+        assert!(
+            app.toasts
+                .history()
+                .iter()
+                .any(|toast| toast.text.contains("Couldn't read the saved logins")),
+            "a corrupted token store must warn, not silently look like no logins"
+        );
     }
 
     /// One set of stream settings covers one kind of stream. Somebody who
