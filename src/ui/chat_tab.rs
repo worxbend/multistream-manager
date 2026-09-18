@@ -736,6 +736,9 @@ impl ChatTabState {
         };
         let context = (msg.id.clone(), msg.author.display_name.clone());
         if context.0.is_empty() {
+            // Notice/system rows and local echoes are freely selectable but
+            // have no real message id to thread a reply against.
+            self.notify_local("that row isn't a real chat message, so there's nothing to reply to");
             return false;
         }
         if let Some(chat) = self.active_chat_mut() {
@@ -751,7 +754,17 @@ impl ChatTabState {
     pub fn moderate(&mut self, action: ModAction) {
         if self.pending_mod != Some(action) {
             // Arming (or switching to a different action) never acts.
-            self.pending_mod = self.selected_message().map(|_| action);
+            if self.selected_message().is_none() {
+                // Any other key cancels whatever was armed — including this
+                // one, where there is nothing to arm instead. Leaving a
+                // stale `pending_mod` in place here would let it survive
+                // untouched and fire on the next matching keystroke, as if
+                // this press had never happened.
+                self.pending_mod = None;
+                self.notify_local("nothing is selected to act on");
+                return;
+            }
+            self.pending_mod = Some(action);
             return;
         }
         self.pending_mod = None;
@@ -1078,11 +1091,22 @@ impl ChatTabState {
 
     /// Ask the focused chat's task to reconnect (also the manual override for
     /// a quota pause or an ended chat).
-    pub fn reconnect_active(&mut self) {
+    ///
+    /// Returns `false` when there was no active chat to reconnect. Unlike
+    /// `mark_moment`, that case can't be reported with `notify_local` here:
+    /// `notify_local` writes into the focused chat's own message list, and
+    /// with no chat open there is no list to write into, so the call would
+    /// be silently swallowed. The caller surfaces the `false` as a toast
+    /// instead, which does not need a chat pane to be seen.
+    pub fn reconnect_active(&mut self) -> bool {
+        if self.active_chat_mut().is_none() {
+            return false;
+        }
         self.send_or_notify(
             ChatCommand::Reconnect,
             "the chat task is busy — press the key again to retry",
         );
+        true
     }
 
     /// Toggle the focused pane between messages and the activity view.
@@ -1198,6 +1222,9 @@ impl ChatTabState {
         };
         let channel_id = msg.author.id.clone();
         if channel_id.is_empty() {
+            // Same as reply_to_selected: notice/system rows and local
+            // echoes are selectable but have no real author to time out.
+            self.notify_local("that row isn't a real chat message, so it can't be timed out");
             return;
         }
         let command = ChatCommand::Ban {
@@ -1208,13 +1235,22 @@ impl ChatTabState {
     }
 
     /// Open a chat on the target typed into the join prompt.
-    pub fn join_target(&mut self, config: &Config, raw: &str) {
+    ///
+    /// Returns `false` when the focused platform has no logged-in account to
+    /// join with. Like `reconnect_active`, that case can't be reported with
+    /// `notify_local` here: with no selected account there is also no active
+    /// chat to fold a notice into, so the call would be silently swallowed.
+    /// The caller surfaces the `false` as a toast instead.
+    pub fn join_target(&mut self, config: &Config, raw: &str) -> bool {
         let raw = raw.trim().to_string();
         if raw.is_empty() {
-            return;
+            return true;
         }
         if let Some(account) = self.selected_account(self.focus).cloned() {
             self.open_chat(config, self.focus, &account, raw);
+            true
+        } else {
+            false
         }
     }
 }
@@ -2377,6 +2413,169 @@ mod tests {
         state.mark_moment();
         // Nothing to assert on the wire; the point is that it does not panic
         // and does not silently swallow the keypress.
+        assert!(state.open.is_empty());
+    }
+
+    /// Arming a moderation action with nothing selected used to be a bare
+    /// no-op, indistinguishable from the key not being registered at all.
+    #[tokio::test]
+    async fn arming_moderation_with_nothing_selected_says_so() {
+        let mut state = tab_state(1, 0);
+        let key = with_open_chat(&mut state, Notifier::new(false));
+        // No select_move has been called, so there is no cursor and nothing
+        // selected.
+
+        state.moderate(ModAction::Delete);
+
+        assert!(
+            state.pending_mod.is_none(),
+            "nothing armed with no selection"
+        );
+        let said = state.open[&key]
+            .state
+            .messages
+            .iter()
+            .any(|msg| msg.text.contains("nothing is selected to act on"));
+        assert!(said, "arming with no selection must say so");
+    }
+
+    /// A different action armed earlier must not survive a later press that
+    /// lands on "nothing selected" — that press is still "any other key",
+    /// which the struct's own doc comment says always cancels. Regression
+    /// test for a bug where `moderate()` only cleared a stale `pending_mod`
+    /// when a message *was* selected, letting an old arm (e.g. Ban) survive
+    /// untouched and fire on a single keystroke once something was selected
+    /// again.
+    #[tokio::test]
+    async fn switching_moderation_with_nothing_selected_clears_stale_arm() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+        let (tx, mut rx) = mpsc::channel(8);
+        state.open.get_mut(&key).unwrap().handle.commands = tx;
+
+        let mut m = local_notice("bad message");
+        m.id = "target".into();
+        m.author.id = "UCbad".into();
+        state.handle_event(key.clone(), ChatEvent::Message(Box::new(m)));
+        state.select_move(1);
+
+        state.moderate(ModAction::Ban);
+        assert_eq!(state.pending_mod, Some(ModAction::Ban), "armed");
+
+        // The selection is lost some other way than scrolling (which already
+        // clears `pending_mod` itself) — directly, to exercise `moderate()`'s
+        // own contract regardless of how the selection went away.
+        state.open.get_mut(&key).unwrap().state.cursor = None;
+
+        state.moderate(ModAction::Delete);
+        assert!(
+            state.pending_mod.is_none(),
+            "a press with nothing selected must cancel whatever was armed, not leave it standing"
+        );
+
+        // Selecting the message again and pressing 'b' must re-arm, not
+        // confirm on the spot.
+        state.select_move(1);
+        state.moderate(ModAction::Ban);
+        assert_eq!(
+            state.pending_mod,
+            Some(ModAction::Ban),
+            "must arm again, not fire immediately"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the stale arm must never let a ban fire on one keystroke"
+        );
+    }
+
+    /// Notice/system rows and local echoes are freely selectable via j/k but
+    /// carry no real message id — replying used to silently do nothing.
+    #[tokio::test]
+    async fn replying_to_a_row_with_no_message_id_says_so() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+
+        // local_notice's id is empty, same as a real notice/system row.
+        let notice = local_notice("a system notice");
+        state.handle_event(key.clone(), ChatEvent::Message(Box::new(notice)));
+        state.select_move(1);
+
+        assert!(!state.reply_to_selected());
+        let said = state.open[&key].state.messages.iter().any(|msg| {
+            msg.text
+                .contains("that row isn't a real chat message, so there's nothing to reply to")
+        });
+        assert!(said, "replying to an id-less row must say why");
+    }
+
+    /// Same id-less row, but for the timeout key.
+    #[tokio::test]
+    async fn timing_out_a_row_with_no_channel_id_says_so() {
+        let config = Config::default();
+        let mut state = tab_state(1, 0);
+        let account = state.selected_account(Platform::Twitch).unwrap().clone();
+        state.open_chat(&config, Platform::Twitch, &account, "chan".into());
+        let key = state.active_key(Platform::Twitch).unwrap().clone();
+        let (tx, mut rx) = mpsc::channel(4);
+        state.open.get_mut(&key).unwrap().handle.commands = tx;
+
+        let notice = local_notice("a system notice");
+        state.handle_event(key.clone(), ChatEvent::Message(Box::new(notice)));
+        state.select_move(1);
+
+        state.timeout_selected(parse_timeout("10m").unwrap());
+
+        assert!(
+            rx.try_recv().is_err(),
+            "an id-less row must never reach the wire as a ban"
+        );
+        let said = state.open[&key].state.messages.iter().any(|msg| {
+            msg.text
+                .contains("that row isn't a real chat message, so it can't be timed out")
+        });
+        assert!(said, "timing out an id-less row must say why");
+    }
+
+    /// Typing a join target while the focused platform has no logged-in
+    /// account used to do nothing at all, with zero feedback. There is
+    /// genuinely nowhere for a `notify_local` notice to appear in that
+    /// state — the pane has no active chat to fold it into, same as
+    /// `reconnect_active` — so, like that method, this one reports the
+    /// refusal through its return value instead, for the caller to surface
+    /// as a toast.
+    #[tokio::test]
+    async fn joining_with_no_logged_in_account_does_not_open_a_chat() {
+        let config = Config::default();
+        let mut state = tab_state(0, 0); // no accounts on either platform
+        state.focus = Platform::Twitch;
+
+        let joined = state.join_target(&config, "somechannel");
+
+        assert!(!joined, "nothing to join without an account");
+        assert!(state.open.is_empty(), "nothing to join without an account");
+    }
+
+    /// Reconnecting with no chat focused used to fall straight through to
+    /// `send_or_notify`, which itself silently no-ops with nothing focused
+    /// (per its own doc comment) — leaving the keypress with zero feedback.
+    /// There is no active chat to fold a `notify_local` notice into here, so
+    /// unlike the marker and join cases above, the caller (the app-level key
+    /// and action handlers) is the one that has to say so, via a toast; this
+    /// only checks the signal `reconnect_active` gives it to do that.
+    #[tokio::test]
+    async fn reconnecting_with_no_chat_open_does_not_panic() {
+        let mut state = tab_state(1, 0);
+        // No chat has been opened, so the focused pane has no active chat.
+
+        let reconnected = state.reconnect_active();
+
+        assert!(!reconnected, "nothing was open to reconnect");
         assert!(state.open.is_empty());
     }
 
