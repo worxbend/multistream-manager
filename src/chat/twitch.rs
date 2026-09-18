@@ -290,6 +290,48 @@ enum ParkOutcome {
     Shutdown,
 }
 
+/// Handle a command that works regardless of the IRC connection's state —
+/// moderation, raids, clips and markers are all Helix requests, not lines on
+/// the wire, so they still work while chat itself is down or reconnecting.
+/// Returns the command back unhandled when it is not one of those, so the
+/// three call sites (`park`, the reconnect wait, and the connected session)
+/// can each still deal with `Reconnect` and `Send` in their own way.
+fn dispatch_always_on(state: &TaskState, cmd: ChatCommand) -> Option<ChatCommand> {
+    match cmd {
+        ChatCommand::Delete { message_id } => {
+            state.start_moderation(ModerationAction::Delete { message_id });
+            None
+        }
+        ChatCommand::Ban {
+            channel_id,
+            timeout_secs,
+        } => {
+            state.start_moderation(ModerationAction::Ban {
+                user_id: channel_id,
+                seconds: timeout_secs,
+            });
+            None
+        }
+        ChatCommand::Raid { target } => {
+            state.start_moderation(ModerationAction::Raid { target });
+            None
+        }
+        ChatCommand::Unraid => {
+            state.start_moderation(ModerationAction::Unraid);
+            None
+        }
+        ChatCommand::Clip => {
+            state.start_clip();
+            None
+        }
+        ChatCommand::Marker { description } => {
+            state.start_marker(description);
+            None
+        }
+        other => Some(other),
+    }
+}
+
 /// Wait until the user asks for a reconnect (or the handle is dropped).
 /// Sends attempted while parked are declined with a notice that names the
 /// way out, so the composer can restore the draft.
@@ -298,28 +340,11 @@ async fn park(commands: &mut mpsc::Receiver<ChatCommand>, state: &TaskState) -> 
         match commands.recv().await {
             None => return ParkOutcome::Shutdown,
             Some(ChatCommand::Reconnect) => return ParkOutcome::Reconnect,
-            // Moderation is an HTTP request to Helix, not a line on the
-            // IRC connection, so it still works while chat itself is down —
-            // which is exactly when somebody may be trying to ban whoever
-            // caused the mess.
-            Some(ChatCommand::Delete { message_id }) => {
-                state.start_moderation(ModerationAction::Delete { message_id })
-            }
-            Some(ChatCommand::Ban {
-                channel_id,
-                timeout_secs,
-            }) => state.start_moderation(ModerationAction::Ban {
-                user_id: channel_id,
-                seconds: timeout_secs,
-            }),
-            Some(ChatCommand::Raid { target }) => {
-                state.start_moderation(ModerationAction::Raid { target })
-            }
-            Some(ChatCommand::Unraid) => state.start_moderation(ModerationAction::Unraid),
-            Some(ChatCommand::Clip) => state.start_clip(),
-            Some(ChatCommand::Marker { description }) => state.start_marker(description),
             Some(ChatCommand::Send { .. }) => {
                 state.emit_notice("not connected to Twitch chat; press ctrl+r to reconnect");
+            }
+            Some(cmd) => {
+                dispatch_always_on(state, cmd);
             }
         }
     }
@@ -396,25 +421,8 @@ async fn run(mut state: TaskState, mut commands: mpsc::Receiver<ChatCommand>) {
                                 "not connected to Twitch chat; reconnecting — try again shortly",
                             );
                         }
-                        Some(ChatCommand::Delete { message_id }) => {
-                            state.start_moderation(ModerationAction::Delete { message_id })
-                        }
-                        Some(ChatCommand::Ban {
-                            channel_id,
-                            timeout_secs,
-                        }) => state.start_moderation(ModerationAction::Ban {
-                            user_id: channel_id,
-                            seconds: timeout_secs,
-                        }),
-                        Some(ChatCommand::Raid { target }) => {
-                            state.start_moderation(ModerationAction::Raid { target })
-                        }
-                        Some(ChatCommand::Unraid) => {
-                            state.start_moderation(ModerationAction::Unraid)
-                        }
-                        Some(ChatCommand::Clip) => state.start_clip(),
-                        Some(ChatCommand::Marker { description }) => {
-                            state.start_marker(description)
+                        Some(cmd) => {
+                            dispatch_always_on(&state, cmd);
                         }
                     }
                 }
@@ -486,25 +494,8 @@ async fn run(mut state: TaskState, mut commands: mpsc::Receiver<ChatCommand>) {
                     // are Helix requests rather than lines on the wire —
                     // each one spawned as its own task so a slow ban cannot
                     // stall the chat that is still arriving.
-                    Some(ChatCommand::Delete { message_id }) => {
-                        state.start_moderation(ModerationAction::Delete { message_id })
-                    }
-                    Some(ChatCommand::Ban {
-                        channel_id,
-                        timeout_secs,
-                    }) => state.start_moderation(ModerationAction::Ban {
-                        user_id: channel_id,
-                        seconds: timeout_secs,
-                    }),
-                    Some(ChatCommand::Raid { target }) => {
-                        state.start_moderation(ModerationAction::Raid { target })
-                    }
-                    Some(ChatCommand::Unraid) => {
-                        state.start_moderation(ModerationAction::Unraid)
-                    }
-                    Some(ChatCommand::Clip) => state.start_clip(),
-                    Some(ChatCommand::Marker { description }) => {
-                        state.start_marker(description)
+                    Some(cmd) => {
+                        dispatch_always_on(&state, cmd);
                     }
                 },
                 msg = incoming.recv() => match msg {
@@ -792,12 +783,7 @@ impl ModerationAction {
 /// the chat pane the action was taken in, because that is where the person
 /// who pressed the key is looking.
 async fn run_moderation(call: HelixCall, action: ModerationAction) {
-    let notice = |text: String| {
-        let _ = call.events.send((
-            call.key.clone(),
-            ChatEvent::Message(Box::new(notice_row(String::new(), text, Some(Utc::now())))),
-        ));
-    };
+    let notice = |text: String| send_notice(&call.events, &call.key, text);
 
     let token = match (call.tokens)().await {
         Ok(token) => token,
@@ -808,7 +794,10 @@ async fn run_moderation(call: HelixCall, action: ModerationAction) {
     };
 
     // Raiding names the other channel by login, and Helix wants its numeric
-    // id, so that one call has a resolve step in front of it.
+    // id, so that one call has a resolve step in front of it. The id is kept
+    // for the raid request built below instead of resolving the same login a
+    // second time.
+    let mut raid_to_id = None;
     let action = match action {
         ModerationAction::Raid { target } => {
             let login = target.trim().trim_start_matches('#').to_ascii_lowercase();
@@ -817,7 +806,10 @@ async fn run_moderation(call: HelixCall, action: ModerationAction) {
                 return;
             }
             match resolve_user_id(&call, &token, &login).await {
-                Ok(Some(_id)) => ModerationAction::Raid { target: login },
+                Ok(Some(id)) => {
+                    raid_to_id = Some(id);
+                    ModerationAction::Raid { target: login }
+                }
                 Ok(None) => {
                     notice(format!("there is no Twitch channel called {login}"));
                     return;
@@ -857,20 +849,10 @@ async fn run_moderation(call: HelixCall, action: ModerationAction) {
                 Some(serde_json::json!({ "data": data })),
             )
         }
-        ModerationAction::Raid { target } => {
-            // Resolved a moment ago, and re-resolved here only because the id
-            // is what the request needs; the login is what the message says.
-            let to = match resolve_user_id(&call, &token, target).await {
-                Ok(Some(id)) => id,
-                Ok(None) => {
-                    notice(format!("there is no Twitch channel called {target}"));
-                    return;
-                }
-                Err(err) => {
-                    notice(err);
-                    return;
-                }
-            };
+        ModerationAction::Raid { .. } => {
+            // Resolved just above, before `action` was rebuilt — the id is
+            // what the request needs, the login is what `action.done()` says.
+            let to = raid_to_id.expect("raid action always resolves an id first");
             (
                 reqwest::Method::POST,
                 format!(
@@ -1002,12 +984,7 @@ async fn run_marker(
     key: ChatKey,
     description: String,
 ) {
-    let notice = |text: String| {
-        let _ = events.send((
-            key.clone(),
-            ChatEvent::Message(Box::new(notice_row(String::new(), text, Some(Utc::now())))),
-        ));
-    };
+    let notice = |text: String| send_notice(&events, &key, text);
     if account_user_id.is_empty() {
         notice(
             "a marker needs to know your user id; log in again under Config → Accounts \
@@ -1099,12 +1076,7 @@ async fn run_clip(
     events: EventSender,
     key: ChatKey,
 ) {
-    let notice = |text: String| {
-        let _ = events.send((
-            key.clone(),
-            ChatEvent::Message(Box::new(notice_row(String::new(), text, Some(Utc::now())))),
-        ));
-    };
+    let notice = |text: String| send_notice(&events, &key, text);
     if account_user_id.is_empty() {
         notice(
             "clipping needs to know your user id; log in again under Config → Accounts \
@@ -1434,6 +1406,16 @@ fn merge_badges(
 
 fn color_hex(color: Option<RGBColor>) -> Option<String> {
     color.map(|c| format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b))
+}
+
+/// Push one `[notice]` row into the chat pane identified by `key`. The three
+/// Helix-backed tasks (moderation, marker, clip) each report their outcome
+/// this way, into whichever chat pane the triggering command came from.
+fn send_notice(events: &EventSender, key: &ChatKey, text: String) {
+    let _ = events.send((
+        key.clone(),
+        ChatEvent::Message(Box::new(notice_row(String::new(), text, Some(Utc::now())))),
+    ));
 }
 
 /// A `[notice]` row spoken by the synthetic "notice" author — used both for

@@ -37,13 +37,13 @@ pub struct TwitchBackend {
     /// The follower and subscriber totals, with the time they were fetched.
     ///
     /// Both are re-read only every [`AUDIENCE_REFRESH`]; see that constant for
-    /// why. `None` inside the tuple means the platform declined to answer — a
+    /// why. `None` in either field means the platform declined to answer — a
     /// non-affiliate channel gets a 403 for subscriptions — and that is cached
     /// too, so polls stop re-asking a question already refused. A request that
     /// merely failed (timeout, 429, expired token) is never written here, so
     /// the next poll tries again instead of showing a blank row for the whole
     /// refresh window.
-    audience_cache: Option<(Instant, Option<u64>, Option<u64>)>,
+    audience_cache: Option<Audience>,
     /// Recent category searches, keyed on the lowercased query.
     ///
     /// The YouTube backend has always cached its category list; this side had
@@ -331,8 +331,8 @@ impl Backend for TwitchBackend {
             // Follower and subscriber totals are re-read only occasionally, so
             // most polls make one request rather than three.
             let cached = match &self.audience_cache {
-                Some((at, followers, subs)) if at.elapsed() < AUDIENCE_REFRESH => {
-                    Some((*followers, *subs))
+                Some(audience) if audience.fetched_at.elapsed() < AUDIENCE_REFRESH => {
+                    Some((audience.followers, audience.subs))
                 }
                 _ => None,
             };
@@ -342,15 +342,13 @@ impl Backend for TwitchBackend {
                 None => {
                     let (body, followers, subs) =
                         tokio::join!(live, self.follower_count(), self.subscriber_count());
-                    let previous = self
-                        .audience_cache
-                        .as_ref()
-                        .map(|(_, followers, subs)| (*followers, *subs));
-                    let (followers, subs, settled) = resolve_audience(previous, followers, subs);
+                    let previous = self.audience_cache.as_ref();
+                    let (audience, settled) = resolve_audience(previous, followers, subs);
+                    let counts = (audience.followers, audience.subs);
                     if settled {
-                        self.audience_cache = Some((Instant::now(), followers, subs));
+                        self.audience_cache = Some(audience);
                     }
-                    (body, (followers, subs))
+                    (body, counts)
                 }
             };
             let body = body?;
@@ -445,18 +443,30 @@ async fn probe(sent: reqwest::Result<reqwest::Response>) -> AudienceProbe {
     }
 }
 
+/// The follower and subscriber totals last fetched from Helix, with when.
+///
+/// A named struct rather than a `(Instant, Option<u64>, Option<u64>)` tuple,
+/// so the two counts — both the same type — can never be silently swapped by
+/// position.
+struct Audience {
+    fetched_at: Instant,
+    followers: Option<u64>,
+    subs: Option<u64>,
+}
+
 /// Work out what to display and whether the result may be cached.
 ///
-/// `previous` is whatever the cache already held (the values only — its age no
-/// longer matters, since we are past the refresh window). The returned flag is
-/// true only when both lookups produced a settled answer; if either was merely
+/// `previous` is whatever the cache already held. The returned flag is true
+/// only when both lookups produced a settled answer; if either was merely
 /// unavailable the caller must leave the cache alone so the next poll retries
-/// instead of showing a blank row for the whole refresh window.
+/// instead of showing a blank row for the whole refresh window — the returned
+/// `Audience` still carries display values either way, falling back to
+/// `previous`'s counts when a lookup was merely unavailable.
 fn resolve_audience(
-    previous: Option<(Option<u64>, Option<u64>)>,
+    previous: Option<&Audience>,
     followers: AudienceProbe,
     subs: AudienceProbe,
-) -> (Option<u64>, Option<u64>, bool) {
+) -> (Audience, bool) {
     fn value(probe: AudienceProbe, previous: Option<u64>) -> Option<u64> {
         match probe {
             AudienceProbe::Count(n) => Some(n),
@@ -469,11 +479,12 @@ fn resolve_audience(
 
     let settled = !matches!(followers, AudienceProbe::Unavailable)
         && !matches!(subs, AudienceProbe::Unavailable);
-    (
-        value(followers, previous.and_then(|(f, _)| f)),
-        value(subs, previous.and_then(|(_, s)| s)),
-        settled,
-    )
+    let audience = Audience {
+        fetched_at: Instant::now(),
+        followers: value(followers, previous.and_then(|a| a.followers)),
+        subs: value(subs, previous.and_then(|a| a.subs)),
+    };
+    (audience, settled)
 }
 
 /// Turn a non-2xx response into an error carrying Twitch's own explanation.
@@ -848,19 +859,32 @@ mod tests {
         );
     }
 
+    fn cached_audience(followers: Option<u64>, subs: Option<u64>) -> Audience {
+        Audience {
+            fetched_at: Instant::now(),
+            followers,
+            subs,
+        }
+    }
+
     /// Only a deliberate refusal deserves to be remembered. A timeout, a 429 or
     /// an expired token used to be cached as "no followers, no subscribers" for
     /// the entire refresh window, so one unlucky request blanked both rows for
     /// minutes even though the very next call would have worked.
     #[test]
     fn a_transient_lookup_failure_is_not_cached() {
-        let (followers, subs, settled) = resolve_audience(
-            Some((Some(500), Some(20))),
+        let previous = cached_audience(Some(500), Some(20));
+        let (audience, settled) = resolve_audience(
+            Some(&previous),
             AudienceProbe::Unavailable,
             AudienceProbe::Count(21),
         );
-        assert_eq!(followers, Some(500), "the last known total must survive");
-        assert_eq!(subs, Some(21));
+        assert_eq!(
+            audience.followers,
+            Some(500),
+            "the last known total must survive"
+        );
+        assert_eq!(audience.subs, Some(21));
         assert!(!settled, "an unavailable lookup must not refresh the cache");
     }
 
@@ -868,9 +892,9 @@ mod tests {
     /// the failure still must not be written down as an answer.
     #[test]
     fn a_transient_failure_with_no_previous_value_leaves_the_cache_empty() {
-        let (followers, subs, settled) =
+        let (audience, settled) =
             resolve_audience(None, AudienceProbe::Unavailable, AudienceProbe::Unavailable);
-        assert_eq!((followers, subs), (None, None));
+        assert_eq!((audience.followers, audience.subs), (None, None));
         assert!(!settled);
     }
 
@@ -878,14 +902,15 @@ mod tests {
     /// "no" for subscriptions, and asking again in 15 seconds cannot change it.
     #[test]
     fn a_deliberate_refusal_is_cached_as_no_answer() {
-        let (followers, subs, settled) = resolve_audience(
-            Some((Some(500), Some(20))),
+        let previous = cached_audience(Some(500), Some(20));
+        let (audience, settled) = resolve_audience(
+            Some(&previous),
             AudienceProbe::Count(501),
             AudienceProbe::Refused,
         );
-        assert_eq!(followers, Some(501));
+        assert_eq!(audience.followers, Some(501));
         assert_eq!(
-            subs, None,
+            audience.subs, None,
             "a refusal must clear the stale subscriber total"
         );
         assert!(settled);
