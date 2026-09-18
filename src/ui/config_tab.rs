@@ -18,10 +18,13 @@
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use tui_checkbox::symbols::{CHECKED, UNCHECKED};
+use tui_widget_list::{ListBuilder, ListState as WidgetListState, ListView};
 
 use super::app::App;
 use crate::layout::{Direction, Layout as PaneLayout, Panel};
 use crate::theme;
+use crate::ui::style_kit;
 
 /// Which part of the configuration is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,11 +284,21 @@ impl ConfigTab {
             Section::Keys => self.matching_bindings(app).len(),
             Section::Obs => 0,
             // Every account the store holds, not one row per platform: the
-            // extra chat accounts were invisible and unremovable.
-            Section::Accounts => app
-                .all_accounts()
-                .len()
-                .max(crate::model::Platform::ALL.len()),
+            // extra chat accounts were invisible and unremovable. This must
+            // track `account_rows` exactly — that's what actually renders,
+            // via `tui_widget_list`, and an out-of-range cursor there panics
+            // rather than just missing the highlight the way the old
+            // Paragraph-based rendering did. `account_rows` only pads up to
+            // one row per platform when the store is empty; once any account
+            // exists, it draws exactly one row per account.
+            Section::Accounts => {
+                let count = app.all_accounts().len();
+                if count == 0 {
+                    crate::model::Platform::ALL.len()
+                } else {
+                    count
+                }
+            }
             // The three jobs, plus a row per stream id the last listing
             // found, so one can be pinned without a text editor.
             Section::Maintenance => MAINTENANCE_ROWS + app.youtube_streams.len(),
@@ -480,9 +493,11 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
                     },
                 ),
             ]);
-            if selected && config.focus == Focus::Sections {
-                line = line.style(Style::new().bg(sk.selection));
-            }
+            line = line.style(selected_row_style(
+                Style::default(),
+                selected && config.focus == Focus::Sections,
+                &sk,
+            ));
             line
         })
         .collect();
@@ -551,9 +566,7 @@ fn draw_layout_section(frame: &mut Frame, area: Rect, config: &ConfigTab) {
                 Span::styled(panel.title().to_string(), Style::new().fg(sk.foreground)),
                 Span::styled(format!("   ({})", panel.name()), Style::new().fg(sk.muted)),
             ]);
-            if selected {
-                line = line.style(Style::new().bg(sk.selection));
-            }
+            line = line.style(selected_row_style(Style::default(), selected, &sk));
             line
         })
         .collect();
@@ -614,35 +627,101 @@ fn draw_preview(frame: &mut Frame, area: Rect, layout: &PaneLayout, cursor: usiz
     }
 }
 
+/// The background a row is drawn with: `base` — usually nothing, or a zebra
+/// stripe from [`style_kit::zebra_style`] — unless the row is selected, in
+/// which case the selection colour always wins.
+///
+/// About ten sections below each used to repeat their own
+/// `if selected { line = line.style(Style::new().bg(sk.selection)) }`, so
+/// this factors that idiom out once. `base` is patched over rather than
+/// discarded when unselected, and the selection is patched over `base` when
+/// selected, matching [`style_kit::zebra_style`]'s own promise that a stripe
+/// never gets to compete with the row that is actually selected.
+fn selected_row_style(base: Style, selected: bool, sk: &theme::Skin) -> Style {
+    if selected {
+        base.patch(Style::new().bg(sk.selection))
+    } else {
+        base
+    }
+}
+
+/// A settings row's value: either read-only text (a name, a count) or a
+/// genuine on/off switch.
+///
+/// Kept apart rather than pre-rendered into a `String` the way this table
+/// used to be, because a switch and a piece of text are drawn differently now
+/// — a switch gets `tui-checkbox`'s own glyph, and only the drawing code
+/// should have to know which rows those are.
+enum SettingValue {
+    Text(String),
+    Bool(bool),
+}
+
+impl SettingValue {
+    /// Render as a value column: a checkbox glyph for a switch, plain text
+    /// otherwise. `sk` decides both colours, so a switch reads green when it
+    /// is genuinely on and dim otherwise — the glyph carries the state by
+    /// shape as well, so this still reads with colour turned off.
+    fn as_span(&self, sk: &theme::Skin) -> Span<'static> {
+        match self {
+            SettingValue::Bool(value) => {
+                checkbox_span(*value, if *value { sk.success } else { sk.muted })
+            }
+            SettingValue::Text(text) => Span::styled(text.clone(), Style::new().fg(sk.accent)),
+        }
+    }
+}
+
+/// A boolean switch's value, drawn with `tui-checkbox`'s own checked/
+/// unchecked glyph rather than the word "on"/"off".
+///
+/// Reaches for the crate's own [`CHECKED`]/[`UNCHECKED`] constants rather
+/// than hand-drawing a look-alike box, and the two differ in shape as well as
+/// colour, so the state still reads with colour turned off. Display-only:
+/// this is a `Span`, not the crate's interactive `Checkbox` widget, because
+/// `Enter`/`config_activate` remains the only way to flip any of these rows
+/// and nothing here should look independently focusable.
+fn checkbox_span(value: bool, colour: Color) -> Span<'static> {
+    Span::styled(
+        if value { CHECKED } else { UNCHECKED },
+        Style::new().fg(colour),
+    )
+}
+
 fn draw_appearance(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab) {
     let sk = theme::skin();
     let appearance = &app.config.appearance;
-    let settings: [(&str, String); APPEARANCE_ROWS] = [
-        ("Theme", appearance.theme.clone()),
-        ("Animations", appearance.animations.clone()),
-        ("Splash screen", on_off(appearance.splash)),
-        ("Mouse", on_off(appearance.mouse)),
-        ("Telemetry", on_off(appearance.telemetry)),
+    let settings: [(&str, SettingValue); APPEARANCE_ROWS] = [
+        ("Theme", SettingValue::Text(appearance.theme.clone())),
+        (
+            "Animations",
+            SettingValue::Text(appearance.animations.clone()),
+        ),
+        ("Splash screen", SettingValue::Bool(appearance.splash)),
+        ("Mouse", SettingValue::Bool(appearance.mouse)),
+        ("Telemetry", SettingValue::Bool(appearance.telemetry)),
         // Named for what it is, because the Notifications section next door
         // is about the *desktop's* pop-ups and confusing the two would send
         // somebody to the wrong switch.
         (
             "Routine pop-ups (problems always show)",
-            on_off(appearance.toasts),
+            SettingValue::Bool(appearance.toasts),
         ),
         (
             "Terminal background",
-            on_off(appearance.terminal_background),
+            SettingValue::Bool(appearance.terminal_background),
         ),
         (
             "Pop-up seconds",
-            format!("{} (enter cycles)", appearance.toast_seconds),
+            SettingValue::Text(format!("{} (enter cycles)", appearance.toast_seconds)),
         ),
         (
             "Streamer mode",
-            crate::config::StreamerMode::parse(&appearance.streamer_mode)
-                .name()
-                .to_string(),
+            SettingValue::Text(
+                crate::config::StreamerMode::parse(&appearance.streamer_mode)
+                    .name()
+                    .to_string(),
+            ),
         ),
     ];
 
@@ -651,17 +730,20 @@ fn draw_appearance(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab)
         .enumerate()
         .map(|(index, (name, value))| {
             let selected = index == config.cursor && config.focus == Focus::Contents;
+            let value_span = value.as_span(&sk);
             let mut line = Line::from(vec![
                 Span::styled(
                     if selected { "▸ " } else { "  " },
                     Style::new().fg(sk.accent),
                 ),
                 Span::styled(format!("{name:<22}"), Style::new().fg(sk.foreground)),
-                Span::styled(value.clone(), Style::new().fg(sk.accent)),
+                value_span,
             ]);
-            if selected {
-                line = line.style(Style::new().bg(sk.selection));
-            }
+            line = line.style(selected_row_style(
+                style_kit::zebra_style(index, &sk),
+                selected,
+                &sk,
+            ));
             line
         })
         .chain(std::iter::once(Line::from("")))
@@ -683,11 +765,14 @@ fn draw_appearance(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab)
 fn draw_notifications(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab) {
     let sk = theme::skin();
     let settings = &app.config.notifications;
-    let mut rows: Vec<(&str, String)> = NOTIFICATION_TABLE
+    let mut rows: Vec<(&str, SettingValue)> = NOTIFICATION_TABLE
         .iter()
-        .map(|row| (row.label, on_off((row.get)(settings))))
+        .map(|row| (row.label, SettingValue::Bool((row.get)(settings))))
         .collect();
-    rows.push((TEST_NOTIFICATION_LABEL, "press enter".into()));
+    rows.push((
+        TEST_NOTIFICATION_LABEL,
+        SettingValue::Text("press enter".into()),
+    ));
 
     let mut lines: Vec<Line> = rows
         .iter()
@@ -700,18 +785,39 @@ fn draw_notifications(frame: &mut Frame, area: Rect, app: &App, config: &ConfigT
             let dimmed = (index > 0 && !settings.enabled)
                 || (index > twitch_events_row() && !settings.twitch_events);
             let name_colour = if dimmed { sk.muted } else { sk.foreground };
-            let value_colour = if dimmed { sk.muted } else { sk.accent };
+            // A dimmed row stays dim regardless of its own value — it does
+            // not matter right now — but a relevant switch now also reflects
+            // *its own* state rather than always reading accent-coloured
+            // whichever way it is set.
+            let value_span = match value {
+                SettingValue::Bool(v) => {
+                    let colour = if dimmed {
+                        sk.muted
+                    } else if *v {
+                        sk.success
+                    } else {
+                        sk.muted
+                    };
+                    checkbox_span(*v, colour)
+                }
+                SettingValue::Text(text) => {
+                    let colour = if dimmed { sk.muted } else { sk.accent };
+                    Span::styled(text.clone(), Style::new().fg(colour))
+                }
+            };
             let mut line = Line::from(vec![
                 Span::styled(
                     if selected { "▸ " } else { "  " },
                     Style::new().fg(sk.accent),
                 ),
                 Span::styled(format!("{name:<26}"), Style::new().fg(name_colour)),
-                Span::styled(value.clone(), Style::new().fg(value_colour)),
+                value_span,
             ]);
-            if selected {
-                line = line.style(Style::new().bg(sk.selection));
-            }
+            line = line.style(selected_row_style(
+                style_kit::zebra_style(index, &sk),
+                selected,
+                &sk,
+            ));
             line
         })
         .collect();
@@ -765,7 +871,14 @@ fn draw_chat(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab) {
                 format!("{:<26}", "Write a chat log to disk"),
                 Style::new().fg(sk.foreground),
             ),
-            Span::styled(on_off(chat.chat_logging), Style::new().fg(sk.accent)),
+            checkbox_span(
+                chat.chat_logging,
+                if chat.chat_logging {
+                    sk.success
+                } else {
+                    sk.muted
+                },
+            ),
         ]),
         Line::from(""),
     ];
@@ -906,9 +1019,7 @@ fn draw_keys(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab) {
                     Style::new().fg(sk.foreground),
                 ),
             ]);
-            if selected {
-                line = line.style(Style::new().bg(sk.selection));
-            }
+            line = line.style(selected_row_style(Style::default(), selected, &sk));
             line
         })
         .collect();
@@ -997,43 +1108,42 @@ fn draw_obs(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
-fn draw_accounts(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab) {
+/// Build the account rows once, up front, rather than inside the list's own
+/// per-row closure.
+///
+/// `tui_widget_list::ListBuilder` calls its closure again for every row that
+/// scrolls into view, on every frame — re-deriving login/expiry state from
+/// the token store that often would be the same repeated-disk-read hazard
+/// [`ConfigTab::refresh_diagnostics`]'s own doc comment exists to warn about,
+/// just paid on every keystroke instead of on a poll. Reading the store once
+/// per frame, here, and handing the closure a plain `Vec` to index into,
+/// keeps that cost where it already was.
+///
+/// Falls back to one placeholder row per platform when the store is empty:
+/// the section used to show exactly one row per platform, and an account
+/// added by mistake was invisible and its refresh token stayed valid
+/// indefinitely, which is why [`App::all_accounts`] lists every account the
+/// store holds rather than one per platform once any exist.
+fn account_rows(app: &App) -> Vec<Line<'static>> {
     let sk = theme::skin();
     let accounts = app.all_accounts();
-
-    // Every account the store holds. The section listed one row per platform
-    // while the store can hold any number of extra chat accounts, so an
-    // account added by mistake was invisible and its refresh token stayed
-    // valid indefinitely.
-    let mut lines: Vec<Line> = if accounts.is_empty() {
+    if accounts.is_empty() {
         crate::model::Platform::ALL
             .iter()
-            .enumerate()
-            .map(|(index, platform)| {
-                let selected = index == config.cursor && config.focus == Focus::Contents;
-                let mut line = Line::from(vec![
-                    Span::styled(
-                        if selected { "▸ " } else { "  " },
-                        Style::new().fg(sk.accent),
-                    ),
+            .map(|platform| {
+                Line::from(vec![
                     Span::styled(
                         format!("{:<10}", platform.label()),
                         Style::new().fg(sk.foreground),
                     ),
                     Span::styled("not logged in", Style::new().fg(sk.muted)),
-                ]);
-                if selected {
-                    line = line.style(Style::new().bg(sk.selection));
-                }
-                line
+                ])
             })
             .collect()
     } else {
         accounts
             .iter()
-            .enumerate()
-            .map(|(index, (key, platform, label))| {
-                let selected = index == config.cursor && config.focus == Focus::Contents;
+            .map(|(key, platform, label)| {
                 let primary = key == platform.slug();
                 let armed = primary && app.logout_armed == Some(*platform);
 
@@ -1052,11 +1162,7 @@ fn draw_accounts(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab) {
                     None => "logged in".to_string(),
                 };
 
-                let mut line = Line::from(vec![
-                    Span::styled(
-                        if selected { "▸ " } else { "  " },
-                        Style::new().fg(sk.accent),
-                    ),
+                Line::from(vec![
                     Span::styled(
                         format!("{:<10}", platform.label()),
                         Style::new().fg(sk.foreground),
@@ -1070,21 +1176,51 @@ fn draw_accounts(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab) {
                     } else {
                         Span::styled(detail, Style::new().fg(sk.muted))
                     },
-                ]);
-                if selected {
-                    line = line.style(Style::new().bg(sk.selection));
-                }
-                line
+                ])
             })
             .collect()
-    };
+    }
+}
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "enter log in or out · a add another chat account",
-        Style::new().fg(sk.muted),
-    )));
-    frame.render_widget(Paragraph::new(lines), area);
+fn draw_accounts(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab) {
+    let sk = theme::skin();
+    let rows = account_rows(app);
+    let row_count = rows.len();
+
+    let sections = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(area);
+
+    // `Focus::Sections` means the keyboard is on the left-hand list of
+    // sections, not this one, so nothing here counts as selected until the
+    // content pane actually has focus — same rule every other section in
+    // this tab follows.
+    let selected_index = (config.focus == Focus::Contents).then_some(config.cursor);
+    let builder = ListBuilder::new(move |context| {
+        let mut spans = vec![Span::styled(
+            if context.is_selected { "▸ " } else { "  " },
+            Style::new().fg(sk.accent),
+        )];
+        spans.extend(rows[context.index].spans.iter().cloned());
+        let line = Line::from(spans).style(selected_row_style(
+            Style::default(),
+            context.is_selected,
+            &sk,
+        ));
+        (line, 1)
+    });
+    let list = ListView::new(builder, row_count);
+    let mut state = WidgetListState::new_with_index(selected_index);
+    frame.render_stateful_widget(list, sections[0], &mut state);
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "enter log in or out · a add another chat account",
+                Style::new().fg(sk.muted),
+            )),
+        ]),
+        sections[1],
+    );
 }
 
 fn draw_maintenance(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab) {
@@ -1118,9 +1254,11 @@ fn draw_maintenance(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab
                 },
             ),
         ]);
-        if selected {
-            line = line.style(Style::new().bg(sk.selection));
-        }
+        line = line.style(selected_row_style(
+            style_kit::zebra_style(index, &sk),
+            selected,
+            &sk,
+        ));
         lines.push(line);
         if selected {
             lines.push(Line::from(Span::styled(
@@ -1155,9 +1293,11 @@ fn draw_maintenance(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab
                 Span::styled(format!("{title}  "), Style::new().fg(sk.foreground)),
                 Span::styled(id.clone(), Style::new().fg(sk.muted)),
             ]);
-            if selected {
-                line = line.style(Style::new().bg(sk.selection));
-            }
+            line = line.style(selected_row_style(
+                style_kit::zebra_style(index, &sk),
+                selected,
+                &sk,
+            ));
             lines.push(line);
         }
     }
@@ -1176,21 +1316,29 @@ fn draw_diagnostics(frame: &mut Frame, area: Rect, app: &App) {
         return;
     };
     let mut lines = Vec::new();
-    for check in &config.diagnostics.checks {
-        let (marker, colour) = match check.status {
-            crate::diagnostics::Status::Ok => ("[ ok ]", sk.success),
-            crate::diagnostics::Status::Warning => ("[warn]", sk.warning),
-            crate::diagnostics::Status::Failed => ("[FAIL]", sk.error),
+    for (index, check) in config.diagnostics.checks.iter().enumerate() {
+        let (label, colour) = match check.status {
+            crate::diagnostics::Status::Ok => ("OK", sk.success),
+            crate::diagnostics::Status::Warning => ("WARN", sk.warning),
+            crate::diagnostics::Status::Failed => ("FAIL", sk.error),
         };
-        lines.push(Line::from(vec![
-            Span::styled(format!("{marker} "), Style::new().fg(colour)),
-            Span::styled(check.summary.clone(), Style::new().fg(sk.foreground)),
-        ]));
+        // A check and its advice line read as one row, so they stripe
+        // together rather than the advice line breaking the alternation.
+        let stripe = style_kit::zebra_style(index, &sk);
+        let mut marker = style_kit::badge(label, colour, &sk);
+        marker.push(Span::styled(
+            format!(" {}", check.summary),
+            Style::new().fg(sk.foreground),
+        ));
+        lines.push(Line::from(marker).style(stripe));
         if !check.advice.is_empty() {
-            lines.push(Line::from(Span::styled(
-                format!("       {}", check.advice),
-                Style::new().fg(sk.muted),
-            )));
+            lines.push(
+                Line::from(Span::styled(
+                    format!("  {}", check.advice),
+                    Style::new().fg(sk.muted),
+                ))
+                .style(stripe),
+            );
         }
     }
 
@@ -1265,9 +1413,7 @@ fn draw_paths(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled(format!("{label:<10}"), Style::new().fg(sk.foreground)),
                 Span::styled(shown(&which()), Style::new().fg(sk.muted)),
             ]);
-            if selected {
-                line = line.style(Style::new().bg(sk.selection));
-            }
+            line = line.style(selected_row_style(Style::default(), selected, &sk));
             line
         })
         .collect();
