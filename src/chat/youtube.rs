@@ -1899,6 +1899,7 @@ impl Poller {
     /// immediately).
     async fn handle_delete(&mut self, message_id: String) {
         if message_id.is_empty() {
+            self.emit_local_notice("can't delete: that row isn't a real chat message");
             return;
         }
         let token = match self.access_token().await {
@@ -1934,6 +1935,7 @@ impl Poller {
     /// are: the ban event may never come back through the poll stream.
     async fn handle_ban(&mut self, channel_id: String, timeout_secs: Option<u64>) {
         if channel_id.is_empty() {
+            self.emit_local_notice("can't ban: that row isn't a real chat message");
             return;
         }
         // The request body carries `liveChatId`, which stays empty until the
@@ -2776,6 +2778,90 @@ mod tests {
         {
             (_, ChatEvent::Message(message)) => assert!(
                 message.text.contains("still connecting"),
+                "unhelpful notice: {}",
+                message.text
+            ),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_a_row_with_no_real_message_id_costs_no_quota_and_says_why() {
+        // Notice/system rows and the pre-send local echo carry an empty
+        // message id. Pressing delete on one of those used to return
+        // silently, indistinguishable from a dropped keypress.
+        let quota = QuotaStore::new(10_000, None);
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let mut poller = Poller::new(SpawnParams {
+            key: ChatKey {
+                platform: Platform::YouTube,
+                account: "youtube".into(),
+                target: "CgABCDEFGHIJKLMNOPQRSTUVWXYZ".into(),
+            },
+            poll_floor_ms: 1,
+            poll_ceiling_ms: 0,
+            quota: quota.clone(),
+            quota_reserve_percent: 10,
+            token: Arc::new(|| Box::pin(async { Ok("test-token".to_string()) })),
+            events: events_tx,
+            client: reqwest::Client::new(),
+            // Unreachable on purpose: a correct guard never reaches the network.
+            base: Some("http://127.0.0.1:1/youtube/v3".to_string()),
+        });
+
+        poller.handle_delete(String::new()).await;
+
+        assert_eq!(
+            quota.remaining(),
+            10_000,
+            "a refused delete must cost nothing"
+        );
+        match events_rx
+            .try_recv()
+            .expect("the moderator must be told why")
+        {
+            (_, ChatEvent::Message(message)) => assert!(
+                message.text.contains("isn't a real chat message"),
+                "unhelpful notice: {}",
+                message.text
+            ),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn banning_a_row_with_no_real_author_costs_no_quota_and_says_why() {
+        // Notice/system rows and the pre-send local echo carry an empty
+        // author channel id. Pressing ban on one of those used to return
+        // silently, indistinguishable from a dropped keypress.
+        let quota = QuotaStore::new(10_000, None);
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let mut poller = Poller::new(SpawnParams {
+            key: ChatKey {
+                platform: Platform::YouTube,
+                account: "youtube".into(),
+                target: "CgABCDEFGHIJKLMNOPQRSTUVWXYZ".into(),
+            },
+            poll_floor_ms: 1,
+            poll_ceiling_ms: 0,
+            quota: quota.clone(),
+            quota_reserve_percent: 10,
+            token: Arc::new(|| Box::pin(async { Ok("test-token".to_string()) })),
+            events: events_tx,
+            client: reqwest::Client::new(),
+            // Unreachable on purpose: a correct guard never reaches the network.
+            base: Some("http://127.0.0.1:1/youtube/v3".to_string()),
+        });
+
+        poller.handle_ban(String::new(), None).await;
+
+        assert_eq!(quota.remaining(), 10_000, "a refused ban must cost nothing");
+        match events_rx
+            .try_recv()
+            .expect("the moderator must be told why")
+        {
+            (_, ChatEvent::Message(message)) => assert!(
+                message.text.contains("isn't a real chat message"),
                 "unhelpful notice: {}",
                 message.text
             ),
