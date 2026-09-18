@@ -159,7 +159,8 @@ fn describe(command: &worker::Command) -> &'static str {
         C::ExportSuperchats => "the paid-event export",
         C::ListStreams => "listing the stream keys",
         C::CopyStreamKey(_) => "copying the stream key",
-        _ => "that request",
+        C::ForgetAccount { .. } => "forgetting the account",
+        C::OpenUrl(_) => "opening the browser",
     }
 }
 

@@ -712,6 +712,12 @@ impl App {
         self.inputs.get(&field)
     }
 
+    /// The text buffer of the form field that currently has the cursor.
+    fn focused_input(&mut self) -> Option<&mut TextInput> {
+        let field = self.field();
+        self.inputs.get_mut(&field)
+    }
+
     /// Whether a platform is ticked.
     pub fn is_selected(&self, platform: Platform) -> bool {
         self.selected.contains(&platform)
@@ -1165,14 +1171,8 @@ impl App {
             Action::ChatReconnect => self.chat.reconnect_active(),
             Action::ChatNextChat => self.chat.cycle_chat(true),
             Action::ChatPreviousChat => self.chat.cycle_chat(false),
-            Action::ChatNextAccount => {
-                let config = self.config.clone();
-                self.chat.cycle_account(true, &config);
-            }
-            Action::ChatPreviousAccount => {
-                let config = self.config.clone();
-                self.chat.cycle_account(false, &config);
-            }
+            Action::ChatNextAccount => self.chat.cycle_account(true, &self.config),
+            Action::ChatPreviousAccount => self.chat.cycle_account(false, &self.config),
             Action::ChatScrollUp => self.chat.select_move(1),
             Action::ChatScrollDown => self.chat.select_move(-1),
             Action::ChatPageUp => self.chat.scroll_by(self.chat_page()),
@@ -1274,6 +1274,11 @@ impl App {
     /// Switch to a tab, doing whatever that tab needs on the way in.
     fn go_to_tab(&mut self, tab: Tab) -> Vec<Command> {
         self.chat.pending_mod = None;
+        // Leaving the Config tab has to disarm the two-press logout
+        // confirmation too, or a stale armed flag turns the next unrelated
+        // Enter — back on the Config tab in some later session — into a
+        // logout nobody asked for.
+        self.logout_armed = None;
 
         // Leaving the chat panes releases their connections' hold on the
         // keyboard; entering them opens the logged-in accounts' chats.
@@ -1529,9 +1534,8 @@ impl App {
         if !is_diagnostics {
             return vec![];
         }
-        let settings = self.config.clone();
         if let Some(config) = self.config_tab.as_mut() {
-            config.refresh_diagnostics(&settings);
+            config.refresh_diagnostics(&self.config);
             config.diagnostics_scroll = 0;
         }
         vec![]
@@ -2077,8 +2081,7 @@ impl App {
         // events qualify, and that copy has to be told too.
         self.desktop
             .configure(self.config.notifications.notifier_settings());
-        let config = self.config.clone();
-        self.chat.adopt_notification_settings(&config);
+        self.chat.adopt_notification_settings(&self.config);
         self.save_settings()
     }
 
@@ -2782,9 +2785,8 @@ impl App {
         if !showing {
             return;
         }
-        let config = self.config.clone();
         if let Some(tab) = self.config_tab.as_mut() {
-            tab.refresh_diagnostics(&config);
+            tab.refresh_diagnostics(&self.config);
         }
     }
 
@@ -3621,8 +3623,8 @@ impl App {
             KeyCode::Char('G') => self.chat.scroll_to_end(false),
             KeyCode::Char(']') => self.chat.cycle_chat(true),
             KeyCode::Char('[') => self.chat.cycle_chat(false),
-            KeyCode::Char('}') => self.chat.cycle_account(true, &self.config.clone()),
-            KeyCode::Char('{') => self.chat.cycle_account(false, &self.config.clone()),
+            KeyCode::Char('}') => self.chat.cycle_account(true, &self.config),
+            KeyCode::Char('{') => self.chat.cycle_account(false, &self.config),
             KeyCode::Char('>') => self.chat.resize(true),
             KeyCode::Char('<') => self.chat.resize(false),
             KeyCode::Char('=') => self.chat.reset_split(),
@@ -3642,6 +3644,12 @@ impl App {
     /// The focused credential box.
     pub fn setup_field(&self) -> SetupField {
         SetupField::ORDER[self.setup_cursor.min(SetupField::ORDER.len() - 1)]
+    }
+
+    /// The text buffer of the credential box that currently has the cursor.
+    fn focused_setup_input(&mut self) -> Option<&mut TextInput> {
+        let field = self.setup_field();
+        self.setup_inputs.get_mut(&field)
     }
 
     /// Whether enough has been typed in for at least one platform to work.
@@ -3688,26 +3696,22 @@ impl App {
                 }
             }
             KeyCode::Backspace => {
-                let field = self.setup_field();
-                if let Some(input) = self.setup_inputs.get_mut(&field) {
+                if let Some(input) = self.focused_setup_input() {
                     input.backspace();
                 }
             }
             KeyCode::Left => {
-                let field = self.setup_field();
-                if let Some(input) = self.setup_inputs.get_mut(&field) {
+                if let Some(input) = self.focused_setup_input() {
                     input.left();
                 }
             }
             KeyCode::Right => {
-                let field = self.setup_field();
-                if let Some(input) = self.setup_inputs.get_mut(&field) {
+                if let Some(input) = self.focused_setup_input() {
                     input.right();
                 }
             }
             KeyCode::Char(c) if is_typed_text(&key) => {
-                let field = self.setup_field();
-                if let Some(input) = self.setup_inputs.get_mut(&field) {
+                if let Some(input) = self.focused_setup_input() {
                     input.insert(c);
                 }
             }
@@ -3803,13 +3807,14 @@ impl App {
         // whatever was underneath and out of sight.
         let overlay_open = self.overlay().is_some();
 
-        let action = super::mouse::action_for(
-            event,
-            area,
-            self.chat_is_showing(),
-            self.tab == Tab::Combined,
-            self.chat.split_percent,
-        );
+        let body = if self.tab == Tab::Combined {
+            super::mouse::BodyKind::Combined
+        } else if self.chat_is_showing() {
+            super::mouse::BodyKind::Chat
+        } else {
+            super::mouse::BodyKind::Other
+        };
+        let action = super::mouse::action_for(event, area, body, self.chat.split_percent);
         let Some(action) = action else { return vec![] };
 
         match action {
@@ -4362,43 +4367,41 @@ impl App {
                 self.cycle_current_field(true);
             }
             KeyCode::Left => {
-                if let Some(input) = self.inputs.get_mut(&self.field()) {
+                if let Some(input) = self.focused_input() {
                     input.left();
                 }
             }
             KeyCode::Right => {
-                if let Some(input) = self.inputs.get_mut(&self.field()) {
+                if let Some(input) = self.focused_input() {
                     input.right();
                 }
             }
             KeyCode::Home => {
-                if let Some(input) = self.inputs.get_mut(&self.field()) {
+                if let Some(input) = self.focused_input() {
                     input.home();
                 }
             }
             KeyCode::End => {
-                if let Some(input) = self.inputs.get_mut(&self.field()) {
+                if let Some(input) = self.focused_input() {
                     input.end();
                 }
             }
             KeyCode::Backspace => {
-                let field = self.field();
-                if let Some(input) = self.inputs.get_mut(&field) {
+                if let Some(input) = self.focused_input() {
                     input.backspace();
                 }
-                return self.on_text_changed(field);
+                return self.on_text_changed(self.field());
             }
             KeyCode::Delete => {
-                let field = self.field();
-                if let Some(input) = self.inputs.get_mut(&field) {
+                if let Some(input) = self.focused_input() {
                     input.delete();
                 }
-                return self.on_text_changed(field);
+                return self.on_text_changed(self.field());
             }
             KeyCode::Char(c) => {
                 let field = self.field();
                 if field.is_text_input() {
-                    if let Some(input) = self.inputs.get_mut(&field) {
+                    if let Some(input) = self.focused_input() {
                         input.insert(c);
                     }
                     return self.on_text_changed(field);
@@ -7350,6 +7353,36 @@ mod tests {
             result: Ok(()),
         });
         assert!(!app.logged_in[&Platform::Twitch]);
+    }
+
+    /// Leaving the Config tab with the logout confirmation armed has to
+    /// disarm it. Otherwise coming back to Config later and pressing Enter
+    /// for something else logs the account straight out on a flag left over
+    /// from a previous visit.
+    #[test]
+    fn leaving_the_config_tab_disarms_a_pending_logout() {
+        let mut app = app();
+        app.logged_in.insert(Platform::Twitch, true);
+        go_to_config_section(&mut app, super::super::config_tab::Section::Accounts);
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.logout_armed, Some(Platform::Twitch));
+
+        // Away from Config entirely, not just moving within it.
+        app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT));
+        assert_eq!(
+            app.logout_armed, None,
+            "the armed flag must not survive leaving the tab"
+        );
+
+        // Back on Config, a bare Enter must arm rather than immediately log
+        // out — proving the stale flag is really gone, not just hidden.
+        go_to_config_section(&mut app, super::super::config_tab::Section::Accounts);
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        let first = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(first.is_empty(), "a single Enter must only arm it again");
+        assert!(app.logged_in[&Platform::Twitch], "not logged out yet");
     }
 
     /// A click while an overlay is up must not act on what is underneath it,

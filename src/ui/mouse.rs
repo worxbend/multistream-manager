@@ -130,19 +130,24 @@ impl Layout {
 /// panes actually start.
 pub const STREAM_INFO_HEIGHT: u16 = 7;
 
-/// What is under the pointer.
+/// What kind of body the current tab is drawing, for hit-testing.
 ///
-/// `chat_showing` says whether the body is chat panes at all, and
-/// `combined` whether the body is the combined tab — which puts a
-/// seven-row stream-info block above the panes.
-pub fn target_at(
-    area: Rect,
-    x: u16,
-    y: u16,
-    chat_showing: bool,
-    combined: bool,
-    split_percent: u16,
-) -> Target {
+/// `target_at` and `action_for` used to take this as two `bool` parameters,
+/// `chat_showing` and `combined` — a pair easy to swap at the call site
+/// without the compiler noticing, since both are plain `bool`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyKind {
+    /// Neither chat pane nor the combined tab — nothing below the header is
+    /// hit-testable.
+    Other,
+    /// The Chat tab: the body is the two chat panes, nothing else.
+    Chat,
+    /// The Combined tab: a stream-info block above the two chat panes.
+    Combined,
+}
+
+/// What is under the pointer.
+pub fn target_at(area: Rect, x: u16, y: u16, body: BodyKind, split_percent: u16) -> Target {
     let layout = Layout::of(area);
     if contains(layout.tab_bar, x, y) {
         return match tab_at(x) {
@@ -155,7 +160,7 @@ pub fn target_at(
     }
 
     let mut chat_area = layout.body;
-    if combined {
+    if body == BodyKind::Combined {
         let stream_info = Rect {
             height: STREAM_INFO_HEIGHT.min(chat_area.height),
             ..chat_area
@@ -176,7 +181,7 @@ pub fn target_at(
             width: chat_area.width.saturating_sub(2),
             height: chat_area.height.saturating_sub(2),
         };
-    } else if !chat_showing {
+    } else if body != BodyKind::Chat {
         return Target::Body;
     }
 
@@ -199,8 +204,7 @@ pub fn target_at(
 pub fn action_for(
     event: MouseEvent,
     area: Rect,
-    chat_showing: bool,
-    combined: bool,
+    body: BodyKind,
     split_percent: u16,
 ) -> Option<Action> {
     match event.kind {
@@ -210,14 +214,9 @@ pub fn action_for(
         // in the other pane.
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
             let back = matches!(event.kind, MouseEventKind::ScrollUp);
-            if let Target::ChatPane(platform) = target_at(
-                area,
-                event.column,
-                event.row,
-                chat_showing,
-                combined,
-                split_percent,
-            ) {
+            if let Target::ChatPane(platform) =
+                target_at(area, event.column, event.row, body, split_percent)
+            {
                 return Some(Action::ScrollPane { platform, back });
             }
             Some(if back {
@@ -227,14 +226,7 @@ pub fn action_for(
             })
         }
         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-            match target_at(
-                area,
-                event.column,
-                event.row,
-                chat_showing,
-                combined,
-                split_percent,
-            ) {
+            match target_at(area, event.column, event.row, body, split_percent) {
                 Target::Tab(tab) => Some(Action::SelectTab(tab)),
                 Target::ChatPane(platform) => Some(Action::FocusChat(platform)),
                 Target::StreamInfo => Some(Action::FocusStreamInfo),
@@ -351,12 +343,12 @@ mod tests {
     #[test]
     fn clicking_a_tab_selects_it() {
         assert_eq!(
-            action_for(click(1, 0), area(), false, false, 50),
+            action_for(click(1, 0), area(), BodyKind::Other, 50),
             Some(Action::SelectTab(Tab::StreamInfo))
         );
         // "2 Chat" starts after "1 Stream Info" (15 cells) plus a separator.
         assert_eq!(
-            action_for(click(17, 0), area(), false, false, 50),
+            action_for(click(17, 0), area(), BodyKind::Other, 50),
             Some(Action::SelectTab(Tab::Chat))
         );
     }
@@ -365,11 +357,11 @@ mod tests {
     fn clicking_a_chat_pane_focuses_that_platform() {
         // The chat tab: the body is two panes, split down the middle.
         assert_eq!(
-            action_for(click(10, 10), area(), true, false, 50),
+            action_for(click(10, 10), area(), BodyKind::Chat, 50),
             Some(Action::FocusChat(Platform::Twitch))
         );
         assert_eq!(
-            action_for(click(90, 10), area(), true, false, 50),
+            action_for(click(90, 10), area(), BodyKind::Chat, 50),
             Some(Action::FocusChat(Platform::YouTube))
         );
     }
@@ -380,12 +372,12 @@ mod tests {
     fn the_pane_hit_boxes_follow_the_split() {
         // With the left pane at 80%, column 70 is still the left pane.
         assert_eq!(
-            action_for(click(70, 10), area(), true, false, 80),
+            action_for(click(70, 10), area(), BodyKind::Chat, 80),
             Some(Action::FocusChat(Platform::Twitch))
         );
         // And with it at 20%, the same column is the right one.
         assert_eq!(
-            action_for(click(70, 10), area(), true, false, 20),
+            action_for(click(70, 10), area(), BodyKind::Chat, 20),
             Some(Action::FocusChat(Platform::YouTube))
         );
     }
@@ -395,18 +387,18 @@ mod tests {
     #[test]
     fn the_combined_tab_separates_the_stream_info_from_the_chats() {
         assert_eq!(
-            action_for(click(10, 5), area(), true, true, 50),
+            action_for(click(10, 5), area(), BodyKind::Combined, 50),
             Some(Action::FocusStreamInfo)
         );
         assert_eq!(
-            action_for(click(10, 20), area(), true, true, 50),
+            action_for(click(10, 20), area(), BodyKind::Combined, 50),
             Some(Action::FocusChat(Platform::Twitch))
         );
     }
 
     #[test]
     fn clicking_the_body_of_a_non_chat_screen_does_nothing() {
-        assert_eq!(action_for(click(10, 10), area(), false, false, 50), None);
+        assert_eq!(action_for(click(10, 10), area(), BodyKind::Other, 50), None);
     }
 
     /// Over a chat pane, the wheel scrolls *that* pane rather than whichever
@@ -416,14 +408,14 @@ mod tests {
     #[test]
     fn the_wheel_scrolls_the_pane_under_the_pointer() {
         assert_eq!(
-            action_for(wheel(true), area(), true, false, 50),
+            action_for(wheel(true), area(), BodyKind::Chat, 50),
             Some(Action::ScrollPane {
                 platform: Platform::Twitch,
                 back: true
             })
         );
         assert_eq!(
-            action_for(wheel(false), area(), true, false, 50),
+            action_for(wheel(false), area(), BodyKind::Chat, 50),
             Some(Action::ScrollPane {
                 platform: Platform::Twitch,
                 back: false
@@ -436,11 +428,11 @@ mod tests {
     #[test]
     fn the_wheel_scrolls_in_both_directions_elsewhere() {
         assert_eq!(
-            action_for(wheel(true), area(), false, false, 50),
+            action_for(wheel(true), area(), BodyKind::Other, 50),
             Some(Action::ScrollBack)
         );
         assert_eq!(
-            action_for(wheel(false), area(), false, false, 50),
+            action_for(wheel(false), area(), BodyKind::Other, 50),
             Some(Action::ScrollForward)
         );
     }
@@ -462,7 +454,7 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             };
             assert_eq!(
-                action_for(event, area(), true, false, 50),
+                action_for(event, area(), BodyKind::Chat, 50),
                 None,
                 "{kind:?} should be ignored"
             );
@@ -483,7 +475,7 @@ mod tests {
                 };
                 for row in 0..height.max(1) {
                     for column in 0..width.max(1) {
-                        action_for(click(column, row), tiny, true, true, 50);
+                        action_for(click(column, row), tiny, BodyKind::Combined, 50);
                     }
                 }
             }
