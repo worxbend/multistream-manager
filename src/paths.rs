@@ -190,11 +190,24 @@ pub fn program_on_path(program: &str) -> bool {
 
 #[cfg(test)]
 pub mod test_support {
+    use std::cell::Cell;
     use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    /// `MSM_CONFIG_DIR` is process-wide state, and tests run in parallel inside
-    /// one process, so tests that redirect it take this lock for their duration.
+    thread_local! {
+        // A plain `std::sync::Mutex` is not reentrant: a test that already
+        // holds it (because it built its own `ScratchConfigDir` to control
+        // exactly which scratch directory it gets) and then calls a helper
+        // like `app()` that asks for a second one, on the same thread, would
+        // block forever waiting for a lock it is already holding. This
+        // tracks how many `ScratchConfigDir`s are currently active on this
+        // thread so only the outermost one actually takes the process-wide
+        // lock, touches `MSM_CONFIG_DIR`, or creates/removes a directory —
+        // every nested one just rides along with what the outermost already
+        // set up, the same way a reentrant mutex would.
+        static DEPTH: Cell<u32> = const { Cell::new(0) };
+    }
+
     fn lock() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -203,14 +216,34 @@ pub mod test_support {
     }
 
     /// An empty config directory that the program will use until this guard is
-    /// dropped, at which point the directory is removed.
+    /// dropped, at which point the directory is removed — unless a `new` call
+    /// is nested inside another `ScratchConfigDir`'s lifetime on the same
+    /// thread, in which case it reuses the outer one's directory and does
+    /// nothing on drop, since the outer guard already owns that job.
     pub struct ScratchConfigDir {
         path: PathBuf,
-        _guard: MutexGuard<'static, ()>,
+        outermost: bool,
+        // `None` for a nested guard, which never took the lock in the first
+        // place. Declared last so it is released last: the directory removal
+        // and the environment variable change above both happen while this
+        // is still held.
+        _guard: Option<MutexGuard<'static, ()>>,
     }
 
     impl ScratchConfigDir {
         pub fn new(test_name: &str) -> Self {
+            let depth = DEPTH.get();
+            DEPTH.set(depth + 1);
+            if depth > 0 {
+                let path = std::env::var_os("MSM_CONFIG_DIR")
+                    .expect("a nested ScratchConfigDir means an outer one already set this")
+                    .into();
+                return Self {
+                    path,
+                    outermost: false,
+                    _guard: None,
+                };
+            }
             let guard = lock();
             let path = std::env::temp_dir().join(format!("msm-scratch-{test_name}"));
             let _ = std::fs::remove_dir_all(&path);
@@ -218,7 +251,8 @@ pub mod test_support {
             std::env::set_var("MSM_CONFIG_DIR", &path);
             Self {
                 path,
-                _guard: guard,
+                outermost: true,
+                _guard: Some(guard),
             }
         }
 
@@ -229,8 +263,11 @@ pub mod test_support {
 
     impl Drop for ScratchConfigDir {
         fn drop(&mut self) {
-            std::env::remove_var("MSM_CONFIG_DIR");
-            let _ = std::fs::remove_dir_all(&self.path);
+            DEPTH.set(DEPTH.get() - 1);
+            if self.outermost {
+                std::env::remove_var("MSM_CONFIG_DIR");
+                let _ = std::fs::remove_dir_all(&self.path);
+            }
         }
     }
 }

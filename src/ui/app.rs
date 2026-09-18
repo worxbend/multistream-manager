@@ -512,6 +512,18 @@ pub struct App {
     /// than storing an absolute index means this state does not have to know how
     /// tall the panel is — only the drawing code does.
     pub log_scroll_back: usize,
+
+    /// Keeps `MSM_CONFIG_DIR` pointed at an empty scratch directory for as
+    /// long as this `App` is alive, so a test's `saved_logins()` call (made
+    /// during construction, below) can never read the real machine's actual
+    /// saved accounts. Without this, a developer who has ever really logged
+    /// in to msm on this machine gets a `tokio::spawn` panic the moment a
+    /// test switches to the Chat or Combined tab: `activate()` finds a real,
+    /// genuinely logged-in account and tries to open a real connection for
+    /// it, outside of any Tokio runtime. Always `None` outside `#[cfg(test)]`
+    /// builds, where the field does not exist at all.
+    #[cfg(test)]
+    _scratch_config_dir: Option<crate::paths::test_support::ScratchConfigDir>,
 }
 
 impl App {
@@ -682,6 +694,8 @@ impl App {
             should_quit: false,
             toasts: super::toast::Toasts::default(),
             log_scroll_back: 0,
+            #[cfg(test)]
+            _scratch_config_dir: None,
         };
 
         // Anything wrong with the `[keys]` section goes in the activity log,
@@ -5118,8 +5132,9 @@ mod tests {
     /// run would rewrite the config file of whoever is running it. Pointing
     /// `source_path` at a scratch file keeps every write inside the test.
     ///
-    /// Deliberately not the `MSM_CONFIG_DIR` override: that is an environment
-    /// variable, which is process-wide, and these tests run in parallel.
+    /// This does not, by itself, stop `App::new` from reading a real saved
+    /// login off this machine — see `app()`, which pairs this with a
+    /// [`crate::paths::test_support::ScratchConfigDir`] for that.
     fn scratch_config() -> Config {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -5132,6 +5147,20 @@ mod tests {
     }
 
     fn app() -> App {
+        // `App::new` reads `saved_logins()` (and builds `chat`'s own account
+        // list) from `MSM_CONFIG_DIR` before this function gets a chance to
+        // touch anything, so the scratch directory has to exist and the
+        // environment variable has to point at it *before* `App::new` is
+        // called — a whole real, logged-in account on this machine is
+        // otherwise indistinguishable from a test fixture, and `activate()`
+        // will try to open a real connection for it outside of any Tokio
+        // runtime the moment a test switches to the Chat or Combined tab.
+        // The guard is stashed on the `App` itself so it stays alive, and
+        // `MSM_CONFIG_DIR` stays pointed at the scratch directory, for
+        // exactly as long as this one test's `App` is — dropped, and the
+        // directory cleaned up and the next `app()` call unblocked, the
+        // moment the test function's local variable goes out of scope.
+        let scratch_config_dir = crate::paths::test_support::ScratchConfigDir::new("ui-app-test");
         // `App::new` opens on the setup or login screen when nothing is
         // configured, which is not what most of these tests are about; they
         // drive the streaming flow, so they start at the platform picker.
@@ -5140,10 +5169,7 @@ mod tests {
         // are looking at, and swallow the keys they send.
         app.splash_skipped = true;
         app.screen = Screen::Platforms;
-        // The start-up splash covers the interface and swallows the first
-        // keypress, which is right for a real session and wrong for a test
-        // that wants to drive the screen underneath it.
-        app.splash_skipped = true;
+        app._scratch_config_dir = Some(scratch_config_dir);
         app
     }
 
