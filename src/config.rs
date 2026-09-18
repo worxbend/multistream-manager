@@ -381,54 +381,73 @@ impl KeysConfig {
             }
         }
 
-        // A binding that a tab-local one hides is worth mentioning: it is how
-        // a tab gives a key its own meaning, and also how somebody's new
-        // global binding quietly fails to work on one tab.
-        for (context, chord, local, global) in keymap.shadowed() {
-            if local == global {
-                continue;
-            }
-            problems.push(format!(
-                "{chord} runs {local} on the {} tab, which hides the global {global}",
-                context.name()
-            ));
-        }
-
-        // A `[keys.config]` binding to something the Config tab does not
-        // handle. It parses, stores and is then silently ignored: that tab
-        // owns its plain keys and resolves only its own actions, so anything
-        // else reaches nothing at all. Better to say so than to leave
-        // somebody wondering why their binding does nothing there.
-        for (written, action_name) in &self.config {
-            if action_name.trim().is_empty() {
-                continue;
-            }
-            let Some(action) = Action::parse(action_name) else {
-                continue;
-            };
-            let handled = action.name().starts_with("config.") || action == Action::Quit;
-            if !handled {
-                problems.push(format!(
-                    "[keys.config] {written:?} is bound to {action_name:?}, which the Config \
-                     tab does not handle — that tab only runs its own config.* actions and \
-                     app.quit"
-                ));
-            }
-        }
-
-        // A binding that buries a whole group under it. This one is worse
-        // than a shadow: the keys do not do something else, they stop
-        // existing, and `shadowed` above cannot see it because it only
-        // compares identical chords.
-        for (chord, action, buried) in keymap.swallowed() {
-            problems.push(format!(
-                "{chord} runs {action} and so makes {buried} longer binding(s) starting with \
-                 it unreachable"
-            ));
-        }
+        problems.extend(shadowed_binding_problems(&keymap));
+        problems.extend(unhandled_config_action_problems(&self.config));
+        problems.extend(swallowed_binding_problems(&keymap));
 
         (keymap, problems)
     }
+}
+
+/// A binding that a tab-local one hides — worth mentioning because it is how
+/// a tab gives a key its own meaning, and also how somebody's new global
+/// binding quietly fails to work on one tab.
+fn shadowed_binding_problems(keymap: &crate::keys::Keymap) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (context, chord, local, global) in keymap.shadowed() {
+        if local == global {
+            continue;
+        }
+        problems.push(format!(
+            "{chord} runs {local} on the {} tab, which hides the global {global}",
+            context.name()
+        ));
+    }
+    problems
+}
+
+/// A `[keys.config]` binding to something the Config tab does not handle. It
+/// parses, stores and is then silently ignored: that tab owns its plain keys
+/// and resolves only its own actions, so anything else reaches nothing at
+/// all. Better to say so than to leave somebody wondering why their binding
+/// does nothing there.
+fn unhandled_config_action_problems(
+    config: &std::collections::BTreeMap<String, String>,
+) -> Vec<String> {
+    use crate::keys::Action;
+
+    let mut problems = Vec::new();
+    for (written, action_name) in config {
+        if action_name.trim().is_empty() {
+            continue;
+        }
+        let Some(action) = Action::parse(action_name) else {
+            continue;
+        };
+        let handled = action.name().starts_with("config.") || action == Action::Quit;
+        if !handled {
+            problems.push(format!(
+                "[keys.config] {written:?} is bound to {action_name:?}, which the Config \
+                 tab does not handle — that tab only runs its own config.* actions and \
+                 app.quit"
+            ));
+        }
+    }
+    problems
+}
+
+/// A binding that buries a whole group under it. This one is worse than a
+/// shadow: the keys do not do something else, they stop existing, and
+/// `shadowed` above cannot see it because it only compares identical chords.
+fn swallowed_binding_problems(keymap: &crate::keys::Keymap) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (chord, action, buried) in keymap.swallowed() {
+        problems.push(format!(
+            "{chord} runs {action} and so makes {buried} longer binding(s) starting with it \
+             unreachable"
+        ));
+    }
+    problems
 }
 
 /// Talking to OBS Studio.
@@ -539,12 +558,7 @@ impl ObsConfig {
         if !literal.is_empty() {
             return literal.to_string();
         }
-        let from_env = resolve_credential("", &self.host_env);
-        if from_env.is_empty() {
-            "127.0.0.1".to_string()
-        } else {
-            from_env
-        }
+        env_value(&self.host_env).unwrap_or_else(|| "127.0.0.1".to_string())
     }
 
     /// The port to connect to.
@@ -558,10 +572,9 @@ impl ObsConfig {
         if self.port != 0 {
             return self.port;
         }
-        let raw = resolve_credential("", &self.port_env);
-        if raw.is_empty() {
+        let Some(raw) = env_value(&self.port_env) else {
             return 4455;
-        }
+        };
         match raw.parse::<u16>() {
             Ok(0) | Err(_) => {
                 tracing::warn!(
@@ -701,12 +714,6 @@ impl TwitchConfig {
     }
 }
 
-/// Read a credential from the file, falling back to an environment variable.
-///
-/// The file wins when both are set, because naming a value explicitly should
-/// beat inheriting one. A variable that exists but is empty counts as unset:
-/// that is what an unfilled shell variable looks like, and treating it as a
-/// real empty credential would fail later in a way nobody could read.
 /// Where a credential's value came from.
 ///
 /// The documented footgun with these is a shell-profile variable that a
@@ -735,36 +742,47 @@ impl CredentialSource {
     }
 }
 
+/// The value of an environment variable, trimmed — or `None` if the variable
+/// name is blank, the variable is unset, or its value is blank.
+///
+/// An environment variable that exists but is empty counts as unset: that is
+/// what an unfilled shell variable looks like, and treating it as a real
+/// value would fail later in a way nobody could read.
+fn env_value(variable: &str) -> Option<String> {
+    let variable = variable.trim();
+    if variable.is_empty() {
+        return None;
+    }
+    std::env::var(variable)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// Where [`resolve_credential`] would find this credential, without
 /// producing the value itself.
 fn credential_source(literal: &str, variable: &str) -> CredentialSource {
     if !literal.trim().is_empty() {
         return CredentialSource::File;
     }
-    let variable = variable.trim();
-    if variable.is_empty() {
-        return CredentialSource::Missing;
-    }
-    match std::env::var(variable) {
-        Ok(value) if !value.trim().is_empty() => {
-            CredentialSource::Environment(variable.to_string())
-        }
-        _ => CredentialSource::Missing,
+    match env_value(variable) {
+        Some(_) => CredentialSource::Environment(variable.trim().to_string()),
+        None => CredentialSource::Missing,
     }
 }
 
+/// Read a credential from the file, falling back to an environment variable.
+///
+/// The file wins when both are set, because naming a value explicitly should
+/// beat inheriting one. A variable that exists but is empty counts as unset:
+/// that is what an unfilled shell variable looks like, and treating it as a
+/// real empty credential would fail later in a way nobody could read.
 fn resolve_credential(literal: &str, variable: &str) -> String {
     let literal = literal.trim();
     if !literal.is_empty() {
         return literal.to_string();
     }
-    let variable = variable.trim();
-    if variable.is_empty() {
-        return String::new();
-    }
-    std::env::var(variable)
-        .map(|value| value.trim().to_string())
-        .unwrap_or_default()
+    env_value(variable).unwrap_or_default()
 }
 
 /// Google/YouTube OAuth client credentials, from

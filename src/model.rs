@@ -398,7 +398,7 @@ pub fn parse_start_time(
     raw: &str,
     now: chrono::DateTime<chrono::Local>,
 ) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
-    use chrono::{Duration, NaiveDate, TimeZone as _};
+    use chrono::{Duration, NaiveDate};
 
     let text = raw.trim();
     if text.is_empty() || text.eq_ignore_ascii_case("now") {
@@ -430,16 +430,7 @@ pub fn parse_start_time(
         let date = NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d")
             .map_err(|_| format!("{date:?} is not a date — write it as 2026-08-20."))?;
         let time = parse_clock(time.trim())?;
-        let naive = date.and_time(time);
-        return match now.timezone().from_local_datetime(&naive).single() {
-            Some(local) => Ok(Some(local.with_timezone(&chrono::Utc))),
-            // The hour that does not exist, on the night the clocks go
-            // forward. Better to say so than to silently pick one of the two
-            // adjacent hours on somebody's behalf.
-            None => Err(format!(
-                "{naive} does not exist in your time zone — the clocks change that night."
-            )),
-        };
+        return to_utc(now, date.and_time(time));
     }
 
     // A bare time: today, or tomorrow if it has already gone. "Start at 20:00"
@@ -452,10 +443,22 @@ pub fn parse_start_time(
     } else {
         today + Duration::days(1)
     };
-    match now.timezone().from_local_datetime(&candidate).single() {
+    to_utc(now, candidate)
+}
+
+/// Resolve a naive local date-time against `now`'s time zone, refusing the
+/// hour that does not exist on the night the clocks go forward rather than
+/// silently picking one of the two adjacent hours on somebody's behalf.
+fn to_utc(
+    now: chrono::DateTime<chrono::Local>,
+    naive: chrono::NaiveDateTime,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
+    use chrono::TimeZone as _;
+
+    match now.timezone().from_local_datetime(&naive).single() {
         Some(local) => Ok(Some(local.with_timezone(&chrono::Utc))),
         None => Err(format!(
-            "{candidate} does not exist in your time zone — the clocks change that night."
+            "{naive} does not exist in your time zone — the clocks change that night."
         )),
     }
 }
@@ -593,9 +596,42 @@ impl StreamPlan {
     /// `platforms` matters because most rules are platform-specific: an empty
     /// Twitch category is fatal if Twitch is selected and irrelevant otherwise.
     pub fn validate(&self, platforms: &[Platform]) -> Vec<ValidationIssue> {
-        let mut issues = Vec::new();
         let twitch = platforms.contains(&Platform::Twitch);
         let youtube = platforms.contains(&Platform::YouTube);
+
+        let mut issues = self.validate_title(twitch, youtube);
+
+        if youtube {
+            issues.extend(self.validate_thumbnail());
+            issues.extend(self.validate_youtube_fields());
+        }
+
+        if twitch {
+            issues.extend(self.validate_twitch_fields());
+        }
+
+        if youtube {
+            issues.extend(self.validate_youtube_category());
+        }
+
+        if self.language.chars().count() != 2 && self.language != "other" {
+            issues.push(ValidationIssue {
+                field: Field::Language,
+                blocking: twitch,
+                message: format!(
+                    "Language must be a two-letter ISO 639-1 code such as \"en\" or \"pl\", not {:?}.",
+                    self.language
+                ),
+            });
+        }
+
+        issues
+    }
+
+    /// The title checks: it must not be empty, and each selected platform has
+    /// its own length ceiling — Twitch's is fatal, YouTube's only shortens.
+    fn validate_title(&self, twitch: bool, youtube: bool) -> Vec<ValidationIssue> {
+        let mut issues = Vec::new();
 
         if self.title.trim().is_empty() {
             issues.push(ValidationIssue {
@@ -627,61 +663,75 @@ impl StreamPlan {
             });
         }
 
-        if youtube {
-            // A thumbnail that is not there is a typed path with a typo in
-            // it, and finding that out after the broadcast has been created
-            // is finding it out too late to fix quietly.
-            let path = self.thumbnail_path.trim();
-            if !path.is_empty() {
-                let expanded = expand_home(path);
-                let file = std::path::Path::new(&expanded);
-                let extension = file
-                    .extension()
-                    .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
-                    .unwrap_or_default();
-                if !file.is_file() {
-                    issues.push(ValidationIssue {
-                        field: Field::Thumbnail,
-                        blocking: true,
-                        message: format!("There is no file at {path}."),
-                    });
-                } else if !THUMBNAIL_EXTENSIONS.contains(&extension.as_str()) {
-                    issues.push(ValidationIssue {
-                        field: Field::Thumbnail,
-                        blocking: true,
-                        message: "YouTube takes a JPEG or a PNG for a thumbnail.".into(),
-                    });
-                } else if let Ok(meta) = std::fs::metadata(file) {
-                    if meta.len() > YOUTUBE_THUMBNAIL_MAX_BYTES {
-                        issues.push(ValidationIssue {
-                            field: Field::Thumbnail,
-                            blocking: true,
-                            message: format!(
-                                "That picture is {:.1}MB; YouTube's limit is 2MB.",
-                                meta.len() as f64 / (1024.0 * 1024.0)
-                            ),
-                        });
-                    }
-                }
-            }
+        issues
+    }
 
-            // A scheduled start in the past is either a typo or a
-            // misunderstanding, and YouTube would refuse it anyway.
-            if let Some(start) = self.scheduled_start {
-                let past = start < chrono::Utc::now() - chrono::Duration::minutes(1);
-                if past {
-                    issues.push(ValidationIssue {
-                        field: Field::StartTime,
-                        blocking: true,
-                        message: "That start time has already passed. Leave it empty to start \
-                                  now."
-                            .into(),
-                    });
-                }
+    /// A thumbnail that is not there is a typed path with a typo in it, and
+    /// finding that out after the broadcast has been created is finding it
+    /// out too late to fix quietly — so the file, its extension and its size
+    /// are all checked up front.
+    fn validate_thumbnail(&self) -> Vec<ValidationIssue> {
+        let mut issues = Vec::new();
+
+        let path = self.thumbnail_path.trim();
+        if path.is_empty() {
+            return issues;
+        }
+        let expanded = expand_home(path);
+        let file = std::path::Path::new(&expanded);
+        let extension = file
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if !file.is_file() {
+            issues.push(ValidationIssue {
+                field: Field::Thumbnail,
+                blocking: true,
+                message: format!("There is no file at {path}."),
+            });
+        } else if !THUMBNAIL_EXTENSIONS.contains(&extension.as_str()) {
+            issues.push(ValidationIssue {
+                field: Field::Thumbnail,
+                blocking: true,
+                message: "YouTube takes a JPEG or a PNG for a thumbnail.".into(),
+            });
+        } else if let Ok(meta) = std::fs::metadata(file) {
+            if meta.len() > YOUTUBE_THUMBNAIL_MAX_BYTES {
+                issues.push(ValidationIssue {
+                    field: Field::Thumbnail,
+                    blocking: true,
+                    message: format!(
+                        "That picture is {:.1}MB; YouTube's limit is 2MB.",
+                        meta.len() as f64 / (1024.0 * 1024.0)
+                    ),
+                });
             }
         }
 
-        if youtube && self.description.chars().count() > limits::YOUTUBE_DESCRIPTION {
+        issues
+    }
+
+    /// The YouTube-only checks besides the thumbnail and the category: a
+    /// scheduled start that has already passed, and a description over the
+    /// limit.
+    fn validate_youtube_fields(&self) -> Vec<ValidationIssue> {
+        let mut issues = Vec::new();
+
+        // A scheduled start in the past is either a typo or a
+        // misunderstanding, and YouTube would refuse it anyway.
+        if let Some(start) = self.scheduled_start {
+            let past = start < chrono::Utc::now() - chrono::Duration::minutes(1);
+            if past {
+                issues.push(ValidationIssue {
+                    field: Field::StartTime,
+                    blocking: true,
+                    message: "That start time has already passed. Leave it empty to start now."
+                        .into(),
+                });
+            }
+        }
+
+        if self.description.chars().count() > limits::YOUTUBE_DESCRIPTION {
             issues.push(ValidationIssue {
                 field: Field::Description,
                 blocking: true,
@@ -693,43 +743,17 @@ impl StreamPlan {
             });
         }
 
-        if twitch {
-            if self.twitch_category.is_none() {
-                issues.push(ValidationIssue {
-                    field: Field::TwitchCategory,
-                    blocking: true,
-                    message:
-                        "Pick a Twitch category — type part of its name and press Enter to select a match."
-                            .into(),
-                });
-            }
-            if self.tags.len() > limits::TWITCH_MAX_TAGS {
-                issues.push(ValidationIssue {
-                    field: Field::Tags,
-                    blocking: false,
-                    message: format!(
-                        "You have {} tags; Twitch accepts {}. The extra ones go to YouTube only.",
-                        self.tags.len(),
-                        limits::TWITCH_MAX_TAGS
-                    ),
-                });
-            }
-            // Every way a tag arrives at Twitch as something other than what
-            // was typed: punctuation stripped, cut at 25 characters, or left
-            // with nothing Twitch accepts and dropped entirely. Only the
-            // punctuation case was reported, and only for the first tag —
-            // the length cut and the outright drop were silent, and a
-            // chopped tag is a dead tag on Twitch discovery.
-            for note in self.twitch_tag_changes() {
-                issues.push(ValidationIssue {
-                    field: Field::Tags,
-                    blocking: false,
-                    message: format!("{note}."),
-                });
-            }
-        }
+        issues
+    }
 
-        if youtube && self.youtube_category_id.trim().is_empty() {
+    /// The missing-YouTube-category check, reported last so that when both
+    /// platforms are selected and both categories are unset, the user is
+    /// steered to the Twitch category field first (`validate` runs this
+    /// after [`Self::validate_twitch_fields`]).
+    fn validate_youtube_category(&self) -> Vec<ValidationIssue> {
+        let mut issues = Vec::new();
+
+        if self.youtube_category_id.trim().is_empty() {
             issues.push(ValidationIssue {
                 field: Field::YouTubeCategory,
                 blocking: true,
@@ -737,14 +761,43 @@ impl StreamPlan {
             });
         }
 
-        if self.language.chars().count() != 2 && self.language != "other" {
+        issues
+    }
+
+    /// The Twitch-only checks: a missing category, too many tags, and every
+    /// way a tag arrives at Twitch as something other than what was typed.
+    fn validate_twitch_fields(&self) -> Vec<ValidationIssue> {
+        let mut issues = Vec::new();
+
+        if self.twitch_category.is_none() {
             issues.push(ValidationIssue {
-                field: Field::Language,
-                blocking: twitch,
+                field: Field::TwitchCategory,
+                blocking: true,
+                message:
+                    "Pick a Twitch category — type part of its name and press Enter to select a match."
+                        .into(),
+            });
+        }
+        if self.tags.len() > limits::TWITCH_MAX_TAGS {
+            issues.push(ValidationIssue {
+                field: Field::Tags,
+                blocking: false,
                 message: format!(
-                    "Language must be a two-letter ISO 639-1 code such as \"en\" or \"pl\", not {:?}.",
-                    self.language
+                    "You have {} tags; Twitch accepts {}. The extra ones go to YouTube only.",
+                    self.tags.len(),
+                    limits::TWITCH_MAX_TAGS
                 ),
+            });
+        }
+        // Punctuation stripped, cut at 25 characters, or left with nothing
+        // Twitch accepts and dropped entirely — a chopped tag is a dead tag
+        // on Twitch discovery, so every one of these is worth reporting, not
+        // just the punctuation case on the first tag.
+        for note in self.twitch_tag_changes() {
+            issues.push(ValidationIssue {
+                field: Field::Tags,
+                blocking: false,
+                message: format!("{note}."),
             });
         }
 
@@ -1188,5 +1241,58 @@ mod tests {
         assert_eq!("TWITCH".parse::<Platform>().unwrap(), Platform::Twitch);
         assert_eq!("yt".parse::<Platform>().unwrap(), Platform::YouTube);
         assert!("kick".parse::<Platform>().is_err());
+    }
+
+    /// A field missing from `Field::ORDER` just drops out of the tab cycle —
+    /// nothing else would notice. The match below has no wildcard, so a
+    /// `Field` variant added without being listed here fails to compile
+    /// instead of silently missing this check.
+    #[test]
+    fn field_order_has_no_duplicates_and_covers_every_field() {
+        use std::collections::HashSet;
+
+        let order: HashSet<Field> = Field::ORDER.into_iter().collect();
+        assert_eq!(
+            order.len(),
+            Field::ORDER.len(),
+            "Field::ORDER lists the same field twice"
+        );
+
+        for field in Field::ORDER {
+            match field {
+                Field::Title
+                | Field::Description
+                | Field::Tags
+                | Field::TwitchCategory
+                | Field::YouTubeCategory
+                | Field::Language
+                | Field::Privacy
+                | Field::MadeForKids
+                | Field::AutoStart
+                | Field::AutoStop
+                | Field::StartTime
+                | Field::Thumbnail => {}
+            }
+        }
+
+        for field in [
+            Field::Title,
+            Field::Description,
+            Field::Tags,
+            Field::TwitchCategory,
+            Field::YouTubeCategory,
+            Field::Language,
+            Field::Privacy,
+            Field::MadeForKids,
+            Field::AutoStart,
+            Field::AutoStop,
+            Field::StartTime,
+            Field::Thumbnail,
+        ] {
+            assert!(
+                order.contains(&field),
+                "{field:?} is missing from Field::ORDER"
+            );
+        }
     }
 }
