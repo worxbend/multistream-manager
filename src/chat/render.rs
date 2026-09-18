@@ -910,13 +910,6 @@ fn render_grouped(msg: &ChatMessage, width: usize, opts: &RenderOpts) -> Vec<Lin
 
     let mut rows: Vec<Line<'static>> = Vec::new();
 
-    // Above the header, indented with the body: a reply belongs to the
-    // message that follows it, and a run of grouped messages under one name
-    // may contain several.
-    if let Some(row) = reply_row(msg, width, indent) {
-        rows.push(row);
-    }
-
     if !opts.continues_group {
         let mut header = name_pieces(msg, opts);
         // Width gates ported from twi groupedHeaderFragments: badges at
@@ -992,7 +985,34 @@ fn render_grouped(msg: &ChatMessage, width: usize, opts: &RenderOpts) -> Vec<Lin
     }
     rows.extend(wrapper.finish());
     mark_mention(&mut rows, opts);
+    // Above the message, so it reads the way a threaded reply does, and
+    // built only now — undecorated, after `mark_mention` — so the gutter bar
+    // lands the same way it does in `render_message`: on the header/body
+    // rows a mention or highlight actually names, not on the reply context
+    // above them.
+    if let Some(row) = reply_row(msg, width, indent) {
+        rows.insert(0, row);
+    }
     rows
+}
+
+/// Appends a platform-metadata chip — `label` on a `bg`-colored solid ground,
+/// canvas-colored and bold, so it reads as a block rather than tinted text —
+/// plus the plain-text separator every chip needs before whatever follows it.
+fn push_chip(pieces: &mut Vec<Piece>, label: String, bg: Color) {
+    pieces.push(Piece {
+        text: label,
+        style: Style::new()
+            .fg(canvas_color())
+            .bg(bg)
+            .add_modifier(Modifier::BOLD),
+        atomic: true,
+    });
+    pieces.push(Piece {
+        text: " ".to_string(),
+        style: Style::new().fg(text_color()),
+        atomic: true,
+    });
 }
 
 /// The body pieces of a message, before wrapping.
@@ -1032,35 +1052,15 @@ fn content_pieces(msg: &ChatMessage, opts: &RenderOpts) -> Vec<Piece> {
             } else {
                 paid.display.trim().to_string()
             };
-            pieces.push(Piece {
-                text: format!(" {label} "),
-                style: Style::new()
-                    .fg(canvas_color())
-                    .bg(tier_color(paid.tier).color())
-                    .add_modifier(Modifier::BOLD),
-                atomic: true,
-            });
-            pieces.push(Piece {
-                text: " ".to_string(),
-                style: Style::new().fg(text_color()),
-                atomic: true,
-            });
+            push_chip(
+                &mut pieces,
+                format!(" {label} "),
+                tier_color(paid.tier).color(),
+            );
         }
         if let Some(membership) = &meta.membership {
             let (label, color) = membership_chip(membership);
-            pieces.push(Piece {
-                text: format!(" {label} "),
-                style: Style::new()
-                    .fg(canvas_color())
-                    .bg(color)
-                    .add_modifier(Modifier::BOLD),
-                atomic: true,
-            });
-            pieces.push(Piece {
-                text: " ".to_string(),
-                style: Style::new().fg(text_color()),
-                atomic: true,
-            });
+            push_chip(&mut pieces, format!(" {label} "), color);
         }
     }
 
@@ -1071,37 +1071,21 @@ fn content_pieces(msg: &ChatMessage, opts: &RenderOpts) -> Vec<Piece> {
     // hello, while a YouTube payer was impossible to miss.
     if let Some(PlatformMeta::Twitch(meta)) = &msg.meta {
         if meta.bits > 0 {
-            pieces.push(Piece {
-                text: format!(" ◈ {} bits ", meta.bits),
-                style: Style::new()
-                    .fg(canvas_color())
-                    .bg(tier_color(bits_tier(meta.bits)).color())
-                    .add_modifier(Modifier::BOLD),
-                atomic: true,
-            });
-            pieces.push(Piece {
-                text: " ".to_string(),
-                style: Style::new().fg(text_color()),
-                atomic: true,
-            });
+            push_chip(
+                &mut pieces,
+                format!(" ◈ {} bits ", meta.bits),
+                tier_color(bits_tier(meta.bits)).color(),
+            );
         }
         if !meta.system_event.is_empty() {
             // Subs, resubs, raids and announcements. The event word itself is
             // Twitch's (`sub`, `raid`, `announcement`), which is what the
             // rest of the interface calls them too.
-            pieces.push(Piece {
-                text: format!(" ★ {} ", meta.system_event),
-                style: Style::new()
-                    .fg(canvas_color())
-                    .bg(accent_color())
-                    .add_modifier(Modifier::BOLD),
-                atomic: true,
-            });
-            pieces.push(Piece {
-                text: " ".to_string(),
-                style: Style::new().fg(text_color()),
-                atomic: true,
-            });
+            push_chip(
+                &mut pieces,
+                format!(" ★ {} ", meta.system_event),
+                accent_color(),
+            );
         }
     }
 
@@ -1147,44 +1131,51 @@ fn content_pieces(msg: &ChatMessage, opts: &RenderOpts) -> Vec<Piece> {
         };
         // Tint the search term where it appears, rather than leaving the
         // reader to find it themselves in a wrapped message on a wide pane.
-        // The fragment is split around each occurrence so only the matching
-        // run is marked.
         let needle = opts.search_needle.to_lowercase();
-        if needle.is_empty() || !frag.text.to_lowercase().contains(&needle) {
-            pieces.push(Piece {
-                text: frag.text,
-                style,
-                atomic,
-            });
-            continue;
-        }
+        pieces.extend(highlight_needle(&frag.text, style, atomic, &needle));
+    }
+    pieces
+}
 
-        let lowered = frag.text.to_lowercase();
-        let mut cut = 0usize;
-        while let Some(at) = lowered[cut..].find(&needle) {
-            let start = cut + at;
-            let end = start + needle.len();
-            if start > cut {
-                pieces.push(Piece {
-                    text: frag.text[cut..start].to_string(),
-                    style,
-                    atomic,
-                });
-            }
+/// Splits `text` around every occurrence of `needle` (already lowercased) so
+/// each matching run gets its own piece, tinted with [`search_highlight`]
+/// instead of `style`. `needle` empty or absent from `text` (matched
+/// case-insensitively) leaves `text` as a single unmarked piece.
+fn highlight_needle(text: &str, style: Style, atomic: bool, needle: &str) -> Vec<Piece> {
+    if needle.is_empty() || !text.to_lowercase().contains(needle) {
+        return vec![Piece {
+            text: text.to_string(),
+            style,
+            atomic,
+        }];
+    }
+
+    let lowered = text.to_lowercase();
+    let mut pieces = Vec::new();
+    let mut cut = 0usize;
+    while let Some(at) = lowered[cut..].find(needle) {
+        let start = cut + at;
+        let end = start + needle.len();
+        if start > cut {
             pieces.push(Piece {
-                text: frag.text[start..end].to_string(),
-                style: style.bg(search_highlight()).add_modifier(Modifier::BOLD),
-                atomic: true,
-            });
-            cut = end;
-        }
-        if cut < frag.text.len() {
-            pieces.push(Piece {
-                text: frag.text[cut..].to_string(),
+                text: text[cut..start].to_string(),
                 style,
                 atomic,
             });
         }
+        pieces.push(Piece {
+            text: text[start..end].to_string(),
+            style: style.bg(search_highlight()).add_modifier(Modifier::BOLD),
+            atomic: true,
+        });
+        cut = end;
+    }
+    if cut < text.len() {
+        pieces.push(Piece {
+            text: text[cut..].to_string(),
+            style,
+            atomic,
+        });
     }
     pieces
 }
@@ -2196,6 +2187,125 @@ mod tests {
         let lines = render_message(&msg, 1, &RenderOpts::default());
         for line in &lines {
             assert!(line_width(line) <= 8);
+        }
+    }
+
+    // -- gutter consistency between layouts ----------------------------------
+
+    /// The gutter bar has to decorate the header/body rows a mention or
+    /// highlight actually names, not the reply-context row above them — and
+    /// it has to do so the same way whichever layout is asked for.
+    #[test]
+    fn the_mention_gutter_skips_the_reply_row_in_both_layouts() {
+        let mut msg = message("yes I agree");
+        msg.meta = Some(PlatformMeta::Twitch(TwitchMeta {
+            bits: 0,
+            first_message: false,
+            system_event: String::new(),
+            reply: Some(crate::chat::ReplyContext {
+                parent_id: "m0".into(),
+                parent_author: "Asker".into(),
+                parent_text: "who agrees?".into(),
+            }),
+        }));
+
+        for layout in [MessageLayout::Inline, MessageLayout::Grouped] {
+            let opts = RenderOpts {
+                layout,
+                mentions_me: true,
+                ..RenderOpts::default()
+            };
+            let lines = render_message(&msg, 80, &opts);
+            let reply_text = joined(std::slice::from_ref(&lines[0]));
+            assert!(reply_text.contains("↳ Asker"), "{layout:?}: {reply_text}");
+            assert!(
+                !reply_text.starts_with('▏'),
+                "{layout:?}: reply row got a gutter bar: {reply_text}"
+            );
+            let some_other_row_decorated = lines[1..]
+                .iter()
+                .any(|line| joined(std::slice::from_ref(line)).starts_with('▏'));
+            assert!(
+                some_other_row_decorated,
+                "{layout:?}: no row carried the gutter bar: {:?}",
+                joined(&lines)
+            );
+        }
+    }
+
+    // -- push_chip ------------------------------------------------------------
+
+    #[test]
+    fn push_chip_appends_a_ground_chip_then_a_plain_separator() {
+        let mut pieces = vec![Piece {
+            text: "before ".to_string(),
+            style: Style::new().fg(text_color()),
+            atomic: false,
+        }];
+        push_chip(&mut pieces, " 100 bits ".to_string(), Color::Rgb(1, 2, 3));
+
+        assert_eq!(pieces.len(), 3);
+        let chip = &pieces[1];
+        assert_eq!(chip.text, " 100 bits ");
+        assert!(chip.atomic);
+        assert_eq!(chip.style.bg, Some(Color::Rgb(1, 2, 3)));
+        assert_eq!(chip.style.fg, Some(canvas_color()));
+        assert!(chip.style.add_modifier.contains(Modifier::BOLD));
+
+        let separator = &pieces[2];
+        assert_eq!(separator.text, " ");
+        assert!(separator.atomic);
+        assert_eq!(separator.style.fg, Some(text_color()));
+        assert!(separator.style.bg.is_none());
+    }
+
+    // -- highlight_needle -----------------------------------------------------
+
+    fn piece_texts(pieces: &[Piece]) -> Vec<&str> {
+        pieces.iter().map(|p| p.text.as_str()).collect()
+    }
+
+    #[test]
+    fn highlight_needle_with_no_needle_leaves_the_text_as_one_unmarked_piece() {
+        let style = Style::new().fg(text_color());
+        let pieces = highlight_needle("hello world", style, false, "");
+        assert_eq!(piece_texts(&pieces), vec!["hello world"]);
+        assert_eq!(pieces[0].style.fg, style.fg);
+        assert!(pieces[0].style.bg.is_none());
+        assert!(!pieces[0].atomic);
+    }
+
+    #[test]
+    fn highlight_needle_absent_from_the_text_leaves_it_unmarked() {
+        let style = Style::new().fg(text_color());
+        let pieces = highlight_needle("nothing matches here", style, true, "zzz");
+        assert_eq!(piece_texts(&pieces), vec!["nothing matches here"]);
+        assert!(pieces[0].style.bg.is_none());
+        assert!(pieces[0].atomic);
+    }
+
+    #[test]
+    fn highlight_needle_splits_around_a_match_and_keeps_the_rest_plain() {
+        let style = Style::new().fg(text_color());
+        let pieces = highlight_needle("say hello now", style, false, "hello");
+        assert_eq!(piece_texts(&pieces), vec!["say ", "hello", " now"]);
+        assert!(!pieces[0].atomic);
+        assert!(pieces[0].style.bg.is_none());
+        assert!(pieces[1].atomic);
+        assert_eq!(pieces[1].style.bg, Some(search_highlight()));
+        assert!(pieces[1].style.add_modifier.contains(Modifier::BOLD));
+        assert!(!pieces[2].atomic);
+        assert!(pieces[2].style.bg.is_none());
+    }
+
+    #[test]
+    fn highlight_needle_marks_every_occurrence() {
+        let style = Style::new().fg(text_color());
+        let pieces = highlight_needle("ababab", style, false, "ab");
+        assert_eq!(piece_texts(&pieces), vec!["ab", "ab", "ab"]);
+        for piece in &pieces {
+            assert_eq!(piece.style.bg, Some(search_highlight()));
+            assert!(piece.atomic);
         }
     }
 }
