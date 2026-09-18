@@ -208,7 +208,7 @@ async fn run(
                 // existed only between two channel sends and nothing ever
                 // showed it.
                 let text = format!("{err:#}");
-                if text.contains("password is probably wrong") {
+                if is_auth_unrecoverable(&err) {
                     auth_failures += 1;
                 } else {
                     auth_failures = 0;
@@ -267,7 +267,6 @@ async fn run(
     }
 }
 
-/// Why a session ended.
 /// How many consecutive authentication refusals before the task stops trying.
 ///
 /// Three rather than one, because a genuine network failure at exactly the
@@ -275,6 +274,7 @@ async fn run(
 /// text says so itself.
 const AUTH_FAILURES_BEFORE_GIVING_UP: u32 = 3;
 
+/// Why a session ended.
 enum Outcome {
     /// The interface is shutting down.
     Closed,
@@ -307,21 +307,22 @@ async fn session(
     }
     let hello: Hello = serde_json::from_value(hello.d).context("reading OBS's hello")?;
 
-    let authentication = match (&hello.authentication, &params.password) {
-        (Some(challenge), Some(password)) => Some(super::auth::compute(
-            password,
-            &challenge.salt,
-            &challenge.challenge,
-        )),
-        (Some(_), None) => bail!(
-            "OBS is asking for a password. Put it in `[obs] password` in config.toml, or in \
-             the environment variable named by `password_env`."
-        ),
-        // OBS is not asking for one. A configured password is simply unused;
-        // saying so would be noise, since turning authentication off in OBS
-        // is a deliberate act.
-        (None, _) => None,
-    };
+    let authentication =
+        match (&hello.authentication, &params.password) {
+            (Some(challenge), Some(password)) => Some(super::auth::compute(
+                password,
+                &challenge.salt,
+                &challenge.challenge,
+            )),
+            (Some(_), None) => return Err(auth_unrecoverable(
+                "OBS is asking for a password. Put it in `[obs] password` in config.toml, or in \
+                 the environment variable named by `password_env`.",
+            )),
+            // OBS is not asking for one. A configured password is simply unused;
+            // saying so would be noise, since turning authentication off in OBS
+            // is a deliberate act.
+            (None, _) => None,
+        };
 
     let identify = Message {
         op: protocol::OPCODE_IDENTIFY,
@@ -344,21 +345,19 @@ async fn session(
     let identified = match read_message(&mut source).await {
         Ok(message) => message,
         Err(err) if authenticated => {
-            return Err(err.context(
-                "OBS closed the connection during authentication — the password is probably wrong",
-            ));
+            return Err(auth_unrecoverable(format!(
+                "OBS closed the connection during authentication — the password is probably wrong: {err:#}"
+            )));
         }
         Err(err) => return Err(err.context("waiting for OBS to accept the connection")),
     };
     if identified.op != protocol::OPCODE_IDENTIFIED {
-        bail!(
-            "OBS refused the connection{}",
-            if authenticated {
-                " — the password is probably wrong"
-            } else {
-                ""
-            }
-        );
+        if authenticated {
+            return Err(auth_unrecoverable(
+                "OBS refused the connection — the password is probably wrong",
+            ));
+        }
+        bail!("OBS refused the connection");
     }
 
     let _ = updates.send(Update::Connection(Connection::Connected));
@@ -398,7 +397,7 @@ async fn session(
                 let Some(incoming) = incoming else { return Ok(Outcome::Disconnected) };
                 let Ok(message) = incoming else { return Ok(Outcome::Disconnected) };
                 let Some(message) = decode(message) else { continue };
-                let event = handle_incoming(message, &mut pending, &mut state, updates);
+                let event = handle_incoming(message, &mut pending, &mut state, Some(updates));
 
                 // Some events only say *that* a list changed — a scene was
                 // added, an input removed, a whole scene collection swapped.
@@ -475,6 +474,34 @@ impl std::fmt::Display for TransportGone {
 
 impl std::error::Error for TransportGone {}
 
+/// Whether an error means authentication cannot succeed by retrying — a
+/// wrong password, or none configured where OBS demands one.
+fn is_auth_unrecoverable(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<AuthUnrecoverable>().is_some())
+}
+
+/// Wrap a message as an authentication failure that retrying will not fix,
+/// so [`is_auth_unrecoverable`] can find it in the chain rather than
+/// somebody matching on the message text — text a genuine transient failure
+/// could just as easily produce.
+fn auth_unrecoverable(message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(AuthUnrecoverable).context(message.into())
+}
+
+/// Marker for [`auth_unrecoverable`].
+#[derive(Debug)]
+struct AuthUnrecoverable;
+
+impl std::fmt::Display for AuthUnrecoverable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "retrying will not fix this")
+    }
+}
+
+impl std::error::Error for AuthUnrecoverable {}
+
 type Sink = futures_util::stream::SplitSink<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     WsMessage,
@@ -527,7 +554,7 @@ fn handle_incoming(
     message: Message,
     pending: &mut HashMap<String, oneshot::Sender<Result<serde_json::Value>>>,
     state: &mut ObsState,
-    updates: &mpsc::UnboundedSender<Update>,
+    updates: Option<&mpsc::UnboundedSender<Update>>,
 ) -> Option<Event> {
     match message.op {
         protocol::OPCODE_REQUEST_RESPONSE => {
@@ -551,7 +578,9 @@ fn handle_incoming(
             let event = serde_json::from_value::<protocol::Event>(message.d).ok()?;
             let parsed = Event::from_raw(&event.event_type, event.event_data.as_ref())?;
             parsed.apply(state);
-            let _ = updates.send(Update::Event(parsed.clone()));
+            if let Some(updates) = updates {
+                let _ = updates.send(Update::Event(parsed.clone()));
+            }
             Some(parsed)
         }
         _ => None,
@@ -625,8 +654,7 @@ fn handle_incoming_quietly(
     pending: &mut HashMap<String, oneshot::Sender<Result<serde_json::Value>>>,
     state: &mut ObsState,
 ) {
-    let (dummy_tx, _dummy_rx) = mpsc::unbounded_channel();
-    handle_incoming(message, pending, state, &dummy_tx);
+    handle_incoming(message, pending, state, None);
 }
 
 /// Whether the connection is up, from the state the task itself keeps.
@@ -751,22 +779,11 @@ async fn refresh_audio(
         // Mute and volume come one input at a time. A source that refuses
         // either — some kinds have no volume at all — is still listed, with
         // that value left unknown rather than guessed at.
-        if let Ok(mute) = ask(sink, source, pending, state, requests::get_input_mute(name)).await {
-            input.muted = mute.get("inputMuted").and_then(|value| value.as_bool());
-        }
-        if let Ok(volume) = ask(
-            sink,
-            source,
-            pending,
-            state,
-            requests::get_input_volume(name),
-        )
-        .await
-        {
-            input.volume_mul = volume
-                .get("inputVolumeMul")
-                .and_then(|value| value.as_f64());
-            input.volume_db = volume.get("inputVolumeDb").and_then(|value| value.as_f64());
+        let (muted, volume) = fetch_mute_and_volume(sink, source, pending, state, name).await;
+        input.muted = muted.flatten();
+        if let Some((volume_mul, volume_db)) = volume {
+            input.volume_mul = volume_mul;
+            input.volume_db = volume_db;
         }
         audio.push(input);
     }
@@ -1015,6 +1032,46 @@ async fn run_command(
     Ok(())
 }
 
+/// Ask OBS for one input's current mute state and volume.
+///
+/// The outer `Option` says whether OBS answered at all; the inner is what it
+/// answered (some input kinds have no volume, or refuse the request). Kept
+/// apart rather than flattened so a caller re-reading an already-known input
+/// can leave a value as it was when the ask itself failed, instead of
+/// overwriting it with "unknown".
+async fn fetch_mute_and_volume(
+    sink: &mut Sink,
+    source: &mut Source,
+    pending: &mut HashMap<String, oneshot::Sender<Result<serde_json::Value>>>,
+    state: &mut ObsState,
+    name: &str,
+) -> (Option<Option<bool>>, Option<(Option<f64>, Option<f64>)>) {
+    let muted = ask(sink, source, pending, state, requests::get_input_mute(name))
+        .await
+        .ok()
+        .map(|mute| mute.get("inputMuted").and_then(|value| value.as_bool()));
+
+    let volume = ask(
+        sink,
+        source,
+        pending,
+        state,
+        requests::get_input_volume(name),
+    )
+    .await
+    .ok()
+    .map(|volume| {
+        (
+            volume
+                .get("inputVolumeMul")
+                .and_then(|value| value.as_f64()),
+            volume.get("inputVolumeDb").and_then(|value| value.as_f64()),
+        )
+    });
+
+    (muted, volume)
+}
+
 /// Re-read one input's mute state and level.
 ///
 /// OBS does send events for both, but they arrive on their own schedule —
@@ -1032,29 +1089,16 @@ async fn reread_input(
     state: &mut ObsState,
     name: &str,
 ) {
-    if let Ok(mute) = ask(sink, source, pending, state, requests::get_input_mute(name)).await {
-        let muted = mute.get("inputMuted").and_then(|value| value.as_bool());
-        if let Some(input) = state.audio.iter_mut().find(|input| input.name == name) {
-            input.muted = muted;
-        }
+    let (muted, volume) = fetch_mute_and_volume(sink, source, pending, state, name).await;
+    let Some(input) = state.audio.iter_mut().find(|input| input.name == name) else {
+        return;
+    };
+    if let Some(muted) = muted {
+        input.muted = muted;
     }
-    if let Ok(volume) = ask(
-        sink,
-        source,
-        pending,
-        state,
-        requests::get_input_volume(name),
-    )
-    .await
-    {
-        let mul = volume
-            .get("inputVolumeMul")
-            .and_then(|value| value.as_f64());
-        let db = volume.get("inputVolumeDb").and_then(|value| value.as_f64());
-        if let Some(input) = state.audio.iter_mut().find(|input| input.name == name) {
-            input.volume_mul = mul;
-            input.volume_db = db;
-        }
+    if let Some((volume_mul, volume_db)) = volume {
+        input.volume_mul = volume_mul;
+        input.volume_db = volume_db;
     }
 }
 
@@ -1525,6 +1569,43 @@ mod tests {
         assert!(
             gave_up,
             "a wrong password does not come right by waiting, so the task has to stop trying"
+        );
+
+        drop(handle.commands);
+        server.abort();
+    }
+
+    /// OBS demanding a password nobody configured is exactly as unfixable as
+    /// a wrong one — retrying will not help — so it must also stop the task
+    /// rather than being read as an ordinary, possibly-transient failure and
+    /// retried forever.
+    #[tokio::test]
+    async fn a_missing_password_is_reported_and_gives_up() {
+        let (url, server) = fake_obs(Some("hunter2")).await;
+        let (tx, mut updates) = mpsc::unbounded_channel();
+        let handle = spawn(params(url, None), tx);
+
+        let mut reported = None;
+        let mut gave_up = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while tokio::time::Instant::now() < deadline && !gave_up {
+            match tokio::time::timeout(Duration::from_secs(3), updates.recv()).await {
+                Ok(Some(Update::Connection(connection))) => {
+                    if let Some(reason) = connection.detail() {
+                        reported = Some(reason.to_string());
+                    }
+                    gave_up = matches!(connection, Connection::Failed(_));
+                }
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
+        }
+
+        let reported = reported.expect("a failure is reported");
+        assert!(reported.contains("password"), "got {reported}");
+        assert!(
+            gave_up,
+            "a missing password does not come right by waiting, so the task has to stop trying"
         );
 
         drop(handle.commands);
