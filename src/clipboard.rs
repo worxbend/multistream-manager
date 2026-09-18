@@ -22,6 +22,8 @@
 //! pure Rust and headless-friendly depend on a desktop being installed.
 
 use anyhow::{Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -197,7 +199,7 @@ fn copy_with_helper(text: &str) -> Option<Result<()>> {
 /// output belongs to the drawing code: mixing an escape sequence into the
 /// middle of a frame would corrupt it.
 fn copy_with_osc52(text: &str) -> Result<()> {
-    let payload = base64(text.as_bytes());
+    let payload = BASE64.encode(text.as_bytes());
     let sequence = format!("\x1b]52;c;{payload}\x07");
 
     // On Unix the sequence goes to the terminal device directly. Standard
@@ -218,31 +220,6 @@ fn copy_with_osc52(text: &str) -> Result<()> {
         .context("sending the copy sequence to the terminal")?;
     sink.flush().context("flushing the copy sequence")?;
     Ok(())
-}
-
-/// Standard base64, written out here because it is a dozen lines and the
-/// program has no other use for an encoding dependency.
-fn base64(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-
-    for chunk in input.chunks(3) {
-        // Pack the (up to) three bytes into one 24-bit number, then read it
-        // back out as four 6-bit groups.
-        let mut packed = 0u32;
-        for (index, byte) in chunk.iter().enumerate() {
-            packed |= (*byte as u32) << (16 - 8 * index);
-        }
-        for group in 0..4 {
-            if group <= chunk.len() {
-                let value = (packed >> (18 - 6 * group)) & 0b11_1111;
-                out.push(ALPHABET[value as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -321,24 +298,5 @@ mod tests {
         if let Err(panic) = result {
             std::panic::resume_unwind(panic);
         }
-    }
-
-    #[test]
-    fn base64_matches_the_standard_including_padding() {
-        assert_eq!(base64(b""), "");
-        assert_eq!(base64(b"f"), "Zg==");
-        assert_eq!(base64(b"fo"), "Zm8=");
-        assert_eq!(base64(b"foo"), "Zm9v");
-        assert_eq!(base64(b"foob"), "Zm9vYg==");
-        assert_eq!(base64(b"fooba"), "Zm9vYmE=");
-        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
-    }
-
-    /// Stream keys contain characters that must survive the round trip, and a
-    /// non-ASCII byte must not be mangled either.
-    #[test]
-    fn base64_handles_key_shaped_input() {
-        assert_eq!(base64("live_123456_AbCdEf-gh".as_bytes()).len() % 4, 0);
-        assert_eq!(base64("é".as_bytes()), "w6k=");
     }
 }

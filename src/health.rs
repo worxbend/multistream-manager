@@ -24,6 +24,8 @@
 
 use std::collections::BTreeMap;
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use crate::model::{Platform, PlatformStats};
 use crate::obs::state::ObsState;
 
@@ -235,8 +237,8 @@ fn first_sentence(text: &str) -> String {
     let end = trimmed.find(". ").map(|at| at + 1).unwrap_or(trimmed.len());
     let mut sentence = trimmed[..end].trim_end_matches('.').to_string();
     const LIMIT: usize = 40;
-    if sentence.chars().count() > LIMIT {
-        sentence = sentence.chars().take(LIMIT - 1).collect::<String>() + "…";
+    if sentence.graphemes(true).count() > LIMIT {
+        sentence = sentence.graphemes(true).take(LIMIT - 1).collect::<String>() + "…";
     }
     sentence
 }
@@ -354,6 +356,27 @@ mod tests {
             !segments[0].detail.contains("Try again"),
             "only the first sentence fits on this line: {}",
             segments[0].detail
+        );
+    }
+
+    /// A char-based cap can split a multi-codepoint grapheme cluster in half,
+    /// leaving a dangling joiner on a line drawn straight into the header.
+    #[test]
+    fn first_sentence_truncates_at_grapheme_boundaries() {
+        // One grapheme cluster, seven chars: a char-based cap would cut it
+        // apart well before 40 chars in.
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
+        let error = family.repeat(45);
+
+        let sentence = first_sentence(&error);
+
+        assert!(
+            sentence.ends_with('…'),
+            "expected the long error to be truncated: {sentence}"
+        );
+        assert!(
+            sentence.graphemes(true).all(|g| g == family || g == "…"),
+            "a grapheme cluster was split apart: {sentence}"
         );
     }
 

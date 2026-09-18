@@ -222,4 +222,63 @@ mod tests {
         assert!(help.contains("alt+1"));
         assert!(help.contains("--version"));
     }
+
+    /// `help_text()` hand-writes the five tab keys as `alt+1` .. `alt+5`.
+    /// `ui::command_palette::ENTRIES` hand-writes four of the same keys again,
+    /// as replayable events, and leaves the fifth (the Config tab) to fall
+    /// back to whatever the keymap has bound by default. Either copy going
+    /// stale against a rebind must fail this test rather than leave `--help`
+    /// telling people to press a key that does something else.
+    #[test]
+    fn help_text_tab_shortcuts_match_how_the_tabs_are_actually_bound() {
+        use crate::keys::{Action, Context, Key, Keymap};
+        use crate::ui::command_palette::ENTRIES;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let help = help_text();
+        let keymap = Keymap::defaults(crate::keys::default_leader());
+
+        let tabs = [
+            ('1', Action::TabStreamInfo),
+            ('2', Action::TabChat),
+            ('3', Action::TabCombined),
+            ('4', Action::TabObs),
+            ('5', Action::TabConfig),
+        ];
+
+        for (digit, action) in tabs {
+            let line = format!("alt+{digit}");
+            assert!(
+                help.contains(&line),
+                "help_text() no longer lists {line} for {action:?}"
+            );
+
+            // Where the palette has its own hand-written copy of the key, it
+            // has to still say the same thing as the help text.
+            if let Some(entry) = ENTRIES.iter().find(|entry| entry.action == Some(action)) {
+                assert_eq!(
+                    entry.shortcut, line,
+                    "command_palette::ENTRIES has drifted from help_text() for {action:?}"
+                );
+                assert!(
+                    entry.keys.iter().any(|key| {
+                        let event = key.event();
+                        event.code == KeyCode::Char(digit) && event.modifiers == KeyModifiers::ALT
+                    }),
+                    "command_palette::ENTRIES's replay keys for {action:?} no longer match {line}"
+                );
+            }
+
+            // Whichever hand-written copy exists or not, the key must still
+            // be the one the keymap actually binds by default — the palette
+            // falls back to this for any action, such as the Config tab, that
+            // has no entry of its own in ENTRIES.
+            let bound = keymap.chord_in(action, Context::Global).unwrap_or_default();
+            assert_eq!(
+                bound,
+                vec![Key::alt(digit)],
+                "the default keymap no longer binds {action:?} to {line}"
+            );
+        }
+    }
 }

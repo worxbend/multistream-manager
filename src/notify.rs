@@ -492,11 +492,34 @@ impl Backend {
 /// The lookup walks `PATH` rather than running anything — asking a program
 /// whether it exists by starting it is a poor trade in a function a settings
 /// pane calls on every redraw.
+///
+/// Being installed is not the same as being reachable: `notify-send`,
+/// `gdbus` and `kdialog` all talk to a session D-Bus that only exists inside
+/// a desktop session, so a machine reached over ssh with no display can have
+/// every one of them installed and still be unable to raise a pop-up —
+/// [`crate::clipboard::available_helper`] draws the same line for the
+/// clipboard helpers, for the same reason.
 pub fn available_backend() -> Option<&'static str> {
     Backend::CHAIN
         .iter()
+        .filter(|backend| has_the_session_it_needs(**backend))
         .map(|backend| backend.program())
         .find(|program| on_path(program))
+}
+
+/// Whether `backend`'s session bus is actually there.
+///
+/// `osascript` talks to the macOS notification center directly and needs
+/// nothing from the environment; the other three go over the session D-Bus,
+/// which is only present inside an active display or Wayland session.
+fn has_the_session_it_needs(backend: Backend) -> bool {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    match backend {
+        Backend::NotifySend | Backend::GDBus | Backend::KDialog => {
+            set("DISPLAY") || set("WAYLAND_DISPLAY") || set("DBUS_SESSION_BUS_ADDRESS")
+        }
+        Backend::OsaScript => true,
+    }
 }
 
 /// Whether `program` exists as an executable file somewhere on `PATH`.
@@ -742,6 +765,24 @@ mod tests {
         // GVariant syntax rather than shown as text.
         assert_eq!(gvariant_string("say \"hi\""), "\"say \\\"hi\\\"\"");
         assert_eq!(gvariant_string("back\\slash"), "\"back\\\\slash\"");
+    }
+
+    /// A backend that needs the session bus has to be judged on whether it is
+    /// there, not merely on whether the program exists — otherwise the
+    /// diagnostics claim a working notifier on a machine where sending one
+    /// will quietly fall through to the terminal bell.
+    #[test]
+    fn a_backend_that_needs_a_session_bus_is_only_ready_when_one_is_set() {
+        // Whatever this machine has, the rule has to be consistent with it.
+        let has_session = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty())
+            || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
+            || std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some_and(|v| !v.is_empty());
+        assert_eq!(has_the_session_it_needs(Backend::NotifySend), has_session);
+        assert_eq!(has_the_session_it_needs(Backend::GDBus), has_session);
+        assert_eq!(has_the_session_it_needs(Backend::KDialog), has_session);
+        // Answers to the operating system rather than to a session bus, so
+        // nothing in the environment can rule it out.
+        assert!(has_the_session_it_needs(Backend::OsaScript));
     }
 
     #[test]
