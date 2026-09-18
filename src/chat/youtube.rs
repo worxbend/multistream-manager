@@ -717,6 +717,17 @@ fn parse_micros(value: &str) -> Option<i64> {
     None
 }
 
+/// Build a [`PaidAmount`] from the wire's micros/currency/display/tier
+/// quartet, shared by super chats and super stickers alike.
+fn paid_amount(micros: &str, currency: &str, display: &str, tier: u32) -> PaidAmount {
+    PaidAmount {
+        micros: parse_micros(micros).unwrap_or(0),
+        currency: currency.trim().to_string(),
+        display: display.trim().to_string(),
+        tier: tier.min(u32::from(u8::MAX)) as u8,
+    }
+}
+
 /// Parse an RFC 3339 timestamp; an unreadable one becomes `None`, which the
 /// renderer shows as `--:--` instead of jumping to the epoch.
 fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
@@ -727,8 +738,11 @@ fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
 
 /// Synthesize the badge set from `authorDetails` booleans in the fixed
 /// order owner, moderator, member, verified (yc: `BadgesForAuthor`), with
-/// the membership level name riding on the member badge when known.
-fn badges_for(author: &WireAuthor, member_level: &str, force_member: bool) -> Vec<Badge> {
+/// the membership level name riding on the member badge when known. A
+/// non-empty `member_level` is itself evidence of membership (only the
+/// membership event arms ever pass one), so it counts alongside the
+/// `isChatSponsor` flag rather than needing a separate switch.
+fn badges_for(author: &WireAuthor, member_level: &str) -> Vec<Badge> {
     let mut badges = Vec::new();
     let mut push = |set: &str, info: &str| {
         badges.push(Badge {
@@ -743,7 +757,7 @@ fn badges_for(author: &WireAuthor, member_level: &str, force_member: bool) -> Ve
     if author.is_chat_moderator {
         push("moderator", "");
     }
-    if author.is_chat_sponsor || force_member {
+    if author.is_chat_sponsor || !member_level.trim().is_empty() {
         push("member", member_level);
     }
     if author.is_verified {
@@ -759,7 +773,6 @@ fn base_message(
     text: String,
     historical: bool,
     member_level: &str,
-    force_member: bool,
 ) -> ChatMessage {
     ChatMessage {
         id: item.id.clone(),
@@ -768,7 +781,7 @@ fn base_message(
             id: item.author_details.channel_id.clone(),
             login: String::new(),
             display_name: item.author_details.display_name.clone(),
-            badges: badges_for(&item.author_details, member_level, force_member),
+            badges: badges_for(&item.author_details, member_level),
             color_hint: None,
         },
         text,
@@ -832,14 +845,8 @@ fn normalize_item(item: &WireMessage, historical: bool, seen: &DedupeRing) -> No
                 .filter(|text| !text.is_empty())
                 .unwrap_or(snippet.display_message.trim())
                 .to_string();
-            out.messages.push(base_message(
-                item,
-                MessageKind::Chat,
-                text,
-                historical,
-                "",
-                false,
-            ));
+            out.messages
+                .push(base_message(item, MessageKind::Chat, text, historical, ""));
         }
 
         "superChatEvent" => {
@@ -849,15 +856,15 @@ fn normalize_item(item: &WireMessage, historical: bool, seen: &DedupeRing) -> No
             } else {
                 details.user_comment.trim().to_string()
             };
-            let mut msg = base_message(item, MessageKind::Paid, text, historical, "", false);
+            let mut msg = base_message(item, MessageKind::Paid, text, historical, "");
             set_meta(
                 &mut msg,
-                Some(PaidAmount {
-                    micros: parse_micros(&details.amount_micros).unwrap_or(0),
-                    currency: details.currency.trim().to_string(),
-                    display: details.amount_display_string.trim().to_string(),
-                    tier: details.tier.min(u32::from(u8::MAX)) as u8,
-                }),
+                Some(paid_amount(
+                    &details.amount_micros,
+                    &details.currency,
+                    &details.amount_display_string,
+                    details.tier,
+                )),
                 None,
             );
             out.messages.push(msg);
@@ -872,15 +879,15 @@ fn normalize_item(item: &WireMessage, historical: bool, seen: &DedupeRing) -> No
             } else {
                 details.super_sticker_metadata.alt_text.trim().to_string()
             };
-            let mut msg = base_message(item, MessageKind::Paid, text, historical, "", false);
+            let mut msg = base_message(item, MessageKind::Paid, text, historical, "");
             set_meta(
                 &mut msg,
-                Some(PaidAmount {
-                    micros: parse_micros(&details.amount_micros).unwrap_or(0),
-                    currency: details.currency.trim().to_string(),
-                    display: details.amount_display_string.trim().to_string(),
-                    tier: details.tier.min(u32::from(u8::MAX)) as u8,
-                }),
+                Some(paid_amount(
+                    &details.amount_micros,
+                    &details.currency,
+                    &details.amount_display_string,
+                    details.tier,
+                )),
                 None,
             );
             out.messages.push(msg);
@@ -899,7 +906,6 @@ fn normalize_item(item: &WireMessage, historical: bool, seen: &DedupeRing) -> No
                 snippet.display_message.trim().to_string(),
                 historical,
                 &details.member_level_name,
-                true,
             );
             set_meta(
                 &mut msg,
@@ -930,7 +936,6 @@ fn normalize_item(item: &WireMessage, historical: bool, seen: &DedupeRing) -> No
                 text,
                 historical,
                 &details.member_level_name,
-                true,
             );
             set_meta(
                 &mut msg,
@@ -956,7 +961,6 @@ fn normalize_item(item: &WireMessage, historical: bool, seen: &DedupeRing) -> No
                 snippet.display_message.trim().to_string(),
                 historical,
                 "",
-                false,
             );
             set_meta(
                 &mut msg,
@@ -982,7 +986,6 @@ fn normalize_item(item: &WireMessage, historical: bool, seen: &DedupeRing) -> No
                 snippet.display_message.trim().to_string(),
                 historical,
                 &details.member_level_name,
-                true,
             );
             set_meta(
                 &mut msg,
@@ -1014,7 +1017,6 @@ fn normalize_item(item: &WireMessage, historical: bool, seen: &DedupeRing) -> No
                 text,
                 historical,
                 "",
-                false,
             ));
         }
 
@@ -1035,7 +1037,6 @@ fn normalize_item(item: &WireMessage, historical: bool, seen: &DedupeRing) -> No
                 text,
                 historical,
                 "",
-                false,
             ));
         }
 
@@ -1099,7 +1100,6 @@ fn normalize_item(item: &WireMessage, historical: bool, seen: &DedupeRing) -> No
                 snippet.display_message.trim().to_string(),
                 historical,
                 "",
-                false,
             ));
         }
     }
@@ -1350,63 +1350,9 @@ impl Poller {
         // Session loop: every `continue 'session` is a (re)connect, resuming
         // from the retained continuation token when one survives.
         'session: loop {
-            self.emit_status(ConnectionStatus::Connecting, "resolving live chat");
-
-            // Resolution retries transient failures on the same ladder as a
-            // failed poll, so a network blip while resolving does not strand
-            // the chat.
-            let mut backoff = BACKOFF_FLOOR;
-            let resolved = loop {
-                match self.resolve(&target).await {
-                    Ok(resolved) => break resolved,
-                    Err(failure) => match failure.kind {
-                        FailKind::Transient | FailKind::RateLimited => {
-                            let cap = if failure.kind == FailKind::RateLimited {
-                                BACKOFF_RATE_LIMIT_CAP
-                            } else {
-                                BACKOFF_TRANSIENT_CAP
-                            };
-                            backoff = climb(backoff, self.floor, cap);
-                            self.emit_status(ConnectionStatus::Reconnecting, failure.detail);
-                            let delay = next_interval(
-                                Duration::ZERO,
-                                self.floor,
-                                self.ceiling,
-                                backoff,
-                                &mut self.jitter,
-                            );
-                            match self.sleep(&mut rx, delay).await {
-                                Wake::Tick => continue,
-                                Wake::Reconnect => continue 'session,
-                                Wake::Shutdown => return,
-                            }
-                        }
-                        FailKind::Quota => {
-                            self.emit_status(ConnectionStatus::QuotaPaused, failure.detail);
-                            match self.park(&mut rx).await {
-                                Wake::Reconnect => {
-                                    self.reserve_overridden = true;
-                                    continue 'session;
-                                }
-                                _ => return,
-                            }
-                        }
-                        FailKind::Auth => {
-                            self.emit_status(ConnectionStatus::Failed, failure.detail);
-                            match self.park(&mut rx).await {
-                                Wake::Reconnect => continue 'session,
-                                _ => return,
-                            }
-                        }
-                        FailKind::ChatGone | FailKind::Rejected => {
-                            self.emit_status(ConnectionStatus::Closed, failure.detail);
-                            match self.park(&mut rx).await {
-                                Wake::Reconnect => continue 'session,
-                                _ => return,
-                            }
-                        }
-                    },
-                }
+            let resolved = match self.resolve_with_retry(&target, &mut rx).await {
+                Some(resolved) => resolved,
+                None => return,
             };
             self.live_chat_id = resolved.live_chat_id.clone();
             self.label = resolved.label().to_string();
@@ -1506,106 +1452,20 @@ impl Poller {
 
                     Ok(response) => {
                         backoff = decay(backoff);
-                        if !connected {
-                            connected = true;
-                            self.emit_status(
-                                ConnectionStatus::Connected,
-                                format!("connected to {}", self.label),
-                            );
-                        }
-
-                        let mut delivered = 0usize;
-                        for item in &response.items {
-                            let normalized = normalize_item(item, priming, &self.seen);
-                            for message in normalized.messages {
-                                // The dedupe ring is the reason a retained
-                                // token, a retry, and a reconnect never
-                                // reprint a row.
-                                if self.seen.insert(&message.id) {
-                                    delivered += 1;
-                                    self.emit(ChatEvent::Message(Box::new(message)));
-                                }
-                            }
-                            for event in normalized.events {
-                                self.emit(event);
-                            }
-                            if normalized.chat_ended {
-                                self.emit_status(
-                                    ConnectionStatus::Closed,
-                                    "the live chat has ended",
-                                );
-                                match self.park(&mut rx).await {
-                                    Wake::Reconnect => continue 'session,
-                                    _ => return,
-                                }
-                            }
-                        }
-                        if delivered > 0 {
-                            last_item_at = Some(std::time::Instant::now());
-                        }
-                        priming = false;
-
-                        if response.polling_interval_millis > 0 {
-                            server_floor = Duration::from_millis(response.polling_interval_millis);
-                        }
-                        // Retain the last good token; an empty nextPageToken
-                        // never clears the retained one.
-                        if !response.next_page_token.is_empty() {
-                            page_token = Some(response.next_page_token.clone());
-                            self.retained_token = page_token.clone();
-                        }
-
-                        // offlineAt is a warning, not a stop: chat outlives
-                        // the broadcast. The window is measured from when
-                        // this session *observed* it (offlineAt itself is a
-                        // past timestamp), and any new message restarts it.
-                        if !response.offline_at.trim().is_empty() {
-                            let noted =
-                                *offline_noted_at.get_or_insert_with(std::time::Instant::now);
-                            let quiet_since = match last_item_at {
-                                Some(item_at) if item_at > noted => item_at,
-                                _ => noted,
-                            };
-                            if quiet_since.elapsed() > OFFLINE_GRACE {
-                                self.emit_status(
-                                    ConnectionStatus::Closed,
-                                    "live chat closed after the broadcast ended",
-                                );
-                                match self.park(&mut rx).await {
-                                    Wake::Reconnect => continue 'session,
-                                    _ => return,
-                                }
-                            }
-                        } else {
-                            offline_noted_at = None;
-                        }
-
-                        if let Some(reason) = self.reserve_pause_reason() {
-                            self.emit_status(ConnectionStatus::QuotaPaused, reason);
-                            match self.park(&mut rx).await {
-                                Wake::Reconnect => {
-                                    self.reserve_overridden = true;
-                                    continue 'session;
-                                }
-                                _ => return,
-                            }
-                        }
-
-                        // The live `backoff`, not the floor. Passing the
-                        // constant here meant a single successful poll wiped
-                        // out a ladder that errors had spent minutes
-                        // climbing — so a flapping API was polled at full
-                        // speed the moment one request got through, and the
-                        // `decay` below (which eases the ladder back down
-                        // gradually) never had anything to ease.
-                        let delay = next_interval(
-                            server_floor,
-                            self.floor,
-                            self.ceiling,
-                            backoff,
-                            &mut self.jitter,
-                        );
-                        match self.sleep(&mut rx, delay).await {
+                        let wake = self
+                            .deliver(
+                                &mut rx,
+                                response,
+                                &mut connected,
+                                &mut priming,
+                                &mut server_floor,
+                                &mut page_token,
+                                &mut offline_noted_at,
+                                &mut last_item_at,
+                                backoff,
+                            )
+                            .await;
+                        match wake {
                             Wake::Tick => continue,
                             Wake::Reconnect => continue 'session,
                             Wake::Shutdown => return,
@@ -1614,6 +1474,187 @@ impl Poller {
                 }
             }
         }
+    }
+
+    /// The resolve ladder around a fresh session: retries a transient
+    /// failure on the backoff ladder, parks on anything that needs a person
+    /// to act, and restarts from a fresh status and a fresh backoff on every
+    /// Reconnect — the same restart a `continue 'session` around resolution
+    /// used to trigger before this was pulled out of `run`. `None` means the
+    /// command channel closed.
+    async fn resolve_with_retry(
+        &mut self,
+        target: &ChatTarget,
+        rx: &mut mpsc::Receiver<ChatCommand>,
+    ) -> Option<ChatTarget> {
+        loop {
+            self.emit_status(ConnectionStatus::Connecting, "resolving live chat");
+
+            // Resolution retries transient failures on the same ladder as a
+            // failed poll, so a network blip while resolving does not strand
+            // the chat.
+            let mut backoff = BACKOFF_FLOOR;
+            loop {
+                match self.resolve(target).await {
+                    Ok(resolved) => return Some(resolved),
+                    Err(failure) => match failure.kind {
+                        FailKind::Transient | FailKind::RateLimited => {
+                            let cap = if failure.kind == FailKind::RateLimited {
+                                BACKOFF_RATE_LIMIT_CAP
+                            } else {
+                                BACKOFF_TRANSIENT_CAP
+                            };
+                            backoff = climb(backoff, self.floor, cap);
+                            self.emit_status(ConnectionStatus::Reconnecting, failure.detail);
+                            let delay = next_interval(
+                                Duration::ZERO,
+                                self.floor,
+                                self.ceiling,
+                                backoff,
+                                &mut self.jitter,
+                            );
+                            match self.sleep(rx, delay).await {
+                                Wake::Tick => continue,
+                                // Restart the outer loop: fresh status, fresh
+                                // backoff, exactly what `continue 'session`
+                                // used to do.
+                                Wake::Reconnect => break,
+                                Wake::Shutdown => return None,
+                            }
+                        }
+                        FailKind::Quota => {
+                            self.emit_status(ConnectionStatus::QuotaPaused, failure.detail);
+                            match self.park(rx).await {
+                                Wake::Reconnect => {
+                                    self.reserve_overridden = true;
+                                    break;
+                                }
+                                _ => return None,
+                            }
+                        }
+                        FailKind::Auth => {
+                            self.emit_status(ConnectionStatus::Failed, failure.detail);
+                            match self.park(rx).await {
+                                Wake::Reconnect => break,
+                                _ => return None,
+                            }
+                        }
+                        FailKind::ChatGone | FailKind::Rejected => {
+                            self.emit_status(ConnectionStatus::Closed, failure.detail);
+                            match self.park(rx).await {
+                                Wake::Reconnect => break,
+                                _ => return None,
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    }
+
+    /// One list response, delivered: chat rows and events emitted through
+    /// the dedupe ring, cursor and cadence state updated, and the offline
+    /// grace and quota reserve checked — everything `run`'s poll loop does
+    /// after a successful `list` before deciding how long to wait next.
+    #[allow(clippy::too_many_arguments)]
+    async fn deliver(
+        &mut self,
+        rx: &mut mpsc::Receiver<ChatCommand>,
+        response: WireListResponse,
+        connected: &mut bool,
+        priming: &mut bool,
+        server_floor: &mut Duration,
+        page_token: &mut Option<String>,
+        offline_noted_at: &mut Option<std::time::Instant>,
+        last_item_at: &mut Option<std::time::Instant>,
+        backoff: f64,
+    ) -> Wake {
+        if !*connected {
+            *connected = true;
+            self.emit_status(
+                ConnectionStatus::Connected,
+                format!("connected to {}", self.label),
+            );
+        }
+
+        let mut delivered = 0usize;
+        for item in &response.items {
+            let normalized = normalize_item(item, *priming, &self.seen);
+            for message in normalized.messages {
+                // The dedupe ring is the reason a retained token, a retry,
+                // and a reconnect never reprint a row.
+                if self.seen.insert(&message.id) {
+                    delivered += 1;
+                    self.emit(ChatEvent::Message(Box::new(message)));
+                }
+            }
+            for event in normalized.events {
+                self.emit(event);
+            }
+            if normalized.chat_ended {
+                self.emit_status(ConnectionStatus::Closed, "the live chat has ended");
+                return self.park(rx).await;
+            }
+        }
+        if delivered > 0 {
+            *last_item_at = Some(std::time::Instant::now());
+        }
+        *priming = false;
+
+        if response.polling_interval_millis > 0 {
+            *server_floor = Duration::from_millis(response.polling_interval_millis);
+        }
+        // Retain the last good token; an empty nextPageToken never clears
+        // the retained one.
+        if !response.next_page_token.is_empty() {
+            *page_token = Some(response.next_page_token.clone());
+            self.retained_token = page_token.clone();
+        }
+
+        // offlineAt is a warning, not a stop: chat outlives the broadcast.
+        // The window is measured from when this session *observed* it
+        // (offlineAt itself is a past timestamp), and any new message
+        // restarts it.
+        if !response.offline_at.trim().is_empty() {
+            let noted = *offline_noted_at.get_or_insert_with(std::time::Instant::now);
+            let quiet_since = match *last_item_at {
+                Some(item_at) if item_at > noted => item_at,
+                _ => noted,
+            };
+            if quiet_since.elapsed() > OFFLINE_GRACE {
+                self.emit_status(
+                    ConnectionStatus::Closed,
+                    "live chat closed after the broadcast ended",
+                );
+                return self.park(rx).await;
+            }
+        } else {
+            *offline_noted_at = None;
+        }
+
+        if let Some(reason) = self.reserve_pause_reason() {
+            self.emit_status(ConnectionStatus::QuotaPaused, reason);
+            let wake = self.park(rx).await;
+            if matches!(wake, Wake::Reconnect) {
+                self.reserve_overridden = true;
+            }
+            return wake;
+        }
+
+        // The live `backoff`, not the floor. Passing the constant here meant
+        // a single successful poll wiped out a ladder that errors had spent
+        // minutes climbing — so a flapping API was polled at full speed the
+        // moment one request got through, and easing the ladder back down
+        // gradually (`decay`, applied by the caller before this runs) never
+        // had anything to ease.
+        let delay = next_interval(
+            *server_floor,
+            self.floor,
+            self.ceiling,
+            backoff,
+            &mut self.jitter,
+        );
+        self.sleep(rx, delay).await
     }
 
     /// Why the local ledger says to pause, honoring a manual override of the
@@ -1637,23 +1678,7 @@ impl Poller {
                 command = rx.recv() => match command {
                     None => return Wake::Shutdown,
                     Some(ChatCommand::Reconnect) => return Wake::Reconnect,
-                    Some(ChatCommand::Send { text, .. }) => self.handle_send(text).await,
-                    Some(ChatCommand::Delete { message_id }) => {
-                        self.handle_delete(message_id).await
-                    }
-                    Some(ChatCommand::Ban {
-                        channel_id,
-                        timeout_secs,
-                    }) => self.handle_ban(channel_id, timeout_secs).await,
-                    Some(ChatCommand::Clip) => {
-                        self.emit_local_notice("clips are a Twitch feature; YouTube has no clip API here")
-                    }
-                    Some(ChatCommand::Raid { .. })
-                    | Some(ChatCommand::Unraid)
-                    | Some(ChatCommand::Marker { .. }) => self
-                        .emit_local_notice(
-                            "raiding is a Twitch feature; YouTube has no equivalent",
-                        ),
+                    Some(other) => self.handle_command(other).await,
                 },
             }
         }
@@ -1667,21 +1692,51 @@ impl Poller {
             match rx.recv().await {
                 None => return Wake::Shutdown,
                 Some(ChatCommand::Reconnect) => return Wake::Reconnect,
-                Some(ChatCommand::Send { text, .. }) => self.handle_send(text).await,
-                Some(ChatCommand::Delete { message_id }) => self.handle_delete(message_id).await,
-                Some(ChatCommand::Ban {
-                    channel_id,
-                    timeout_secs,
-                }) => self.handle_ban(channel_id, timeout_secs).await,
-                Some(ChatCommand::Clip) => self
-                    .emit_local_notice("clips are a Twitch feature; YouTube has no clip API here"),
-                Some(ChatCommand::Raid { .. })
-                | Some(ChatCommand::Unraid)
-                | Some(ChatCommand::Marker { .. }) => {
-                    self.emit_local_notice("raiding is a Twitch feature; YouTube has no equivalent")
-                }
+                Some(other) => self.handle_command(other).await,
             }
         }
+    }
+
+    /// Every command `sleep` and `park` serve identically while waiting:
+    /// everything but Reconnect, which each caller intercepts itself because
+    /// it ends the wait rather than being handled during it.
+    async fn handle_command(&mut self, command: ChatCommand) {
+        match command {
+            ChatCommand::Reconnect => {
+                // Unreachable in practice: both callers match Reconnect out
+                // before a command ever reaches here.
+            }
+            ChatCommand::Send { text, .. } => self.handle_send(text).await,
+            ChatCommand::Delete { message_id } => self.handle_delete(message_id).await,
+            ChatCommand::Ban {
+                channel_id,
+                timeout_secs,
+            } => self.handle_ban(channel_id, timeout_secs).await,
+            ChatCommand::Clip => {
+                self.emit_local_notice("clips are a Twitch feature; YouTube has no clip API here")
+            }
+            ChatCommand::Raid { .. } | ChatCommand::Unraid | ChatCommand::Marker { .. } => {
+                self.emit_local_notice("raiding is a Twitch feature; YouTube has no equivalent")
+            }
+        }
+    }
+
+    /// One authenticated GET, sent then classified. Every caller charges the
+    /// ledger before reaching this, so the request has already been billed
+    /// no matter how it turns out; this only decides whether the body is
+    /// worth reading.
+    async fn get(&self, url: &str, token: &str) -> Result<reqwest::Response, Failure> {
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|_| Failure::transient("could not reach YouTube; check your connection"))?;
+        if !response.status().is_success() {
+            return Err(classify_response(response).await);
+        }
+        Ok(response)
     }
 
     /// One `liveChatMessages.list` call. Charged before dispatch.
@@ -1698,17 +1753,8 @@ impl Poller {
             url.push_str("&pageToken=");
             url.push_str(&urlencoding::encode(token));
         }
-        let response = self
-            .client
-            .get(&url)
-            .bearer_auth(&token)
-            .send()
-            .await
-            .map_err(|_| Failure::transient("could not reach YouTube; check your connection"))?;
-        if !response.status().is_success() {
-            return Err(classify_response(response).await);
-        }
-        response
+        self.get(&url, &token)
+            .await?
             .json::<WireListResponse>()
             .await
             .map_err(|_| Failure::transient("YouTube sent a chat page this program could not read"))
@@ -1763,19 +1809,14 @@ impl Poller {
             "{base}/videos?part=snippet,liveStreamingDetails,status&id={}",
             urlencoding::encode(video_id),
         );
-        let response = self
-            .client
-            .get(&url)
-            .bearer_auth(&token)
-            .send()
+        let parsed = self
+            .get(&url, &token)
+            .await?
+            .json::<WireVideosResponse>()
             .await
-            .map_err(|_| Failure::transient("could not reach YouTube; check your connection"))?;
-        if !response.status().is_success() {
-            return Err(classify_response(response).await);
-        }
-        let parsed = response.json::<WireVideosResponse>().await.map_err(|_| {
-            Failure::transient("YouTube sent a video listing this program could not read")
-        })?;
+            .map_err(|_| {
+                Failure::transient("YouTube sent a video listing this program could not read")
+            })?;
         let Some(video) = parsed.items.first() else {
             return Err(Failure {
                 kind: FailKind::ChatGone,
@@ -1826,19 +1867,14 @@ impl Poller {
                 urlencoding::encode(&handle),
             )
         };
-        let response = self
-            .client
-            .get(&url)
-            .bearer_auth(&token)
-            .send()
+        let parsed = self
+            .get(&url, &token)
+            .await?
+            .json::<WireChannelsResponse>()
             .await
-            .map_err(|_| Failure::transient("could not reach YouTube; check your connection"))?;
-        if !response.status().is_success() {
-            return Err(classify_response(response).await);
-        }
-        let parsed = response.json::<WireChannelsResponse>().await.map_err(|_| {
-            Failure::transient("YouTube sent a channel listing this program could not read")
-        })?;
+            .map_err(|_| {
+                Failure::transient("YouTube sent a channel listing this program could not read")
+            })?;
         let Some(channel) = parsed.items.first() else {
             return Err(Failure {
                 kind: FailKind::ChatGone,
@@ -2604,7 +2640,7 @@ mod tests {
             is_chat_sponsor: true,
             is_verified: true,
         };
-        let badges = badges_for(&author, "Gold", false);
+        let badges = badges_for(&author, "Gold");
         let sets: Vec<&str> = badges.iter().map(|b| b.set.as_str()).collect();
         assert_eq!(sets, ["owner", "moderator", "member", "verified"]);
     }
