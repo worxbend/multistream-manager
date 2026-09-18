@@ -9,6 +9,7 @@ pub mod input;
 pub mod mouse;
 pub mod obs_tab;
 pub mod splash;
+pub mod style_kit;
 pub mod theme_picker;
 pub mod toast;
 pub mod which_key;

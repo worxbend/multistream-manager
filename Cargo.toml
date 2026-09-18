@@ -37,6 +37,14 @@ ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
 tokio-stream = "0.1"
 
+# Small, focused ratatui ecosystem widgets, used only where they are a strict
+# upgrade over a hand-rolled equivalent with zero new App state: a checkbox
+# marker glyph, a per-platform viewer-share piechart, and a scrolling list
+# widget that replaces manual visible-window math.
+tui-checkbox = "0.4.6"
+tui-piechart = "1.0.2"
+tui-widget-list = "0.15.2"
+
 # Serialisation: JSON for the APIs, TOML for the on-disk config.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

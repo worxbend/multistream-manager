@@ -803,6 +803,70 @@ pub fn mix(base: &str, overlay: &str, amount: f64) -> String {
     ))
 }
 
+/// Linearly interpolate two ratatui [`Color`] values, the same way [`mix`]
+/// blends two hex strings.
+///
+/// Only [`Color::Rgb`] can be blended — that is the only variant this
+/// program's own colours ever take, since every one of them comes from
+/// [`color`] parsing a hex string. A non-`Rgb` input (`Color::Reset` from a
+/// malformed custom palette, say) has no channels to interpolate, so `first`
+/// is returned unchanged rather than the call panicking.
+pub fn blend_colors(first: Color, second: Color, amount: f64) -> Color {
+    let (Color::Rgb(fr, fg, fb), Color::Rgb(tr, tg, tb)) = (first, second) else {
+        return first;
+    };
+    let amount = amount.clamp(0.0, 1.0);
+    Color::Rgb(
+        interpolate(fr, tr, amount),
+        interpolate(fg, tg, amount),
+        interpolate(fb, tb, amount),
+    )
+}
+
+/// A readable text colour — plain black or white — for text sitting on top of
+/// `background`.
+///
+/// Reuses the same relative-luminance comparison [`contrast_corrected`] makes
+/// for hex strings, but works directly on a [`Color`] so callers that already
+/// hold one (a badge's tone, a blended threshold colour) never have to round
+/// -trip through a hex string first. A non-`Rgb` input falls back to
+/// [`Color::White`], which reads acceptably against almost anything.
+pub fn contrast_text_for(background: Color) -> Color {
+    let Color::Rgb(r, g, b) = background else {
+        return Color::White;
+    };
+    let bg = (r, g, b);
+    let white_ratio = contrast_ratio((255, 255, 255), bg);
+    let black_ratio = contrast_ratio((0, 0, 0), bg);
+    if black_ratio > white_ratio {
+        Color::Black
+    } else {
+        Color::White
+    }
+}
+
+/// Grade a percentage (0.0–100.0) into a green-to-yellow-to-orange-to-red
+/// colour, for any usage or severity bar.
+///
+/// Deliberately the one place this ramp is defined: every caller — a cpu bar,
+/// a memory bar, a dropped-frame percentage — asks this function rather than
+/// picking thresholds of its own, so the four stops stay consistent across
+/// every panel. The "orange" stop between warning and error is not a fourth
+/// palette role; it is [`blend_colors`] splitting the distance between the
+/// two roles the palette already has, so a theme with no orange in it still
+/// produces one.
+pub fn threshold_color(percent: f64, sk: &Skin) -> Color {
+    if percent >= 92.0 {
+        sk.error
+    } else if percent >= 80.0 {
+        blend_colors(sk.warning, sk.error, 0.5)
+    } else if percent >= 60.0 {
+        sk.warning
+    } else {
+        sk.success
+    }
+}
+
 fn interpolate(from: u8, to: u8, fraction: f64) -> u8 {
     let value = from as f64 + (to as f64 - from as f64) * fraction;
     value.round().clamp(0.0, 255.0) as u8
@@ -1009,6 +1073,52 @@ mod tests {
     fn the_terminal_background_sequences_are_well_formed() {
         assert_eq!(background_sequence("#1a1523"), "\u{1b}]11;#1a1523\u{7}");
         assert_eq!(RESET_BACKGROUND_SEQUENCE, "\u{1b}]111\u{7}");
+    }
+
+    #[test]
+    fn blend_colors_interpolates_like_mix_does_for_hex_strings() {
+        let black = Color::Rgb(0, 0, 0);
+        let white = Color::Rgb(255, 255, 255);
+        assert_eq!(blend_colors(black, white, 0.0), black);
+        assert_eq!(blend_colors(black, white, 1.0), white);
+        assert_eq!(blend_colors(black, white, 0.5), Color::Rgb(128, 128, 128));
+    }
+
+    #[test]
+    fn blend_colors_falls_back_to_the_first_colour_when_either_side_is_not_rgb() {
+        let black = Color::Rgb(0, 0, 0);
+        assert_eq!(blend_colors(Color::Reset, black, 0.5), Color::Reset);
+        assert_eq!(blend_colors(black, Color::Reset, 0.5), black);
+    }
+
+    #[test]
+    fn contrast_text_for_picks_black_on_light_and_white_on_dark() {
+        assert_eq!(contrast_text_for(Color::Rgb(255, 255, 255)), Color::Black);
+        assert_eq!(contrast_text_for(Color::Rgb(0, 0, 0)), Color::White);
+    }
+
+    #[test]
+    fn contrast_text_for_falls_back_to_white_for_a_non_rgb_colour() {
+        assert_eq!(contrast_text_for(Color::Reset), Color::White);
+    }
+
+    #[test]
+    fn threshold_color_buckets_into_four_stops() {
+        let sk = Skin::default();
+        assert_eq!(threshold_color(0.0, &sk), sk.success);
+        assert_eq!(threshold_color(59.9, &sk), sk.success);
+        assert_eq!(threshold_color(60.0, &sk), sk.warning);
+        assert_eq!(threshold_color(79.9, &sk), sk.warning);
+        assert_eq!(
+            threshold_color(80.0, &sk),
+            blend_colors(sk.warning, sk.error, 0.5)
+        );
+        assert_eq!(
+            threshold_color(91.9, &sk),
+            blend_colors(sk.warning, sk.error, 0.5)
+        );
+        assert_eq!(threshold_color(92.0, &sk), sk.error);
+        assert_eq!(threshold_color(100.0, &sk), sk.error);
     }
 
     #[test]
