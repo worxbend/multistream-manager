@@ -763,7 +763,13 @@ pub fn render_message(msg: &ChatMessage, width: u16, opts: &RenderOpts) -> Vec<L
     });
 
     let content = content_pieces(msg, opts);
-    let mut rows = wrap(prefix, content, width);
+    // Every row this function hands back ends up wearing exactly one gutter
+    // bar (`mark_sender`'s tint or, on a mention/highlight, `mark_mention`'s
+    // accent), so the wrap budget reserves that one cell up front rather
+    // than letting the bar push an already-fully-packed row past the width
+    // the caller asked for.
+    let mut rows = wrap(prefix, content, width.saturating_sub(1).max(1));
+    mark_sender(&mut rows, identity_color_for(msg), opts);
     mark_mention(&mut rows, opts);
     // Above the message, so it reads the way a threaded reply does. Dropped
     // in the compact layout, which trades every decoration for message text.
@@ -792,6 +798,35 @@ fn mark_mention(rows: &mut [Line<'static>], opts: &RenderOpts) {
                 Style::new().fg(accent_color()).add_modifier(Modifier::BOLD),
             ),
         );
+    }
+}
+
+/// How far the sender gutter's tint is pulled toward the canvas, away from
+/// the full-saturation color the author's name itself is drawn in: enough
+/// for a run of different senders' bars to read as different colors at a
+/// glance, without the gutter competing with `mark_mention`'s bar (the
+/// signal that actually has to stand out) or the selection wash `chat_tab.rs`
+/// lays over a whole selected message.
+const SENDER_GUTTER_TINT: f64 = 0.45;
+
+/// Put a faint per-author gutter down the left of every row, so a run of
+/// messages from different senders is visually separable without reading
+/// each name — the companion to `mark_mention`, which claims the same
+/// one-cell column for the rarer, more urgent case.
+///
+/// Skipped on a row `mark_mention` is about to decorate: the two would land
+/// in the same column, and a mention or highlight is the one thing in the
+/// pane that must not blend in with the ordinary per-author coloring around
+/// it, so the brighter accent bar wins outright rather than the two
+/// stacking.
+fn mark_sender(rows: &mut [Line<'static>], tone: Color, opts: &RenderOpts) {
+    if opts.mentions_me || opts.highlighted {
+        return;
+    }
+    let tint = crate::theme::blend_colors(tone, canvas_color(), SENDER_GUTTER_TINT);
+    for row in rows.iter_mut() {
+        row.spans
+            .insert(0, Span::styled("▏".to_string(), Style::new().fg(tint)));
     }
 }
 
@@ -856,18 +891,28 @@ fn reply_row(msg: &ChatMessage, width: usize, indent: usize) -> Option<Line<'sta
     )))
 }
 
-/// The author-name pieces shared by every layout: the bold identity-colored
-/// display name, plus a muted ` (login)` when [`RenderOpts::full_username`]
-/// asks for it and the login adds information (twi usernameFragment).
-fn name_pieces(msg: &ChatMessage, opts: &RenderOpts) -> Vec<Piece> {
-    // The color keys off the stable platform id when there is one, so a
-    // display-name change does not recolor someone mid-conversation.
+/// The color an author's name, header pill and row gutter are all drawn
+/// with, factored out of `name_pieces` so every place that needs "this
+/// author's color" — the plain name, the grouped header's pill, the sender
+/// gutter (`mark_sender`) — derives it the same way instead of each
+/// recomputing (and risking drift on) the identity/background lookup.
+///
+/// The color keys off the stable platform id when there is one, so a
+/// display-name change does not recolor someone mid-conversation.
+fn identity_color_for(msg: &ChatMessage) -> Color {
     let identity = if msg.author.id.is_empty() {
         &msg.author.login
     } else {
         &msg.author.id
     };
-    let name_color = identity_color(identity, &[canvas_color()], text_color());
+    identity_color(identity, &[canvas_color()], text_color())
+}
+
+/// The author-name pieces shared by every layout: the bold identity-colored
+/// display name, plus a muted ` (login)` when [`RenderOpts::full_username`]
+/// asks for it and the login adds information (twi usernameFragment).
+fn name_pieces(msg: &ChatMessage, opts: &RenderOpts) -> Vec<Piece> {
+    let name_color = identity_color_for(msg);
     let name = if msg.author.display_name.is_empty() {
         &msg.author.login
     } else {
@@ -907,11 +952,41 @@ fn render_grouped(msg: &ChatMessage, width: usize, opts: &RenderOpts) -> Vec<Lin
     } else {
         0
     };
+    // Every row this function hands back ends up wearing exactly one gutter
+    // bar (`mark_sender`'s tint or, on a mention/highlight, `mark_mention`'s
+    // accent), so the wrap budget reserves that one cell up front rather
+    // than letting the bar push an already-fully-packed row past the width
+    // the caller asked for.
+    let wrap_width = width.saturating_sub(1).max(1);
+    let sender_tone = identity_color_for(msg);
 
     let mut rows: Vec<Line<'static>> = Vec::new();
 
     if !opts.continues_group {
-        let mut header = name_pieces(msg, opts);
+        // Air between one sender's block and the next: the grouped layout
+        // drops the per-message header specifically so consecutive messages
+        // from the *same* author melt into one block, which means a block
+        // from a *different* author needs a clearer seam than the header
+        // row alone gives it.
+        rows.push(Line::default());
+
+        let mut header: Vec<Piece> = Vec::new();
+        let mut name_and_login = name_pieces(msg, opts).into_iter();
+        if let Some(name_piece) = name_and_login.next() {
+            // A solid pill rather than `name_pieces`' plain colored text:
+            // the grouped header is the one place a sender's name is read in
+            // isolation from their message (Inline and Compact always keep
+            // it glued to the text with a trailing colon), so it is the one
+            // place that can afford the width a pill costs.
+            push_chip(&mut header, format!(" {} ", name_piece.text), sender_tone);
+            // `push_chip` also appends its own trailing separator space;
+            // dropped here so a bare header (no badges, no timestamp) does
+            // not trail a stray space the plain-text header never had — the
+            // badge/timestamp gates below add their own single separator
+            // exactly as they did before the pill.
+            header.pop();
+        }
+        header.extend(name_and_login);
         // Width gates ported from twi groupedHeaderFragments: badges at
         // >= 24 cells, timestamp at >= 30 — below those the header is just
         // the name, because a clipped header row misleads more than a bare
@@ -956,7 +1031,7 @@ fn render_grouped(msg: &ChatMessage, width: usize, opts: &RenderOpts) -> Vec<Lin
             rows: Vec::new(),
             current: Vec::new(),
             used: 0,
-            width,
+            width: wrap_width,
             indent,
         };
         for piece in header {
@@ -969,7 +1044,7 @@ fn render_grouped(msg: &ChatMessage, width: usize, opts: &RenderOpts) -> Vec<Lin
         rows: Vec::new(),
         current: Vec::new(),
         used: 0,
-        width,
+        width: wrap_width,
         indent,
     };
     if indent > 0 {
@@ -984,12 +1059,13 @@ fn render_grouped(msg: &ChatMessage, width: usize, opts: &RenderOpts) -> Vec<Lin
         }
     }
     rows.extend(wrapper.finish());
+    mark_sender(&mut rows, sender_tone, opts);
     mark_mention(&mut rows, opts);
     // Above the message, so it reads the way a threaded reply does, and
-    // built only now — undecorated, after `mark_mention` — so the gutter bar
-    // lands the same way it does in `render_message`: on the header/body
-    // rows a mention or highlight actually names, not on the reply context
-    // above them.
+    // built only now — undecorated, after `mark_sender`/`mark_mention` — so
+    // the gutter bar lands the same way it does in `render_message`: on the
+    // header/body rows a mention or highlight actually names, not on the
+    // reply context above them.
     if let Some(row) = reply_row(msg, width, indent) {
         rows.insert(0, row);
     }
@@ -1089,11 +1165,21 @@ fn content_pieces(msg: &ChatMessage, opts: &RenderOpts) -> Vec<Piece> {
         }
     }
 
-    let body_modifier = if msg.kind == MessageKind::Action {
+    let mut body_modifier = if msg.kind == MessageKind::Action {
         Modifier::ITALIC
     } else {
         Modifier::empty()
     };
+    // A message drawn from its own local echo — sent, but not yet confirmed
+    // by the platform's own copy arriving back over the wire — is still
+    // provisional: it can be the authoritative message a moment later, or
+    // (rarely) never arrive at all. Dimming and italicizing it is the only
+    // visible difference between "sent" and "sent and confirmed", where
+    // before the two looked identical and a doubled send during a slow
+    // connection was invisible until the duplicate showed up.
+    if msg.local_echo {
+        body_modifier |= Modifier::ITALIC | Modifier::DIM;
+    }
     // Split the body further on the search term, so a match can be tinted
     // where it sits rather than only marked by the selection.
     for frag in split_fragments(&msg.text) {
@@ -1133,6 +1219,21 @@ fn content_pieces(msg: &ChatMessage, opts: &RenderOpts) -> Vec<Piece> {
         // reader to find it themselves in a wrapped message on a wide pane.
         let needle = opts.search_needle.to_lowercase();
         pieces.extend(highlight_needle(&frag.text, style, atomic, &needle));
+    }
+    if msg.local_echo {
+        // A single trailing marker rather than a leading one: the dimmed
+        // italic body already reads as provisional from the first
+        // character, so this only has to answer "why", not "which message" —
+        // and a leading glyph would shift every other layout's fixed-width
+        // columns (timestamp, badges) for a state that is normally gone
+        // within a second.
+        pieces.push(Piece {
+            text: " …".to_string(),
+            style: Style::new()
+                .fg(muted_color())
+                .add_modifier(Modifier::ITALIC),
+            atomic: true,
+        });
     }
     pieces
 }
@@ -1519,6 +1620,50 @@ mod tests {
         assert!(text.contains("★ resub"), "{text}");
     }
 
+    /// `local_echo` was parsed onto every locally-sent message and stored,
+    /// and nothing ever read it — so a message sent a moment before the
+    /// platform's own copy of it arrived looked identical to one already
+    /// confirmed, and a slow connection made a doubled send invisible until
+    /// the duplicate appeared.
+    #[test]
+    fn a_local_echo_gets_a_pending_send_cue() {
+        let mut echoed = message("be right back");
+        echoed.local_echo = true;
+        let confirmed = message("be right back");
+
+        let echoed_text = joined(&render_message(&echoed, 80, &RenderOpts::default()));
+        let confirmed_text = joined(&render_message(&confirmed, 80, &RenderOpts::default()));
+        assert!(echoed_text.contains('…'), "{echoed_text}");
+        assert!(
+            !confirmed_text.contains('…'),
+            "a confirmed message should not carry the pending marker: {confirmed_text}"
+        );
+
+        // The body wraps word-by-word into several spans (`Wrapper::push_text`
+        // chunks on word boundaries even when everything fits one row), so
+        // "right" — a word found nowhere else on the row — stands in for the
+        // body text as a whole.
+        let echoed_lines = render_message(&echoed, 80, &RenderOpts::default());
+        let body_span = echoed_lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("right"))
+            .expect("the body span exists (asserted above)");
+        assert!(body_span.style.add_modifier.contains(Modifier::ITALIC));
+        assert!(body_span.style.add_modifier.contains(Modifier::DIM));
+
+        let confirmed_lines = render_message(&confirmed, 80, &RenderOpts::default());
+        let confirmed_body_span = confirmed_lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("right"))
+            .expect("the body span exists (asserted above)");
+        assert!(!confirmed_body_span
+            .style
+            .add_modifier
+            .contains(Modifier::DIM));
+    }
+
     // -- identity_color -----------------------------------------------------
 
     const DARK_BG: Color = Color::Rgb(13, 17, 23);
@@ -1779,6 +1924,10 @@ mod tests {
         // Prefix: "--:-- " (6) + "Someone" (7) + ": " (2) = 15 cells.
         let text = joined(&lines);
         for row in text.lines().skip(1) {
+            // Every row now carries a one-cell sender gutter ahead of the
+            // prefix indent (`mark_sender`); strip it before checking the
+            // indent itself.
+            let row = row.strip_prefix('▏').unwrap_or(row);
             assert!(
                 row.starts_with(&" ".repeat(15)),
                 "continuation row {row:?} lacks the 15-cell indent"
@@ -1901,6 +2050,7 @@ mod tests {
     fn timestamps_render_as_placeholder_when_unknown_and_hide_when_off() {
         let msg = message("hello");
         let with = joined(&render_message(&msg, 80, &RenderOpts::default()));
+        let with = with.strip_prefix('▏').unwrap_or(&with);
         assert!(with.starts_with("--:-- "), "{with}");
         let opts = RenderOpts {
             timestamps: false,
@@ -1978,28 +2128,33 @@ mod tests {
         };
         let lines = render_message(&msg, 80, &opts);
         assert!(
-            lines.len() >= 2,
-            "expected header + body: {:?}",
+            lines.len() >= 3,
+            "expected a spacer + header + body: {:?}",
             joined(&lines)
         );
-        let header = joined(std::slice::from_ref(&lines[0]));
+        // lines[0] is the blank spacer `render_grouped` opens a new sender's
+        // block with; the header itself is lines[1].
+        let header = joined(std::slice::from_ref(&lines[1]));
         assert!(header.contains("Someone"), "{header}");
         assert!(header.contains('⚔'), "badges missing from header: {header}");
         assert!(header.contains("--:--"), "timestamp missing: {header}");
-        // The name is bold and identity-colored on the header row.
-        let name_span = lines[0]
+        // The name is a solid, bold, identity-toned pill on the header row.
+        let name_span = lines[1]
             .spans
             .iter()
             .find(|s| s.content.contains("Someone"))
             .expect("the name span exists (asserted above)");
         assert!(name_span.style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(name_span.style.fg, Some(canvas_color()));
         assert_eq!(
-            name_span.style.fg,
+            name_span.style.bg,
             Some(identity_color("u1", &[DARK_BG], text_color()))
         );
-        // Body rows carry the 3-cell indent at width 80 and no header parts.
-        let body = joined(std::slice::from_ref(&lines[1]));
-        assert!(body.starts_with("   hello"), "{body:?}");
+        // Body rows carry the 3-cell indent at width 80 (after the one-cell
+        // sender gutter every row now opens with) and no header parts.
+        let body = joined(std::slice::from_ref(&lines[2]));
+        let body_after_gutter = body.strip_prefix('▏').unwrap_or(body.as_str());
+        assert!(body_after_gutter.starts_with("   hello"), "{body:?}");
         assert!(
             !body.contains("Someone") && !body.contains("--:--"),
             "{body}"
@@ -2013,10 +2168,12 @@ mod tests {
             layout: MessageLayout::Grouped,
             ..RenderOpts::default()
         };
-        // width 39 (< 40): 2-cell indent; width 19 (< 20): none.
+        // width 39 (< 40): 2-cell indent; width 19 (< 20): none. lines[0] is
+        // the new-block spacer, lines[1] the header, lines[2] the body.
         let body = |width: u16| {
             let lines = render_message(&msg, width, &opts);
-            joined(std::slice::from_ref(&lines[1]))
+            let text = joined(std::slice::from_ref(&lines[2]));
+            text.strip_prefix('▏').unwrap_or(&text).to_string()
         };
         assert!(body(39).starts_with("  hi"), "{:?}", body(39));
         assert!(body(19).starts_with("hi"), "{:?}", body(19));
@@ -2069,6 +2226,9 @@ mod tests {
             "timestamp survived compact: {text}"
         );
         assert!(!text.contains('⚔'), "badges survived compact: {text}");
+        // Every row opens with a one-cell sender gutter (`mark_sender`)
+        // ahead of the content itself.
+        let text = text.strip_prefix('▏').unwrap_or(&text);
         assert!(text.starts_with("Someone: dense mode"), "{text}");
     }
 
@@ -2081,6 +2241,7 @@ mod tests {
             ..RenderOpts::default()
         };
         let text = joined(&render_message(&msg, 80, &opts));
+        let text = text.strip_prefix('▏').unwrap_or(&text);
         assert!(text.starts_with("* Someone waves"), "{text}");
     }
 
@@ -2229,6 +2390,40 @@ mod tests {
                 some_other_row_decorated,
                 "{layout:?}: no row carried the gutter bar: {:?}",
                 joined(&lines)
+            );
+        }
+    }
+
+    /// An ordinary message (no mention, no highlight) still gets a gutter —
+    /// the per-author sender tint — but it is dimmer than, and never stacks
+    /// with, the brighter accent bar a mention or highlight earns.
+    #[test]
+    fn an_ordinary_message_gets_the_dimmer_sender_tint_not_the_mention_accent() {
+        for layout in [MessageLayout::Inline, MessageLayout::Grouped] {
+            let msg = message("just chatting");
+            let opts = RenderOpts {
+                layout,
+                ..RenderOpts::default()
+            };
+            let lines = render_message(&msg, 80, &opts);
+            let gutter = lines
+                .iter()
+                .flat_map(|line| line.spans.first())
+                .find(|span| span.content == "▏")
+                .unwrap_or_else(|| panic!("{layout:?}: no gutter span: {:?}", joined(&lines)));
+            assert_eq!(
+                gutter.style.fg,
+                Some(crate::theme::blend_colors(
+                    identity_color("u1", &[canvas_color()], text_color()),
+                    canvas_color(),
+                    SENDER_GUTTER_TINT,
+                )),
+                "{layout:?}: sender gutter should be the tinted identity color, not the accent bar"
+            );
+            assert_ne!(
+                gutter.style.fg,
+                Some(accent_color()),
+                "{layout:?}: an unmentioned row must not wear the mention's accent bar"
             );
         }
     }
