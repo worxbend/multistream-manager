@@ -235,7 +235,12 @@ async fn run(
                     delay = RECONNECT_INITIAL;
                     continue;
                 }
-                Some(_) => continue,
+                Some(_) => {
+                    let _ = updates.send(Update::CommandFailed(
+                        "OBS gave up after repeated authentication failures — press R on the OBS tab once the password is fixed.".to_string(),
+                    ));
+                    continue;
+                }
             }
         }
 
@@ -1606,6 +1611,62 @@ mod tests {
         assert!(
             gave_up,
             "a missing password does not come right by waiting, so the task has to stop trying"
+        );
+
+        drop(handle.commands);
+        server.abort();
+    }
+
+    /// Once the task has given up after repeated authentication failures it
+    /// parks, waiting only for `Command::Reconnect`. Any other command sent
+    /// while parked must still be reported as failed rather than silently
+    /// dropped — the same courtesy the ordinary backoff-wait branch already
+    /// gives a command sent while merely reconnecting.
+    #[tokio::test]
+    async fn a_command_sent_after_giving_up_is_reported_and_not_dropped() {
+        let (url, server) = fake_obs(Some("hunter2")).await;
+        let (tx, mut updates) = mpsc::unbounded_channel();
+        let handle = spawn(params(url, None), tx);
+
+        let mut gave_up = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while tokio::time::Instant::now() < deadline && !gave_up {
+            match tokio::time::timeout(Duration::from_secs(3), updates.recv()).await {
+                Ok(Some(Update::Connection(connection))) => {
+                    gave_up = matches!(connection, Connection::Failed(_));
+                }
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
+        }
+        assert!(
+            gave_up,
+            "the task must give up before this test can proceed"
+        );
+
+        handle
+            .commands
+            .send(Command::SetScene("Break".to_string()))
+            .await
+            .expect("the channel still has room even though the task is parked");
+
+        let mut failure = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(2), updates.recv()).await {
+                Ok(Some(Update::CommandFailed(reason))) => {
+                    failure = Some(reason);
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
+        }
+        let failure =
+            failure.expect("a command sent after giving up must be reported, not silently dropped");
+        assert!(
+            failure.contains("authentication"),
+            "the report should name why the command could not run, got {failure}"
         );
 
         drop(handle.commands);
