@@ -211,7 +211,16 @@ impl AppearanceConfig {
     /// An unrecognised value means the same as the default: something is
     /// wrong with the config file, but the interface still has to draw.
     pub fn animation_mode(&self) -> crate::anim::Mode {
-        crate::anim::Mode::parse(&self.animations).unwrap_or_default()
+        match crate::anim::Mode::parse(&self.animations) {
+            Some(mode) => mode,
+            None => {
+                tracing::warn!(
+                    animations = %self.animations,
+                    "unknown animation mode; using the default"
+                );
+                crate::anim::Mode::default()
+            }
+        }
     }
 
     /// How long a pop-up notification stays up.
@@ -1372,9 +1381,17 @@ impl Config {
     /// the default rather than refusing to start — a typo in a name should
     /// cost you the right settings, not the program.
     pub fn active_preset(&self) -> &PresetConfig {
-        self.profile
-            .get(self.active_profile.trim())
-            .unwrap_or(&self.preset)
+        let name = self.active_profile.trim();
+        if let Some(preset) = self.profile.get(name) {
+            return preset;
+        }
+        if !name.is_empty() {
+            tracing::warn!(
+                profile = %self.active_profile,
+                "unknown active profile; using the default preset"
+            );
+        }
+        &self.preset
     }
 
     /// Every profile name, plus the unnamed default first.
@@ -1827,6 +1844,30 @@ mod tests {
                 assert_eq!(config.url(), "ws://localhost:4455", "{value}");
             });
         }
+    }
+
+    /// An unrecognised `animations` value must not stop the interface
+    /// drawing; the default mode is a far better answer than refusing to
+    /// run.
+    #[test]
+    fn an_unusable_animation_mode_falls_back_rather_than_failing() {
+        let appearance = AppearanceConfig {
+            animations: "reduce".into(),
+            ..Default::default()
+        };
+        assert_eq!(appearance.animation_mode(), crate::anim::Mode::default());
+    }
+
+    /// An `active_profile` naming a profile that is not there must not stop
+    /// the interface starting; the unnamed `[preset]` is a far better
+    /// answer than refusing to run.
+    #[test]
+    fn an_unknown_active_profile_falls_back_rather_than_failing() {
+        let config = Config {
+            active_profile: "missing".into(),
+            ..Default::default()
+        };
+        assert!(std::ptr::eq(config.active_preset(), &config.preset));
     }
 
     /// An IPv6 literal has to survive coming from the environment as well as
