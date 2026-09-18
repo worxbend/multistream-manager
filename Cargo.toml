@@ -23,6 +23,15 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 # the binary portable across distros.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 
+# rustls itself, as a direct dependency only so main.rs can install a default
+# crypto provider explicitly at start-up. reqwest asks rustls for the "ring"
+# backend but tokio-tungstenite/twitch-irc pull in rustls with its own default
+# features, which is "aws-lc-rs" — both end up compiled in, and with two
+# candidates present rustls refuses to guess which one to use, panicking on
+# the very first TLS handshake instead. Picking one here, once, before any
+# connection code runs, is what rustls's own panic message asks for.
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+
 # Terminal UI.
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }

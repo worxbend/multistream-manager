@@ -105,6 +105,16 @@ fn help_text() -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // reqwest wants rustls's "ring" backend; tokio-tungstenite and twitch-irc
+    // pull in rustls with its own default features, which compiles in
+    // "aws-lc-rs" too. With both linked, rustls has no way to guess which one
+    // to use and panics the first time anything opens a TLS connection —
+    // Twitch chat, the OBS WebSocket over TLS, or any HTTPS API call. This
+    // has to run before any of those, so it is the first thing main does.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("installed exactly once, here, before any TLS connection is attempted");
+
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     match parse_arguments(&arguments) {
         Invocation::Interface => {}
