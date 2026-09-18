@@ -10,6 +10,8 @@ would break an existing setup is listed under **Changed** with what to do.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-09-18
+
 ### Added
 
 - **The OAuth redirect port is now editable on the Setup screen** (`[general]
@@ -103,6 +105,27 @@ would break an existing setup is listed under **Changed** with what to do.
 - **`[keys.config]`**: the Config tab's keys are named, rebindable actions
   instead of hardcoded matches, so they appear in which-key, `<Leader>?` and
   the palette like every other tab's.
+- **<kbd>Ctrl+A</kbd> on the form applies the title, category, tags and
+  language to Twitch right now, without going live.** Ctrl+G was previously
+  the only way anything typed here ever reached a platform. Twitch, unlike
+  YouTube, has no separate "create a broadcast" step — the channel is always
+  there, and updating it is a completely independent call from starting the
+  feed in OBS — so there was no way to set a title and category up ahead of
+  time, or fix one mid-stream, without going live again for real. YouTube
+  says plainly that it does not support this yet, rather than pretending to.
+- **A modernised visual layer**, built on the existing theme system rather
+  than beside it: focused-panel borders and titles now follow one shared
+  rule everywhere more than one panel can be on screen at once; status text
+  (`READY`/`FAILED`, connection state, OBS's `STREAM`/`RECORD`) reads as
+  compact colour badges instead of bare bold text; usage values (OBS's cpu
+  meter) are graded on a consistent green-to-red scale; chat gains a subtle
+  per-sender colour gutter and breathing room between senders, and a
+  previously-untracked sent-but-unconfirmed message now actually renders
+  instead of silently vanishing until the real event arrives; the OBS
+  scene/audio lists and the Config tab's Accounts list moved onto a real
+  scrolling-list widget; and the dashboard shows a genuine per-platform
+  viewer-share pie chart when more than one platform is live, built only
+  from numbers already being tracked.
 
 ### Fixed
 
@@ -211,6 +234,33 @@ would break an existing setup is listed under **Changed** with what to do.
   back to the section list.
 - **The OBS status poll ran three requests a second forever**, including
   overnight on an idle machine.
+- **The very first TLS connection of the session could crash the program**
+  outright, or leave whichever background task hit it first — usually Twitch
+  chat — stuck on "connecting" forever with no explanation. `reqwest` and
+  `tokio-tungstenite`/`twitch-irc` each linked in a different default `rustls`
+  crypto backend, and with two present `rustls` had no way to pick one. A
+  provider is now chosen explicitly, once, before anything can need one.
+- **A category search that landed while a platform was mid-(re)connect came
+  back "no matches"** with no way to tell that apart from Twitch genuinely
+  having no such category — typing an exact, real category name and getting
+  refused looked like a broken search. It now says which platform was not
+  connected and what you typed.
+- **A command sent to OBS after it had given up on repeated authentication
+  failures vanished with no feedback**, the one place in that file that
+  didn't already report a command it couldn't run.
+- **Deleting or banning a notice/system row, or a not-yet-confirmed local
+  echo, on YouTube did nothing** with no explanation — unlike the equivalent
+  Twitch path, which always reaches Helix and reports a real refusal.
+- **Arming a moderation action with nothing selected, replying to or timing
+  out a non-message row, and reconnecting or joining a chat with none
+  open or no logged-in account, all silently did nothing.** Each now says so;
+  arming a moderation action and then pressing a key that hits one of these
+  no longer leaves the previous arm stuck either.
+- **Selecting a scene, toggling mute, or nudging the volume before OBS
+  connected silently did nothing** — the same gap `obs_command`'s own warning
+  already covered elsewhere in the same screen.
+- **An unrecognised `animations` value or a dangling `active_profile` name
+  fell back to the default with no trace anywhere that it had happened.**
 
 ### Changed
 
