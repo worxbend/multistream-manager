@@ -93,6 +93,23 @@ pub enum MessageKind {
     Unknown,
 }
 
+impl MessageKind {
+    /// The lowercase tag this kind reads as in the chat log and in
+    /// `[[chat.highlight]]` event rules — the one place that knows how a
+    /// `MessageKind` maps to text, shared so the chat log and the highlight
+    /// matcher cannot drift apart on what to call each kind.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Action => "action",
+            Self::Notice => "notice",
+            Self::Paid => "paid",
+            Self::Membership => "membership",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// The one message shape the UI consumes.
 #[derive(Debug, Clone)]
 pub struct ChatMessage {

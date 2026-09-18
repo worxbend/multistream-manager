@@ -35,7 +35,7 @@ use anyhow::Context as _;
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::chat::{ChatMessage, MessageKind, PlatformMeta};
+use crate::chat::{ChatMessage, PlatformMeta};
 
 /// The prefix + suffix mark the files this logger owns. Pruning only ever
 /// touches files carrying both, so pointing the log at a populated directory
@@ -106,14 +106,7 @@ fn is_false(v: &bool) -> bool {
 impl Record {
     /// Flattens a normalized message into its logged form (yc: FromMessage).
     pub fn from_message(chat_id: &str, msg: &ChatMessage) -> Self {
-        let kind_class = match msg.kind {
-            MessageKind::Chat => "chat",
-            MessageKind::Action => "action",
-            MessageKind::Notice => "notice",
-            MessageKind::Paid => "paid",
-            MessageKind::Membership => "membership",
-            MessageKind::Unknown => "unknown",
-        };
+        let kind_class = msg.kind.as_str();
         // The finest name the platform gave us; the coarse class otherwise.
         let kind = match &msg.meta {
             Some(PlatformMeta::YouTube(meta)) if !meta.raw_type.is_empty() => meta.raw_type.clone(),
@@ -471,7 +464,7 @@ fn csv_escape(field: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::{ChatAuthor, PaidAmount, YouTubeMeta};
+    use crate::chat::{ChatAuthor, MessageKind, PaidAmount, YouTubeMeta};
     use chrono::TimeZone as _;
 
     fn temp_dir(tag: &str) -> PathBuf {

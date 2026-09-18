@@ -173,31 +173,53 @@ pub struct ChatState {
 /// second copy of the scrollback.
 const SENT_HISTORY: usize = 50;
 
+/// Which way [`ChatState::recall_sent`] steps through the send history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recall {
+    /// Up: toward older sends.
+    Older,
+    /// Down: toward newer sends, and past the newest back to the live draft.
+    Newer,
+}
+
+/// Whether `needle` occurs in `hay` with a word boundary — anything that is
+/// not alphanumeric or an underscore, or the start/end of the string — on
+/// both sides. Both are expected lowercase.
+///
+/// Shared by `mentions` below and `rules::contains_word`: a message
+/// addressed to you and a highlight rule's whole-word match both have to
+/// answer the same question, and this is the one place that answers it.
+pub fn contains_word_boundary(hay: &str, needle: &str) -> bool {
+    let boundary = |c: Option<char>| !c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let mut from = 0;
+    while let Some(at) = hay[from..].find(needle) {
+        let start = from + at;
+        let end = start + needle.len();
+        let before = hay[..start].chars().next_back();
+        let after = hay[end..].chars().next();
+        if boundary(before) && boundary(after) {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
 /// Whether `msg` addresses `self_login` by name.
 ///
-/// Word-anchored, so `@someone_else` cannot match `@some`. Lifted out of the
-/// mentions filter because the same question has a second answer: the filter
-/// used this to decide what to *hide*, while a message addressed to you
-/// looked exactly like every other message when nothing was filtered.
+/// Word-anchored on both sides, so `@someone_else` cannot match `@some` and
+/// an address like `foo@yourlogin.com` cannot match `@yourlogin` either.
+/// Lifted out of the mentions filter because the same question has a second
+/// answer: the filter used this to decide what to *hide*, while a message
+/// addressed to you looked exactly like every other message when nothing
+/// was filtered.
 pub fn mentions(msg: &ChatMessage, self_login: &str) -> bool {
     if self_login.is_empty() {
         return false;
     }
     let needle = format!("@{}", self_login.to_lowercase());
     let hay = msg.text.to_lowercase();
-    let mut from = 0;
-    while let Some(at) = hay[from..].find(&needle) {
-        let end = from + at + needle.len();
-        let word_continues = hay[end..]
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_alphanumeric() || c == '_');
-        if !word_continues {
-            return true;
-        }
-        from = end;
-    }
-    false
+    contains_word_boundary(&hay, &needle)
 }
 
 impl ChatState {
@@ -268,41 +290,41 @@ impl ChatState {
         }
     }
 
-    /// Step through the send history. `back` is Up (older), otherwise Down.
+    /// Step through the send history in `direction`.
     ///
     /// Returns what the composer should now hold, or `None` when there is
     /// nowhere further to go — at which point the key should do nothing
     /// rather than clearing what was typed.
-    pub fn recall_sent(&mut self, back: bool) -> Option<String> {
+    pub fn recall_sent(&mut self, direction: Recall) -> Option<String> {
         if self.sent.is_empty() {
             return None;
         }
         let newest = self.sent.len() - 1;
-        match (self.recall, back) {
+        match (self.recall, direction) {
             // Stepping off the live draft into the history: stash the draft
             // first, so coming back down returns it rather than nothing.
-            (None, true) => {
+            (None, Recall::Older) => {
                 self.stashed_draft = self.draft.value().to_string();
                 self.recall = Some(newest);
                 self.sent.get(newest).cloned()
             }
             // Already at the oldest entry: stop there.
-            (Some(0), true) => None,
-            (Some(index), true) => {
+            (Some(0), Recall::Older) => None,
+            (Some(index), Recall::Older) => {
                 self.recall = Some(index - 1);
                 self.sent.get(index - 1).cloned()
             }
             // Down from the newest entry returns to the stashed live draft.
-            (Some(index), false) if index == newest => {
+            (Some(index), Recall::Newer) if index == newest => {
                 self.recall = None;
                 Some(std::mem::take(&mut self.stashed_draft))
             }
-            (Some(index), false) => {
+            (Some(index), Recall::Newer) => {
                 self.recall = Some(index + 1);
                 self.sent.get(index + 1).cloned()
             }
             // Down while already on the live draft: nothing to do.
-            (None, false) => None,
+            (None, Recall::Newer) => None,
         }
     }
 
@@ -458,6 +480,19 @@ mod tests {
         state.apply(ChatEvent::Message(Box::new(m)));
     }
 
+    /// The mentions check must require a boundary *before* the `@`, or an
+    /// email address ending in the login reads as if it addressed you.
+    #[test]
+    fn mentions_requires_a_boundary_before_the_at_sign() {
+        let email = msg("1", "someone", "reach me at foo@yourlogin.com please");
+        assert!(
+            !mentions(&email, "yourlogin"),
+            "an email ending in the login is not a mention"
+        );
+        let addressed = msg("2", "someone", "hey @yourlogin check this out");
+        assert!(mentions(&addressed, "yourlogin"));
+    }
+
     #[test]
     fn a_local_echo_and_its_authoritative_copy_are_one_message() {
         let mut state = ChatState::new(&config(100));
@@ -538,21 +573,21 @@ mod tests {
         state.remember_sent("second");
         state.draft.set("half-typed");
 
-        assert_eq!(state.recall_sent(true).as_deref(), Some("second"));
-        assert_eq!(state.recall_sent(true).as_deref(), Some("first"));
+        assert_eq!(state.recall_sent(Recall::Older).as_deref(), Some("second"));
+        assert_eq!(state.recall_sent(Recall::Older).as_deref(), Some("first"));
         assert_eq!(
-            state.recall_sent(true),
+            state.recall_sent(Recall::Older),
             None,
             "the oldest entry is the end of the road, not a wrap-around"
         );
 
-        assert_eq!(state.recall_sent(false).as_deref(), Some("second"));
+        assert_eq!(state.recall_sent(Recall::Newer).as_deref(), Some("second"));
         assert_eq!(
-            state.recall_sent(false).as_deref(),
+            state.recall_sent(Recall::Newer).as_deref(),
             Some("half-typed"),
             "coming back down must return what was being typed"
         );
-        assert_eq!(state.recall_sent(false), None);
+        assert_eq!(state.recall_sent(Recall::Newer), None);
     }
 
     #[test]

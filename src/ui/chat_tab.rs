@@ -27,7 +27,7 @@ use crate::chat::notify::high_signal;
 use crate::chat::render::{render_message, BadgeMode, MessageLayout, RenderOpts};
 use crate::chat::roster::{mention_prefix, Roster};
 use crate::chat::source::{self, ChatCommand, ChatHandle};
-use crate::chat::state::ChatState;
+use crate::chat::state::{ChatState, Recall};
 use crate::chat::{
     ChatAuthor, ChatEvent, ChatKey, ChatMessage, ConnectionStatus, MessageKind, PlatformMeta,
 };
@@ -274,6 +274,16 @@ impl ChatTabState {
         let account = self.selected_account(platform)?;
         let chats = self.chats.get(&account.key)?;
         chats.get(*self.active_chat.get(&account.key).unwrap_or(&0))
+    }
+
+    /// The login the given pane's selected account speaks as — the identity
+    /// the mentions filter and search need to know "you" from. Empty when
+    /// the pane has no selected account, or its own login was never
+    /// recorded (a token saved before identities existed).
+    fn focused_login(&self, platform: Platform) -> String {
+        self.selected_account(platform)
+            .and_then(|account| account.own_target.clone())
+            .unwrap_or_default()
     }
 
     /// The tab became visible (or the selection changed): make sure every
@@ -602,10 +612,7 @@ impl ChatTabState {
 
     pub fn scroll_by(&mut self, delta: i64) {
         self.pending_mod = None;
-        let login = self
-            .selected_account(self.focus)
-            .and_then(|account| account.own_target.clone())
-            .unwrap_or_default();
+        let login = self.focused_login(self.focus);
         if let Some(chat) = self.active_chat_mut() {
             chat.state.cursor = None;
             let len = chat.state.messages.len();
@@ -613,30 +620,19 @@ impl ChatTabState {
                 return;
             }
             let filters = chat.state.filters;
+            let messages = &chat.state.messages;
+            let visible = |offset: usize| {
+                messages
+                    .get(len - 1 - offset)
+                    .is_some_and(|msg| filters.matches(msg, &login))
+            };
             let step: i64 = if delta > 0 { 1 } else { -1 };
             let mut offset = chat.state.scroll as i64;
             for _ in 0..delta.abs() {
-                let mut next = offset;
-                loop {
-                    next += step;
-                    if next < 0 || next as usize >= len {
-                        next = offset;
-                        break;
-                    }
-                    let index = len - 1 - next as usize;
-                    let visible = chat
-                        .state
-                        .messages
-                        .get(index)
-                        .is_some_and(|msg| filters.matches(msg, &login));
-                    if visible {
-                        break;
-                    }
+                match visible_offset(len, offset, step, visible) {
+                    Some(next) => offset = next as i64,
+                    None => break,
                 }
-                if next == offset {
-                    break;
-                }
-                offset = next;
             }
             chat.state.scroll = offset.clamp(0, (len - 1) as i64) as usize;
             if chat.state.scroll == 0 {
@@ -648,10 +644,7 @@ impl ChatTabState {
     /// Jump to the oldest (`g`) or newest (`G`) *visible* message.
     pub fn scroll_to_end(&mut self, oldest: bool) {
         self.pending_mod = None;
-        let login = self
-            .selected_account(self.focus)
-            .and_then(|account| account.own_target.clone())
-            .unwrap_or_default();
+        let login = self.focused_login(self.focus);
         if let Some(chat) = self.active_chat_mut() {
             chat.state.cursor = None;
             let len = chat.state.messages.len();
@@ -659,27 +652,32 @@ impl ChatTabState {
                 return;
             }
             let filters = chat.state.filters;
-            let offsets: Vec<usize> = if oldest {
-                (0..len).rev().collect()
-            } else {
-                (0..len).collect()
+            let messages = &chat.state.messages;
+            let visible = |offset: usize| {
+                messages
+                    .get(len - 1 - offset)
+                    .is_some_and(|msg| filters.matches(msg, &login))
             };
-            for offset in offsets {
-                let index = len - 1 - offset;
-                let visible = chat
-                    .state
-                    .messages
-                    .get(index)
-                    .is_some_and(|msg| filters.matches(msg, &login));
-                if visible {
+            // Walk from just past one end toward the other: from `len`
+            // downward for the oldest visible row, from `-1` upward for the
+            // newest.
+            let found = if oldest {
+                visible_offset(len, len as i64, -1, visible)
+            } else {
+                visible_offset(len, -1, 1, visible)
+            };
+            match found {
+                Some(offset) => {
                     chat.state.scroll = offset;
-                    return;
+                }
+                None => {
+                    chat.state.scroll = 0;
+                    chat.state.below = 0;
+                    // Jumping to live is "I have caught up", so the divider
+                    // goes.
+                    chat.state.clear_unread_mark();
                 }
             }
-            chat.state.scroll = 0;
-            chat.state.below = 0;
-            // Jumping to live is "I have caught up", so the divider goes.
-            chat.state.clear_unread_mark();
         }
     }
 
@@ -769,13 +767,38 @@ impl ChatTabState {
                 timeout_secs: None,
             },
         };
+        self.send_or_notify(
+            command,
+            "the chat task is busy — press the key again to retry",
+        );
+    }
+
+    /// Send `command` to the focused chat's task, or leave a local notice
+    /// instead of silently dropping it when the task's queue is momentarily
+    /// full. Nothing happens when no chat is focused at all — callers that
+    /// need to say so (a marker with nowhere to go) check for that first.
+    fn send_or_notify(&mut self, command: ChatCommand, busy_text: &str) {
         if let Some(chat) = self.active_chat_mut() {
             if chat.handle.commands.try_send(command).is_err() {
-                chat.state.apply(ChatEvent::Message(Box::new(local_notice(
-                    "the chat task is busy — press the key again to retry",
-                ))));
+                chat.state
+                    .apply(ChatEvent::Message(Box::new(local_notice(busy_text))));
             }
         }
+    }
+
+    /// Clear the draft, drop back to normal composing, and hand `command` to
+    /// the chat task. The shared tail of every composer command that never
+    /// reaches the platform as text — `/raid`, `/unraid`, `/clip`,
+    /// `/marker`.
+    fn dispatch_local_command(&mut self, command: ChatCommand) {
+        if let Some(chat) = self.active_chat_mut() {
+            chat.state.draft.clear();
+        }
+        self.mode = ChatFocus::Normal;
+        self.send_or_notify(
+            command,
+            "the chat task is busy — the command was dropped, try again",
+        );
     }
 
     /// Type one character into the focused chat's composer, at the caret.
@@ -793,8 +816,9 @@ impl ChatTabState {
     /// `back` is Up (older). Does nothing at either end of the history, so a
     /// stray key press cannot wipe what is being typed.
     pub fn compose_recall(&mut self, back: bool) {
+        let direction = if back { Recall::Older } else { Recall::Newer };
         if let Some(chat) = self.active_chat_mut() {
-            if let Some(text) = chat.state.recall_sent(back) {
+            if let Some(text) = chat.state.recall_sent(direction) {
                 chat.state.draft.set(text);
             }
         }
@@ -802,18 +826,18 @@ impl ChatTabState {
 
     /// Drop a marker in the VOD at this moment.
     pub fn mark_moment(&mut self) {
-        match self.active_chat_mut() {
-            Some(chat) => {
-                let _ = chat.handle.commands.try_send(ChatCommand::Marker {
-                    description: String::new(),
-                });
-            }
-            None => {
-                // Markers go through the chat connection, so there has to be
-                // one — saying which is better than a key that does nothing.
-                self.notify_local("no chat is open, so there is nowhere to send the marker");
-            }
+        if self.active_chat_mut().is_none() {
+            // Markers go through the chat connection, so there has to be
+            // one — saying which is better than a key that does nothing.
+            self.notify_local("no chat is open, so there is nowhere to send the marker");
+            return;
         }
+        self.send_or_notify(
+            ChatCommand::Marker {
+                description: String::new(),
+            },
+            "the chat task is busy — press the key again to retry",
+        );
     }
 
     /// Put a line in the focused chat that came from this program rather than
@@ -899,25 +923,14 @@ impl ChatTabState {
                 ))));
                 return;
             }
-            chat.state.draft.clear();
-            self.mode = ChatFocus::Normal;
-            if let Some(chat) = self.active_chat_mut() {
-                let _ = chat.handle.commands.try_send(ChatCommand::Raid { target });
-            }
+            self.dispatch_local_command(ChatCommand::Raid { target });
             return;
         }
         if command_argument(&text, "/unraid").is_some() {
-            chat.state.draft.clear();
-            self.mode = ChatFocus::Normal;
-            if let Some(chat) = self.active_chat_mut() {
-                let _ = chat.handle.commands.try_send(ChatCommand::Unraid);
-            }
+            self.dispatch_local_command(ChatCommand::Unraid);
             return;
         }
 
-        // Composer commands that never reach the platform (twi's /channels,
-        // yc's /chats): bare opens the join prompt, with an argument joins
-        // directly.
         // `command_argument` rather than `==`: every other command here is
         // matched case-insensitively, and this one was not — so `/CLIP` was
         // lowercased by `classify_command`, recognised as handled here, and
@@ -925,11 +938,7 @@ impl ChatTabState {
         // to the send path and was posted to everybody watching, which is the
         // single thing the slash guard exists to prevent.
         if command_argument(&text, "/clip").is_some_and(|rest| rest.trim().is_empty()) {
-            chat.state.draft.clear();
-            self.mode = ChatFocus::Normal;
-            if let Some(chat) = self.active_chat_mut() {
-                let _ = chat.handle.commands.try_send(ChatCommand::Clip);
-            }
+            self.dispatch_local_command(ChatCommand::Clip);
             return;
         }
         // A marker takes an optional note, so it goes through
@@ -937,16 +946,14 @@ impl ChatTabState {
         // is a message, not a marker with the note "s".
         if let Some(rest) = command_argument(&text, "/marker") {
             let description = rest.trim().to_string();
-            chat.state.draft.clear();
-            self.mode = ChatFocus::Normal;
-            if let Some(chat) = self.active_chat_mut() {
-                let _ = chat
-                    .handle
-                    .commands
-                    .try_send(ChatCommand::Marker { description });
-            }
+            self.dispatch_local_command(ChatCommand::Marker { description });
             return;
         }
+        // Composer commands that never reach the platform at all (twi's
+        // /channels, yc's /chats): bare opens the join prompt, with an
+        // argument joins directly. Neither is a `ChatCommand` — opening a
+        // chat is local UI state, not something sent to an already-running
+        // chat task — so this stays outside `dispatch_local_command`.
         // The command must be the whole word: "/chatstats" is a message, not
         // a request to join the channel "tats".
         // `command_argument`, not `strip_prefix`: the latter is
@@ -1072,9 +1079,10 @@ impl ChatTabState {
     /// Ask the focused chat's task to reconnect (also the manual override for
     /// a quota pause or an ended chat).
     pub fn reconnect_active(&mut self) {
-        if let Some(chat) = self.active_chat_mut() {
-            let _ = chat.handle.commands.try_send(ChatCommand::Reconnect);
-        }
+        self.send_or_notify(
+            ChatCommand::Reconnect,
+            "the chat task is busy — press the key again to retry",
+        );
     }
 
     /// Toggle the focused pane between messages and the activity view.
@@ -1104,31 +1112,26 @@ impl ChatTabState {
             return;
         }
         let needle = query.to_lowercase();
-        let login = self
-            .selected_account(self.focus)
-            .and_then(|account| account.own_target.clone())
-            .unwrap_or_default();
+        let login = self.focused_login(self.focus);
         if let Some(chat) = self.active_chat_mut() {
             let len = chat.state.messages.len();
             let filters = chat.state.filters;
-            for offset in 0..len {
-                let msg = chat
-                    .state
-                    .messages
+            let messages = &chat.state.messages;
+            // A filtered-out message must not become the selection: the
+            // jump would land on an invisible row.
+            let matches = |offset: usize| {
+                messages
                     .get(len - 1 - offset)
-                    .expect("offset < len by construction");
-                // A filtered-out message must not become the selection: the
-                // jump would land on an invisible row.
-                if search_matches(msg, &needle) && filters.matches(msg, &login) {
-                    chat.state.cursor = Some(offset);
-                    // Scrolled a little past the match, so it lands about a
-                    // third up the pane with what followed it underneath.
-                    // Setting `scroll = offset` put the match on the very
-                    // bottom row with nothing after it, and "what did they
-                    // say next" is most of why you searched.
-                    chat.state.scroll = offset.saturating_sub(SEARCH_CONTEXT_ROWS);
-                    return;
-                }
+                    .is_some_and(|msg| search_matches(msg, &needle) && filters.matches(msg, &login))
+            };
+            if let Some(offset) = visible_offset(len, -1, 1, matches) {
+                chat.state.cursor = Some(offset);
+                // Scrolled a little past the match, so it lands about a
+                // third up the pane with what followed it underneath.
+                // Setting `scroll = offset` put the match on the very
+                // bottom row with nothing after it, and "what did they say
+                // next" is most of why you searched.
+                chat.state.scroll = offset.saturating_sub(SEARCH_CONTEXT_ROWS);
             }
         }
     }
@@ -1146,47 +1149,37 @@ impl ChatTabState {
             return;
         }
         let needle = query.to_lowercase();
-        let login = self
-            .selected_account(self.focus)
-            .and_then(|account| account.own_target.clone())
-            .unwrap_or_default();
+        let login = self.focused_login(self.focus);
         if let Some(chat) = self.active_chat_mut() {
             let len = chat.state.messages.len();
             if len == 0 {
                 return;
             }
             let filters = chat.state.filters;
-            // With no selection the walk starts *at* the newest row rather
-            // than past it: after clearing the selection (esc, or any scroll),
-            // pressing n used to skip a match sitting on the newest message.
-            let mut offset = chat.state.cursor.unwrap_or(0);
-            let mut test_current = chat.state.cursor.is_none();
-            loop {
-                if test_current {
-                    test_current = false;
-                } else if older {
-                    offset += 1;
-                    if offset >= len {
-                        return; // no wrap
-                    }
-                } else {
-                    if offset == 0 {
-                        return;
-                    }
-                    offset -= 1;
-                }
-                let msg = chat
-                    .state
-                    .messages
+            let cursor = chat.state.cursor;
+            let messages = &chat.state.messages;
+            let matches = |offset: usize| {
+                messages
                     .get(len - 1 - offset)
-                    .expect("offset < len by loop guard");
-                if search_matches(msg, &needle) && filters.matches(msg, &login) {
-                    chat.state.cursor = Some(offset);
-                    // Same context as the initial jump, so stepping through
-                    // matches reads the same way as landing on the first.
-                    chat.state.scroll = offset.saturating_sub(SEARCH_CONTEXT_ROWS);
-                    return;
+                    .is_some_and(|msg| search_matches(msg, &needle) && filters.matches(msg, &login))
+            };
+            // With no selection the walk tests *at* the newest row rather
+            // than past it: after clearing the selection (esc, or any
+            // scroll), pressing n used to skip a match sitting on the
+            // newest message.
+            let found = match cursor {
+                None if matches(0) => Some(0),
+                None if older => visible_offset(len, 0, 1, matches),
+                None => None, // pressing N with nothing selected goes no further
+                Some(offset) => {
+                    visible_offset(len, offset as i64, if older { 1 } else { -1 }, matches)
                 }
+            };
+            if let Some(offset) = found {
+                chat.state.cursor = Some(offset);
+                // Same context as the initial jump, so stepping through
+                // matches reads the same way as landing on the first.
+                chat.state.scroll = offset.saturating_sub(SEARCH_CONTEXT_ROWS);
             }
         }
     }
@@ -1207,17 +1200,11 @@ impl ChatTabState {
         if channel_id.is_empty() {
             return;
         }
-        if let Some(chat) = self.active_chat_mut() {
-            let command = ChatCommand::Ban {
-                channel_id,
-                timeout_secs: Some(duration_secs),
-            };
-            if chat.handle.commands.try_send(command).is_err() {
-                chat.state.apply(ChatEvent::Message(Box::new(local_notice(
-                    "the chat task is busy — try the timeout again",
-                ))));
-            }
-        }
+        let command = ChatCommand::Ban {
+            channel_id,
+            timeout_secs: Some(duration_secs),
+        };
+        self.send_or_notify(command, "the chat task is busy — try the timeout again");
     }
 
     /// Open a chat on the target typed into the join prompt.
@@ -1228,6 +1215,33 @@ impl ChatTabState {
         }
         if let Some(account) = self.selected_account(self.focus).cloned() {
             self.open_chat(config, self.focus, &account, raw);
+        }
+    }
+}
+
+/// Walk the ring one step at a time from `start`, in the direction of `step`
+/// (`+1` toward older rows, `-1` toward newer), returning the first offset
+/// whose message satisfies `accept` — or `None` once the walk runs past
+/// either end without finding one.
+///
+/// Shared by every place that has to honor the active view filter while
+/// moving through a chat: scrolling, `g`/`G`, and search. `start` is
+/// exclusive — pass one position before wherever the walk should begin
+/// testing.
+fn visible_offset(
+    len: usize,
+    start: i64,
+    step: i64,
+    accept: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    let mut next = start;
+    loop {
+        next += step;
+        if next < 0 || next as usize >= len {
+            return None;
+        }
+        if accept(next as usize) {
+            return Some(next as usize);
         }
     }
 }
@@ -1348,14 +1362,27 @@ fn classify_command(text: &str, platform: Platform) -> SlashVerdict {
             )
         };
     }
+    // Raiding is a Helix call the Twitch adapter makes, not a chat line —
+    // and YouTube has no equivalent at all. Gated the same way as /me: on
+    // Twitch it falls through to its handler below, on YouTube it is
+    // refused like any command this program does not implement there.
+    if (command == "/raid" || command == "/unraid") && platform != Platform::Twitch {
+        return refuse_unknown(&command, platform, &word);
+    }
     if HANDLED_HERE.contains(&command.as_str()) {
         return SlashVerdict::NotACommand;
     }
 
+    refuse_unknown(&command, platform, &word)
+}
+
+/// The refusal every unrecognised or platform-inapplicable command shares:
+/// what was typed, why, and how to post it as text on purpose.
+fn refuse_unknown(command: &str, platform: Platform, word: &str) -> SlashVerdict {
     SlashVerdict::Refused(format!(
         "{} is not a command here — it would have been posted as a public message. {}          Type //{} to post it as text on purpose.",
         command,
-        advice_for(&command, platform),
+        advice_for(command, platform),
         word
     ))
 }
@@ -1902,10 +1929,7 @@ fn draw_messages(frame: &mut Frame, area: Rect, state: &ChatTabState, platform: 
     let newest_visible = len.saturating_sub(chat.state.scroll);
     // The mentions filter needs to know who "you" are in this chat.
     let highlights = &state.config.chat.highlights;
-    let self_login = state
-        .selected_account(platform)
-        .and_then(|account| account.own_target.clone())
-        .unwrap_or_default();
+    let self_login = state.focused_login(platform);
     let filters = chat.state.filters;
 
     // Walk backwards from the newest visible message, rendering (and
@@ -3089,6 +3113,29 @@ mod tests {
         ));
         assert!(matches!(
             classify_command("/me waves", Platform::YouTube),
+            SlashVerdict::Refused(_)
+        ));
+    }
+
+    /// Raiding is gated the same way: a Twitch feature handled on Twitch,
+    /// refused with the reason why on YouTube — the arm `advice_for` carries
+    /// for "/raid"/"/unraid" used to be unreachable.
+    #[test]
+    fn raid_is_a_command_on_twitch_and_refused_on_youtube() {
+        assert!(matches!(
+            classify_command("/raid somechannel", Platform::Twitch),
+            SlashVerdict::NotACommand
+        ));
+        assert!(matches!(
+            classify_command("/unraid", Platform::Twitch),
+            SlashVerdict::NotACommand
+        ));
+        assert!(matches!(
+            classify_command("/raid somechannel", Platform::YouTube),
+            SlashVerdict::Refused(_)
+        ));
+        assert!(matches!(
+            classify_command("/unraid", Platform::YouTube),
             SlashVerdict::Refused(_)
         ));
     }

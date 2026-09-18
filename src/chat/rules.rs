@@ -18,7 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{ChatMessage, MessageKind};
+use super::ChatMessage;
 
 /// What a rule looks at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -86,17 +86,7 @@ impl Rule {
                 .badges
                 .iter()
                 .any(|badge| badge.set.eq_ignore_ascii_case(&needle)),
-            Match::Event => {
-                let kind = match msg.kind {
-                    MessageKind::Chat => "chat",
-                    MessageKind::Action => "action",
-                    MessageKind::Notice => "notice",
-                    MessageKind::Paid => "paid",
-                    MessageKind::Membership => "membership",
-                    MessageKind::Unknown => "unknown",
-                };
-                kind == needle
-            }
+            Match::Event => msg.kind.as_str() == needle,
         }
     }
 }
@@ -163,29 +153,16 @@ impl Highlights {
 
 /// Whether `needle` appears in `hay` as a whole word.
 ///
-/// Both are expected lowercase. A word boundary is anything that is not
-/// alphanumeric or an underscore, which is what a chat name can contain.
+/// Both are expected lowercase. Shared with `state::mentions`, which asks
+/// the same question about an `@mention`.
 fn contains_word(hay: &str, needle: &str) -> bool {
-    let boundary = |c: Option<char>| !c.is_some_and(|c| c.is_alphanumeric() || c == '_');
-
-    let mut from = 0;
-    while let Some(at) = hay[from..].find(needle) {
-        let start = from + at;
-        let end = start + needle.len();
-        let before = hay[..start].chars().next_back();
-        let after = hay[end..].chars().next();
-        if boundary(before) && boundary(after) {
-            return true;
-        }
-        from = end;
-    }
-    false
+    super::state::contains_word_boundary(hay, needle)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::{Badge, ChatAuthor};
+    use crate::chat::{Badge, ChatAuthor, MessageKind};
 
     fn message(text: &str) -> ChatMessage {
         ChatMessage {
