@@ -18,11 +18,23 @@ pub fn spec_for(platform: Platform) -> ProviderSpec {
     }
 }
 
+/// A platform's OAuth client id and secret.
+struct ClientCredentials {
+    client_id: String,
+    client_secret: String,
+}
+
 /// The client id and secret for a platform, pulled out of the config.
-fn credentials(config: &Config, platform: Platform) -> (String, String) {
+fn credentials(config: &Config, platform: Platform) -> ClientCredentials {
     match platform {
-        Platform::Twitch => (config.twitch.client_id(), config.twitch.client_secret()),
-        Platform::YouTube => (config.youtube.client_id(), config.youtube.client_secret()),
+        Platform::Twitch => ClientCredentials {
+            client_id: config.twitch.client_id(),
+            client_secret: config.twitch.client_secret(),
+        },
+        Platform::YouTube => ClientCredentials {
+            client_id: config.youtube.client_id(),
+            client_secret: config.youtube.client_secret(),
+        },
     }
 }
 
@@ -36,13 +48,13 @@ pub async fn login_with(
     notice: oauth::Notice<'_>,
 ) -> Result<String> {
     config.check_credentials(&[platform])?;
-    let (client_id, client_secret) = credentials(config, platform);
+    let credentials = credentials(config, platform);
     let spec = spec_for(platform);
 
     let mut tokens = oauth::interactive_login_with(
         &spec,
-        &client_id,
-        &client_secret,
+        &credentials.client_id,
+        &credentials.client_secret,
         &config.redirect_uri(),
         config.general.oauth_port,
         notice,
@@ -55,23 +67,7 @@ pub async fn login_with(
     // --add, because without an identity there is nothing to key the extra
     // account by.
     let identity = resolve_identity(platform, &tokens.access_token).await;
-    let key = match (&identity, add) {
-        (Ok(identity), true) => {
-            let suffix = match platform {
-                Platform::Twitch => identity.login.clone(),
-                Platform::YouTube => identity.id.clone(),
-            };
-            format!("{}:{}", platform.slug(), suffix.to_lowercase())
-        }
-        (Err(err), true) => {
-            return Err(anyhow::anyhow!("{err:#}")).context(
-                "could not find out which account this login belongs to, and an \
-                 additional account cannot be stored without knowing that. The \
-                 login itself succeeded — try again.",
-            );
-        }
-        (_, false) => platform.slug().to_string(),
-    };
+    let key = login_key(platform, add, &identity)?;
     if let Ok(identity) = identity {
         tokens.identity = Some(identity);
     }
@@ -98,6 +94,32 @@ pub async fn login_with(
     let (_lock, result) = save_store(store, lock).await?;
     result?;
     Ok(final_key)
+}
+
+/// The account key to store a fresh login under.
+///
+/// Errors only when `add` is set and the identity lookup failed: without an
+/// identity there is nothing to key an additional account by.
+fn login_key(
+    platform: Platform,
+    add: bool,
+    identity: &Result<store::AccountIdentity>,
+) -> Result<String> {
+    match (identity, add) {
+        (Ok(identity), true) => {
+            let suffix = match platform {
+                Platform::Twitch => identity.login.clone(),
+                Platform::YouTube => identity.id.clone(),
+            };
+            Ok(format!("{}:{}", platform.slug(), suffix.to_lowercase()))
+        }
+        (Err(err), true) => Err(anyhow::anyhow!("{err:#}")).context(
+            "could not find out which account this login belongs to, and an \
+             additional account cannot be stored without knowing that. The \
+             login itself succeeded — try again.",
+        ),
+        (_, false) => Ok(platform.slug().to_string()),
+    }
 }
 
 /// Ask the platform which account an access token belongs to.
@@ -244,6 +266,19 @@ where
     result
 }
 
+/// Map one error onto every platform, for a failure — like the store lock or
+/// the file read — that stops all of them at once rather than just one.
+fn same_error_for_all(
+    platforms: &[Platform],
+    err: anyhow::Error,
+) -> Vec<(Platform, Result<String>)> {
+    let message = format!("{err:#}");
+    platforms
+        .iter()
+        .map(|&platform| (platform, Err(anyhow::anyhow!(message.clone()))))
+        .collect()
+}
+
 /// Tokens for several platforms at once, reading and writing the file once.
 ///
 /// This is the function the engine calls before every batch of API work; it
@@ -265,26 +300,14 @@ pub async fn access_tokens(
     // fresh tokens of a login running in a second copy of this program.
     let lock = match lock_store().await {
         Ok(lock) => lock,
-        Err(err) => {
-            let message = format!("{err:#}");
-            return platforms
-                .iter()
-                .map(|&platform| (platform, Err(anyhow::anyhow!(message.clone()))))
-                .collect();
-        }
+        Err(err) => return same_error_for_all(platforms, err),
     };
 
     let mut store = match load_store().await {
         Ok(store) => store,
         // Nothing can be renewed without the file, so every platform gets the
         // same explanation.
-        Err(err) => {
-            let message = format!("{err:#}");
-            return platforms
-                .iter()
-                .map(|&platform| (platform, Err(anyhow::anyhow!(message.clone()))))
-                .collect();
-        }
+        Err(err) => return same_error_for_all(platforms, err),
     };
 
     let mut results = Vec::new();
@@ -399,17 +422,22 @@ async fn keyed_token_from(
         "refreshing expired access token"
     );
 
-    let (client_id, client_secret) = credentials(config, platform);
+    let credentials = credentials(config, platform);
     let spec = spec_for(platform);
 
-    let refreshed = oauth::refresh(&spec, &client_id, &client_secret, &refresh_token)
-        .await
-        .with_context(|| {
-            format!(
-                "could not renew your {} access token. Log in again under Config → Accounts.",
-                platform.label()
-            )
-        })?;
+    let refreshed = oauth::refresh(
+        &spec,
+        &credentials.client_id,
+        &credentials.client_secret,
+        &refresh_token,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "could not renew your {} access token. Log in again under Config → Accounts.",
+            platform.label()
+        )
+    })?;
 
     let access = refreshed.access_token.clone();
     // The refresh drops the cached identity if we are not careful — carry it
@@ -465,8 +493,8 @@ mod tests {
         config.twitch.client_id = "tw".into();
         config.youtube.client_id = "yt".into();
 
-        assert_eq!(credentials(&config, Platform::Twitch).0, "tw");
-        assert_eq!(credentials(&config, Platform::YouTube).0, "yt");
+        assert_eq!(credentials(&config, Platform::Twitch).client_id, "tw");
+        assert_eq!(credentials(&config, Platform::YouTube).client_id, "yt");
     }
 
     /// The engine asks for every platform's token before each batch of work.

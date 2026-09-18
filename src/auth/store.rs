@@ -218,10 +218,9 @@ impl TokenStore {
         self.tokens.insert(platform.slug().to_string(), tokens);
     }
 
-    /// Forget one platform's tokens. Used by `msm logout`.
     /// Forget one account by its store key.
     ///
-    /// `remove` above only deletes the bare platform slug, so an extra chat
+    /// `remove` below only deletes the bare platform slug, so an extra chat
     /// account added by mistake — keyed `twitch:<login>` — could never be
     /// taken out, and its refresh token stayed valid in tokens.json
     /// indefinitely.
@@ -229,6 +228,7 @@ impl TokenStore {
         self.tokens.remove(key).is_some()
     }
 
+    /// Forget one platform's tokens. Used by `msm logout`.
     pub fn remove(&mut self, platform: Platform) -> bool {
         self.tokens.remove(platform.slug()).is_some()
     }
@@ -240,9 +240,6 @@ impl TokenStore {
         self.tokens.insert(key, tokens);
     }
 
-    // Consumed by the chat adapters (which authenticate per account key) in
-    // a following commit; the allow goes with the first caller.
-    #[allow(dead_code)]
     pub fn get_keyed(&self, key: &str) -> Option<&TokenSet> {
         self.tokens.get(key)
     }

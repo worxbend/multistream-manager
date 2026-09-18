@@ -305,17 +305,14 @@ pub async fn interactive_login_with(
         tracing::warn!(?err, "could not launch a browser automatically");
     }
 
-    let code = tokio::time::timeout(
-        Duration::from_secs(300),
-        wait_for_callback(&listener, &state),
-    )
-    .await
-    .map_err(|_| {
-        anyhow!(
-            "timed out after 5 minutes waiting for the {} login to finish",
-            spec.name
-        )
-    })??;
+    let code = tokio::time::timeout(LOGIN_TIMEOUT, wait_for_callback(&listener, &state))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "timed out after 5 minutes waiting for the {} login to finish",
+                spec.name
+            )
+        })??;
 
     let tokens = exchange_code(
         spec,
@@ -467,6 +464,10 @@ async fn wait_for_callback(listener: &Loopback, expected_state: &str) -> Result<
         return Ok(code);
     }
 }
+
+/// How long an interactive login may wait for the browser step to finish,
+/// before a forgotten tab wedges the program forever.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How long to wait for one connection to send its request line before giving up
 /// on it and going back to waiting for the real redirect.

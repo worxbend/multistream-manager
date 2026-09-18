@@ -86,8 +86,6 @@ impl Keymap {
         self.bindings.insert((context, chord), action);
     }
 
-    /// Remove a binding, which is what an empty action name in the config
-    /// means.
     /// Remove a binding, reporting whether there was one.
     ///
     /// The answer matters: `[keys.global] "q" = ""` looks like it turns off
@@ -181,11 +179,6 @@ impl Keymap {
             .collect()
     }
 
-    /// How an action is reached, for showing beside it in a menu.
-    ///
-    /// An action can have several bindings; this returns the one worth
-    /// teaching — the fewest keys, and among those the fewest modifiers, so
-    /// `q` is shown in preference to `<C-c>` and `<Leader>os`.
     /// The key that runs `action` in `context`, written out.
     ///
     /// Always with a context, never without: a bare `j` is
@@ -198,12 +191,6 @@ impl Keymap {
             .map(|chord| write_chord(&chord, self.leader))
     }
 
-    /// The keys that run `action`, as events to replay.
-    ///
-    /// The same choice [`Keymap::binding_for`] renders as text — the shortest
-    /// chord with the fewest modifiers — but as the keys themselves, so the
-    /// command palette can replay whatever the action is bound to *now*
-    /// rather than a default written down beside it.
     /// The keys that run `action` *in `context`*, as keys to replay.
     ///
     /// Only bindings that would actually fire there are considered: the
