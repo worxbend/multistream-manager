@@ -134,7 +134,7 @@ impl Roster {
             let oldest = self
                 .entries
                 .iter()
-                .min_by_key(|&(key, entry)| (entry.last_seen, key.clone()))
+                .min_by(|&(k1, e1), &(k2, e2)| (e1.last_seen, k1).cmp(&(e2.last_seen, k2)))
                 .map(|(key, _)| key.clone());
             match oldest {
                 Some(key) => {
@@ -169,7 +169,7 @@ impl Roster {
         let needle = prefix.trim().trim_start_matches('@').to_lowercase();
         let mut matches: Vec<(bool, &RosterEntry)> = Vec::new();
         for entry in self.entries.values() {
-            let login = entry.login.to_lowercase();
+            let login = entry.login.as_str();
             let display = entry.display_name.to_lowercase();
             let (is_prefix, is_sub) = if needle.is_empty() {
                 (true, true)

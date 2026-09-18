@@ -82,6 +82,12 @@ pub struct DuplicateSuppressor {
     last: HashMap<String, Instant>,
 }
 
+/// Composite key for the duplicate-suppression map, exactly as twi keys it
+/// (for replies twi includes the parent id; callers fold that into `target`).
+fn key(target: &str, text: &str) -> String {
+    format!("{target}\0{text}")
+}
+
 impl DuplicateSuppressor {
     pub fn new() -> Self {
         Self::default()
@@ -89,7 +95,7 @@ impl DuplicateSuppressor {
 
     /// Record `text` sent to `target` at `now`, or refuse a duplicate.
     pub fn acquire(&mut self, target: &str, text: &str, now: Instant) -> Result<(), SendDenied> {
-        let key = format!("{target}\0{text}");
+        let key = key(target, text);
         // Drop stale entries opportunistically so the map cannot grow without
         // bound over a long session.
         self.last
@@ -111,7 +117,7 @@ impl DuplicateSuppressor {
     /// so the reservation must be undone — otherwise the user is told the
     /// message was not delivered and is then refused when they retype it.
     pub fn release(&mut self, target: &str, text: &str) {
-        self.last.remove(&format!("{target}\0{text}"));
+        self.last.remove(&key(target, text));
     }
 }
 
