@@ -84,8 +84,9 @@ pub fn draw(frame: &mut Frame, area: Rect, keymap: &Keymap, context: Context, pr
     let ceiling = (area.height / 2).max(1);
 
     // The layout is worked out against the width the panel will have *inside*
-    // its border, which is two cells narrower than the area.
-    let inner_width = area.width.saturating_sub(2) as usize;
+    // its border and the 1-cell margin applied below (matching the command
+    // palette's own padding), which is four cells narrower than the area.
+    let inner_width = area.width.saturating_sub(4) as usize;
     let plan = Plan::for_width(&choices, inner_width);
 
     // At least one content row even when there is nothing to list, so the
@@ -110,7 +111,10 @@ pub fn draw(frame: &mut Frame, area: Rect, keymap: &Keymap, context: Context, pr
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(sk.accent))
-        .style(Style::new().bg(sk.canvas))
+        // A docked partial-screen popup, the same shape as the command
+        // palette, so it fills on the surface tone rather than the canvas
+        // tone `draw_all` uses for its full-screen takeover.
+        .style(Style::new().bg(sk.surface))
         .title(format!(" {typed} "));
     let inner = block.inner(panel);
     frame.render_widget(block, panel);
@@ -124,6 +128,7 @@ pub fn draw(frame: &mut Frame, area: Rect, keymap: &Keymap, context: Context, pr
         Constraint::Min(0),    // the choices themselves
         Constraint::Length(1), // how to get out
     ])
+    .horizontal_margin(1)
     .split(inner);
 
     let header = Line::from(vec![
