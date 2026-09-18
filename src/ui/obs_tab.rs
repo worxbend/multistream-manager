@@ -14,8 +14,10 @@
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use tui_widget_list::{ListBuildContext, ListBuilder, ListState, ListView};
 
 use super::app::{App, ObsFocus};
+use super::style_kit;
 use crate::obs::state::{AudioInput, Connection, ObsState, Scene};
 use crate::theme;
 
@@ -47,20 +49,22 @@ fn draw_status(frame: &mut Frame, area: Rect, obs: &ObsState) {
 pub fn draw_status_lines(frame: &mut Frame, area: Rect, obs: &ObsState) {
     let sk = theme::skin();
 
-    let (indicator, colour) = match &obs.connection {
-        Connection::Connected => ("●", sk.success),
-        Connection::Connecting | Connection::Reconnecting { .. } => ("◐", sk.warning),
-        Connection::Failed(_) => ("✖", sk.error),
-        Connection::Idle => ("○", sk.muted),
+    // The four connection states are also the four tones `badge`/`dot` draw
+    // from everywhere else, so the same colour that used to live only in this
+    // glyph now marks the pill too — one state, one colour, wherever it shows
+    // up on screen.
+    let colour = match &obs.connection {
+        Connection::Connected => sk.success,
+        Connection::Connecting | Connection::Reconnecting { .. } => sk.warning,
+        Connection::Failed(_) => sk.error,
+        Connection::Idle => sk.muted,
     };
 
-    let mut first = vec![
-        Span::styled(format!("{indicator} OBS "), Style::new().fg(colour)),
-        Span::styled(
-            obs.connection.label().to_string(),
-            Style::new().fg(sk.foreground),
-        ),
-    ];
+    let mut first = style_kit::badge("OBS", colour, &sk);
+    first.push(Span::styled(
+        format!(" {}", obs.connection.label()),
+        Style::new().fg(sk.foreground),
+    ));
     if let Some(version) = &obs.obs_version {
         first.push(Span::styled(
             format!("  ·  Studio {version}"),
@@ -85,16 +89,16 @@ pub fn draw_status_lines(frame: &mut Frame, area: Rect, obs: &ObsState) {
     // recording a stream you are not broadcasting, and broadcasting without
     // recording, are both ordinary, and a single "live" light would hide
     // which of them is happening.
-    let second = vec![
-        output_span("STREAM", obs.streaming, false, obs.stream_duration, sk),
-        Span::raw("   "),
-        output_span(
-            "RECORD",
-            obs.recording,
-            obs.record_paused,
-            obs.record_duration,
-            sk,
-        ),
+    let mut second = output_span("STREAM", obs.streaming, false, obs.stream_duration, sk);
+    second.push(Span::raw("   "));
+    second.extend(output_span(
+        "RECORD",
+        obs.recording,
+        obs.record_paused,
+        obs.record_duration,
+        sk,
+    ));
+    second.extend(vec![
         Span::raw("   "),
         Span::styled(
             match obs.stream_bitrate_kbps {
@@ -119,7 +123,7 @@ pub fn draw_status_lines(frame: &mut Frame, area: Rect, obs: &ObsState) {
             },
             Style::new().fg(sk.muted),
         ),
-    ];
+    ]);
 
     let third = vec![
         Span::styled("scene ", Style::new().fg(sk.muted)),
@@ -158,16 +162,28 @@ pub fn draw_status_lines(frame: &mut Frame, area: Rect, obs: &ObsState) {
     );
 }
 
-/// One output indicator, e.g. `STREAM 01:23:45`.
+/// One output indicator, e.g. a `STREAM` badge followed by `on 01:23:45`.
+///
+/// Live and paused get an actual pill, not just bold text, so "is this
+/// broadcasting right now" reads as a shape at a glance rather than requiring
+/// the colour of plain text to be picked out from the rest of the line. Off
+/// stays a hollow dot plus plain text — a badge for "nothing is happening" is
+/// a badge with nothing to say.
 fn output_span(
     label: &str,
     active: bool,
     paused: bool,
     duration: Option<std::time::Duration>,
     sk: theme::Skin,
-) -> Span<'static> {
+) -> Vec<Span<'static>> {
     if !active {
-        return Span::styled(format!("{label} off"), Style::new().fg(sk.muted));
+        return vec![
+            Span::styled(
+                format!("{} ", style_kit::DOT_HOLLOW),
+                Style::new().fg(sk.muted),
+            ),
+            Span::styled(format!("{label} off"), Style::new().fg(sk.muted)),
+        ];
     }
     let elapsed = duration.map(format_duration).unwrap_or_default();
     let (colour, word) = if paused {
@@ -175,10 +191,12 @@ fn output_span(
     } else {
         (sk.error, "on")
     };
-    Span::styled(
-        format!("{label} {word} {elapsed}").trim_end().to_string(),
+    let mut spans = style_kit::badge(label, colour, &sk);
+    spans.push(Span::styled(
+        format!(" {word} {elapsed}").trim_end().to_string(),
         Style::new().fg(colour).add_modifier(Modifier::BOLD),
-    )
+    ));
+    spans
 }
 
 /// `hh:mm:ss`, or `mm:ss` under an hour.
@@ -216,20 +234,29 @@ pub fn draw_scene_list(frame: &mut Frame, inner: Rect, app: &App) {
         return;
     }
 
-    let rows = visible_window(app.obs_scene_cursor, app.obs.scenes.len(), inner.height);
-    let lines: Vec<Line> = app
-        .obs
-        .scenes
-        .iter()
-        .enumerate()
-        .skip(rows.0)
-        .take(rows.1)
-        .map(|(index, scene)| {
-            scene_line(scene, index == app.obs_scene_cursor, focused, &app.obs, sk)
-        })
-        .collect();
-
-    frame.render_widget(Paragraph::new(lines), inner);
+    let scenes = &app.obs.scenes;
+    let obs = &app.obs;
+    let cursor = app.obs_scene_cursor;
+    // `tui-widget-list` owns the scrolling window itself, so the cursor is
+    // the only piece of App state a frame needs to hand it — the same window
+    // math that used to live in `visible_window` now happens once, inside a
+    // widget with its own test suite, instead of once per screen in this one.
+    let builder = ListBuilder::new(move |context: &ListBuildContext| {
+        let line = scene_line(
+            &scenes[context.index],
+            context.index == cursor,
+            focused,
+            obs,
+            sk,
+        );
+        (line, 1)
+    });
+    let list = ListView::new(builder, app.obs.scenes.len());
+    // Built fresh every frame from the cursor already on App — nothing here
+    // is state the widget remembers between frames, so there is nothing new
+    // to keep in sync with the cursor App already tracks.
+    let mut state = ListState::new_with_index(Some(cursor));
+    frame.render_stateful_widget(list, inner, &mut state);
 }
 
 fn scene_line(
@@ -303,26 +330,22 @@ pub fn draw_audio_list(frame: &mut Frame, inner: Rect, app: &App) {
         return;
     }
 
-    let rows = visible_window(app.obs_audio_cursor, app.obs.audio.len(), inner.height);
-    let lines: Vec<Line> = app
-        .obs
-        .audio
-        .iter()
-        .enumerate()
-        .skip(rows.0)
-        .take(rows.1)
-        .map(|(index, input)| {
-            audio_line(
-                input,
-                index == app.obs_audio_cursor,
-                focused,
-                inner.width,
-                sk,
-            )
-        })
-        .collect();
-
-    frame.render_widget(Paragraph::new(lines), inner);
+    let audio = &app.obs.audio;
+    let cursor = app.obs_audio_cursor;
+    let width = inner.width;
+    let builder = ListBuilder::new(move |context: &ListBuildContext| {
+        let line = audio_line(
+            &audio[context.index],
+            context.index == cursor,
+            focused,
+            width,
+            sk,
+        );
+        (line, 1)
+    });
+    let list = ListView::new(builder, app.obs.audio.len());
+    let mut state = ListState::new_with_index(Some(cursor));
+    frame.render_stateful_widget(list, inner, &mut state);
 }
 
 fn audio_line(
@@ -368,8 +391,15 @@ fn audio_line(
     };
     spans.push(Span::styled(level, Style::new().fg(sk.muted)));
 
-    // A bar, if there is room for one after the text. It is drawn in the mute
-    // colour so a muted input reads as muted at a glance even at full volume.
+    // A bar, if there is room for one after the text. This stays a hand-rolled
+    // fill rather than `tui-equalizer`: that widget renders a live level
+    // meter, and `volume_percent` is a static gain the user set, not a
+    // sampled peak — OBS never sends one over this connection, so wrapping
+    // the figure in an equalizer would claim a moving reading that does not
+    // exist. It is drawn in the mute colour so a muted input still reads as
+    // muted at a glance even at full volume; otherwise it is graded through
+    // the same green-to-red ramp every other usage figure in the app uses,
+    // rather than a single fixed accent colour.
     if let Some(percent) = input.volume_percent() {
         let used: usize = spans
             .iter()
@@ -379,14 +409,15 @@ fn audio_line(
         if room >= 6 {
             let bar_width = room.min(20);
             let filled = (percent as usize * bar_width / 100).min(bar_width);
+            let fill_colour = if input.muted == Some(true) {
+                sk.muted
+            } else {
+                theme::threshold_color(percent as f64, &sk)
+            };
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
                 "█".repeat(filled),
-                Style::new().fg(if input.muted == Some(true) {
-                    sk.muted
-                } else {
-                    sk.accent
-                }),
+                Style::new().fg(fill_colour),
             ));
             spans.push(Span::styled(
                 "░".repeat(bar_width - filled),
@@ -422,39 +453,58 @@ fn draw_stats(frame: &mut Frame, area: Rect, obs: &ObsState) {
         return;
     };
 
+    // `cpu_usage_percent` is a true 0-100 share of a ceiling, so it takes the
+    // shared four-stop ramp everyone else grades a usage figure with. `mem`
+    // and `fps` do not get the same treatment even though the task that asked
+    // for this pass named all three: OBS reports no memory ceiling to take a
+    // share of, and `fps` runs the ramp backwards — a *higher* frame rate is
+    // better, not worse, so colouring it as if 92 were the dangerous end
+    // would tell the opposite of the truth. `disk` and `frame` render time
+    // are left alone for the same reason: an unbounded quantity, not a share
+    // of one.
     let first = vec![
-        stat("cpu", format!("{:.1}%", stats.cpu_usage_percent), sk),
-        stat("mem", format!("{:.0}MB", stats.memory_usage_mb), sk),
+        stat(
+            "cpu",
+            format!("{:.1}%", stats.cpu_usage_percent),
+            theme::threshold_color(stats.cpu_usage_percent, &sk),
+            sk,
+        ),
+        stat(
+            "mem",
+            format!("{:.0}MB", stats.memory_usage_mb),
+            sk.foreground,
+            sk,
+        ),
         stat(
             "disk",
             format!("{:.1}GB free", stats.available_disk_space_mb / 1024.0),
+            sk.foreground,
             sk,
         ),
-        stat("fps", format!("{:.0}", stats.active_fps), sk),
+        stat("fps", format!("{:.0}", stats.active_fps), sk.foreground, sk),
         stat(
             "frame",
             format!("{:.1}ms", stats.average_frame_render_time_ms),
+            sk.foreground,
             sk,
         ),
     ];
 
     // Skipped frames are the numbers that matter to a viewer, so they are
-    // coloured by severity rather than left as plain text among the others.
-    let second = vec![
-        skipped_stat(
-            "encoder skipped",
-            stats.render_skipped_frames,
-            stats.render_skipped_percent(),
-            sk,
-        ),
-        Span::raw("   "),
-        skipped_stat(
-            "dropped on send",
-            stats.output_skipped_frames,
-            stats.output_skipped_percent(),
-            sk,
-        ),
-    ];
+    // shown as a badge rather than left as plain text among the others.
+    let mut second = skipped_stat(
+        "encoder skipped",
+        stats.render_skipped_frames,
+        stats.render_skipped_percent(),
+        sk,
+    );
+    second.push(Span::raw("   "));
+    second.extend(skipped_stat(
+        "dropped on send",
+        stats.output_skipped_frames,
+        stats.output_skipped_percent(),
+        sk,
+    ));
 
     frame.render_widget(
         Paragraph::new(vec![
@@ -466,20 +516,24 @@ fn draw_stats(frame: &mut Frame, area: Rect, obs: &ObsState) {
     );
 }
 
-fn stat(label: &str, value: String, sk: theme::Skin) -> Vec<Span<'static>> {
+fn stat(label: &str, value: String, colour: Color, sk: theme::Skin) -> Vec<Span<'static>> {
     vec![
         Span::styled(format!("{label} "), Style::new().fg(sk.muted)),
-        Span::styled(value, Style::new().fg(sk.foreground)),
+        Span::styled(value, Style::new().fg(colour)),
         Span::raw("   "),
     ]
 }
 
-/// A skipped-frame figure, coloured by how bad it is.
+/// A skipped-frame figure, badged by how bad it is.
 ///
-/// The thresholds are deliberately low. A stream losing one frame in a
-/// hundred is visibly stuttering to the people watching it, long before
-/// anything feels wrong at the desk.
-fn skipped_stat(label: &str, frames: u64, percent: f64, sk: theme::Skin) -> Span<'static> {
+/// The thresholds stay their own, lower than [`theme::threshold_color`]'s
+/// shared four-stop ramp: that ramp's first cutoff sits at 60%, a share of
+/// dropped frames no stream would ever reach with a watchable picture left.
+/// A stream losing one frame in a hundred is already visibly stuttering to
+/// the people watching it, long before anything feels wrong at the desk, so
+/// this keeps its own far more sensitive cutoffs rather than adopting ones
+/// tuned for a different kind of figure.
+fn skipped_stat(label: &str, frames: u64, percent: f64, sk: theme::Skin) -> Vec<Span<'static>> {
     let colour = if percent >= 1.0 {
         sk.error
     } else if percent >= 0.1 {
@@ -487,18 +541,23 @@ fn skipped_stat(label: &str, frames: u64, percent: f64, sk: theme::Skin) -> Span
     } else {
         sk.muted
     };
-    Span::styled(
-        format!("{label} {frames} ({percent:.2}%)"),
+    let mut spans = style_kit::badge(label, colour, &sk);
+    spans.push(Span::styled(
+        format!(" {frames} ({percent:.2}%)"),
         Style::new().fg(colour),
-    )
+    ));
+    spans
 }
 
 fn pane_block(title: &str, focused: bool, sk: theme::Skin) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(if focused { sk.accent } else { sk.border }))
-        .title(format!(" {title} "))
+        .border_style(style_kit::panel_border_style(focused, &sk))
+        .title(Line::styled(
+            format!(" {title} "),
+            style_kit::panel_title_style(focused, &sk),
+        ))
         .padding(ratatui::widgets::Padding::horizontal(1))
 }
 
@@ -530,23 +589,6 @@ fn empty_note(obs: &ObsState, enabled: bool, when_connected: &str) -> Paragraph<
     Paragraph::new(text)
         .style(Style::new().fg(sk.muted))
         .wrap(Wrap { trim: false })
-}
-
-/// Which slice of a list to draw, keeping the cursor on screen.
-///
-/// Returns `(first, count)`. The window scrolls rather than the selection
-/// jumping to the top, so the row someone is looking at stays where their eye
-/// already is.
-fn visible_window(cursor: usize, length: usize, height: u16) -> (usize, usize) {
-    let height = height as usize;
-    if height == 0 || length == 0 {
-        return (0, 0);
-    }
-    let count = height.min(length);
-    let first = cursor
-        .saturating_sub(height.saturating_sub(1))
-        .min(length - count);
-    (first, count)
 }
 
 #[cfg(test)]
@@ -721,28 +763,6 @@ mod tests {
         for (width, height) in [(1, 1), (10, 4), (40, 12), (80, 24), (200, 60)] {
             render(&app_with(populated()), width, height);
             render(&app_with(ObsState::default()), width, height);
-        }
-    }
-
-    /// The window has to keep the cursor visible, whichever end of a long
-    /// list it is at.
-    #[test]
-    fn the_visible_window_always_contains_the_cursor() {
-        for length in 0..40usize {
-            for height in 0..12u16 {
-                for cursor in 0..length.max(1) {
-                    let (first, count) = visible_window(cursor, length, height);
-                    if count == 0 {
-                        continue;
-                    }
-                    assert!(
-                        cursor >= first && cursor < first + count,
-                        "cursor {cursor} outside {first}..{} for {length} rows in {height}",
-                        first + count
-                    );
-                    assert!(first + count <= length, "window runs past the end");
-                }
-            }
         }
     }
 
