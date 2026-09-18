@@ -184,6 +184,15 @@ pub struct ConfigTab {
     /// selected, so pressing `p` twice from the same row gave the same preset
     /// twice, and moving the cursor changed which preset `p` produced.
     pub preset_index: usize,
+    /// The chat-log directory's file count and total size, as of the last
+    /// [`refresh_chat_log_size`](Self::refresh_chat_log_size).
+    ///
+    /// `draw_chat` used to `read_dir` the log directory and `stat` every file
+    /// in it on every redraw — twice a second at rest, far more often while
+    /// anything animated — for a number that only changes when a message is
+    /// logged or a rotation runs. `None` until the Chat section has been
+    /// opened at least once this session.
+    pub chat_log_size: Option<(usize, u64)>,
 }
 
 /// A cached self-check.
@@ -209,6 +218,7 @@ impl ConfigTab {
             diagnostics_scroll: 0,
             history: Vec::new(),
             key_filter: String::new(),
+            chat_log_size: None,
         }
     }
 
@@ -221,6 +231,16 @@ impl ConfigTab {
             checks: crate::diagnostics::run(config),
             taken_at: Some(chrono::Local::now()),
         };
+    }
+
+    /// Re-read the chat-log directory's file count and total size.
+    ///
+    /// Called when the Chat section is opened — never from `draw_chat`,
+    /// which must not walk the filesystem on every frame.
+    pub fn refresh_chat_log_size(&mut self, config: &crate::config::Config) {
+        self.chat_log_size = crate::paths::chat_log_dir_for(config)
+            .ok()
+            .map(|dir| log_directory_size(&dir));
     }
 
     /// The bindings matching the Keys filter.
@@ -754,7 +774,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab) {
     // nothing ever reported what was actually on disk.
     match crate::paths::chat_log_dir_for(&app.config) {
         Ok(dir) => {
-            let (files, bytes) = log_directory_size(&dir);
+            let (files, bytes) = config.chat_log_size.unwrap_or_default();
             lines.push(Line::from(Span::styled(
                 format!("  {}", dir.display()),
                 Style::new().fg(sk.muted),
@@ -836,7 +856,8 @@ fn draw_chat(frame: &mut Frame, area: Rect, app: &App, config: &ConfigTab) {
 ///
 /// Errors are swallowed into "nothing there": this is a line of information
 /// on a settings screen, and a directory that cannot be read is not worth
-/// failing a draw over.
+/// failing the refresh over. Called from
+/// [`ConfigTab::refresh_chat_log_size`], not from drawing.
 fn log_directory_size(dir: &std::path::Path) -> (usize, u64) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return (0, 0);
@@ -1284,7 +1305,18 @@ pub mod edit {
 
     /// Change the weight of the panel at `index` by `delta`.
     pub fn resize(layout: &mut PaneLayout, index: usize, delta: i16) {
-        walk_weights(&mut layout.root, &mut 0, index, delta);
+        locate(
+            &mut layout.root,
+            &mut 0,
+            index,
+            Scope::Panel,
+            &mut |children, position| {
+                // Never below one: a weight of zero is a panel that is present
+                // and invisible, which looks exactly like a bug from outside.
+                children[position].weight =
+                    (children[position].weight as i32 + delta as i32).clamp(1, 100) as u16;
+            },
+        );
     }
 
     /// Resize the *row* the panel at `index` sits in, rather than the panel.
@@ -1294,42 +1326,75 @@ pub mod edit {
     /// decides how tall a row of panels is. "Make the chats taller" was
     /// inexpressible from the editor, however many times you pressed `+`.
     pub fn resize_row(layout: &mut PaneLayout, index: usize, delta: i16) -> bool {
-        let mut seen = 0;
-        walk_row_weights(&mut layout.root, &mut seen, index, delta)
+        locate(
+            &mut layout.root,
+            &mut 0,
+            index,
+            Scope::Row,
+            &mut |children, position| {
+                // Never below one: a weight of zero is a row that is present
+                // and invisible.
+                children[position].weight =
+                    (children[position].weight as i32 + delta as i32).clamp(1, 100) as u16;
+            },
+        )
     }
 
-    /// Find the enclosing `Split` child that contains panel `target`, and
-    /// change *its* weight.
-    fn walk_row_weights(
+    /// How far [`locate`] should stop descending: at the panel leaf itself,
+    /// or at the split branch (row or column) that contains it.
+    #[derive(Clone, Copy)]
+    enum Scope {
+        Panel,
+        Row,
+    }
+
+    /// Walk `node`'s children in flat panel-index order looking for
+    /// `target`, and run `found` on the split it is directly a child of,
+    /// together with its position there, once located — of the panel
+    /// itself for [`Scope::Panel`], or of the whole branch (row or column)
+    /// containing it for [`Scope::Row`]. Returns whether it was found.
+    ///
+    /// `resize`, `resize_row`, `move_panel` and `remove` each used to
+    /// re-implement this walk by hand, one flat counter apiece; they differ
+    /// only in what they do with the child once it is found, which is what
+    /// `found` is for.
+    fn locate<F: FnMut(&mut Vec<crate::layout::Child>, usize)>(
         node: &mut crate::layout::Node,
         seen: &mut usize,
         target: usize,
-        delta: i16,
+        scope: Scope,
+        found: &mut F,
     ) -> bool {
         let crate::layout::Node::Split { children, .. } = node else {
-            *seen += 1;
             return false;
         };
 
-        for child in children.iter_mut() {
-            match &mut child.node {
-                crate::layout::Node::Panel(_) => {
+        for position in 0..children.len() {
+            let is_panel = matches!(children[position].node, crate::layout::Node::Panel(_));
+            match scope {
+                Scope::Panel if is_panel => {
+                    if *seen == target {
+                        found(children, position);
+                        return true;
+                    }
                     *seen += 1;
                 }
-                nested => {
-                    let before = *seen;
-                    let panels = count_panels(nested);
-                    if target >= before && target < before + panels {
-                        // The row the target sits in. Never below one: a
-                        // weight of zero is a row that is present and
-                        // invisible.
-                        child.weight = (child.weight as i32 + delta as i32).clamp(1, 100) as u16;
-                        *seen += panels;
+                Scope::Panel => {
+                    if locate(&mut children[position].node, seen, target, scope, found) {
                         return true;
                     }
-                    if walk_row_weights(nested, seen, target, delta) {
+                }
+                // A bare panel is not a row of its own.
+                Scope::Row if is_panel => {
+                    *seen += 1;
+                }
+                Scope::Row => {
+                    let count = count_panels(&children[position].node);
+                    if *seen <= target && target < *seen + count {
+                        found(children, position);
                         return true;
                     }
+                    *seen += count;
                 }
             }
         }
@@ -1345,30 +1410,6 @@ pub mod edit {
         }
     }
 
-    fn walk_weights(node: &mut crate::layout::Node, seen: &mut usize, target: usize, delta: i16) {
-        match node {
-            crate::layout::Node::Panel(_) => {
-                *seen += 1;
-            }
-            crate::layout::Node::Split { children, .. } => {
-                for child in children.iter_mut() {
-                    if matches!(child.node, crate::layout::Node::Panel(_)) {
-                        if *seen == target {
-                            // Never below one: a weight of zero is a panel
-                            // that is present and invisible, which looks
-                            // exactly like a bug from the outside.
-                            child.weight =
-                                (child.weight as i32 + delta as i32).clamp(1, 100) as u16;
-                        }
-                        *seen += 1;
-                    } else {
-                        walk_weights(&mut child.node, seen, target, delta);
-                    }
-                }
-            }
-        }
-    }
-
     /// Move a panel one place earlier or later within the split it sits in.
     ///
     /// Reordering rather than re-parenting: a panel keeps whichever row or
@@ -1376,46 +1417,25 @@ pub mod edit {
     /// panel *between* rows would need a target chosen as well as a
     /// direction, which is a bigger interaction than one key can carry.
     pub fn move_panel(layout: &mut PaneLayout, index: usize, delta: isize) -> bool {
-        let mut seen = 0;
-        move_walk(&mut layout.root, &mut seen, index, delta)
-    }
-
-    fn move_walk(
-        node: &mut crate::layout::Node,
-        seen: &mut usize,
-        target: usize,
-        delta: isize,
-    ) -> bool {
-        let crate::layout::Node::Split { children, .. } = node else {
-            return false;
-        };
-        let mut swap = None;
-        for (position, child) in children.iter_mut().enumerate() {
-            match &mut child.node {
-                crate::layout::Node::Panel(_) => {
-                    if *seen == target {
-                        swap = Some(position);
-                    }
-                    *seen += 1;
+        let mut moved = false;
+        locate(
+            &mut layout.root,
+            &mut 0,
+            index,
+            Scope::Panel,
+            &mut |children, position| {
+                let destination = position as isize + delta;
+                // Stopping at the ends rather than wrapping: a panel that leapt
+                // from the bottom of a column to the top would look like a
+                // different action from the one that was asked for.
+                if destination < 0 || destination >= children.len() as isize {
+                    return;
                 }
-                other => {
-                    if move_walk(other, seen, target, delta) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        let Some(position) = swap else { return false };
-        let destination = position as isize + delta;
-        // Stopping at the ends rather than wrapping: a panel that leapt from
-        // the bottom of a column to the top would look like a different
-        // action from the one that was asked for.
-        if destination < 0 || destination >= children.len() as isize {
-            return false;
-        }
-        children.swap(position, destination as usize);
-        true
+                children.swap(position, destination as usize);
+                moved = true;
+            },
+        );
+        moved
     }
 
     /// Turn rows into columns and back.
@@ -1487,38 +1507,19 @@ pub mod edit {
         if layout.panels().len() <= 1 {
             return false;
         }
-        let mut seen = 0;
-        let removed = remove_walk(&mut layout.root, &mut seen, index);
+        let removed = locate(
+            &mut layout.root,
+            &mut 0,
+            index,
+            Scope::Panel,
+            &mut |children, position| {
+                children.remove(position);
+            },
+        );
         if removed {
             tidy(&mut layout.root);
         }
         removed
-    }
-
-    fn remove_walk(node: &mut crate::layout::Node, seen: &mut usize, target: usize) -> bool {
-        if let crate::layout::Node::Split { children, .. } = node {
-            let mut remove_at = None;
-            for (position, child) in children.iter_mut().enumerate() {
-                match &mut child.node {
-                    crate::layout::Node::Panel(_) => {
-                        if *seen == target {
-                            remove_at = Some(position);
-                        }
-                        *seen += 1;
-                    }
-                    other => {
-                        if remove_walk(other, seen, target) {
-                            return true;
-                        }
-                    }
-                }
-            }
-            if let Some(position) = remove_at {
-                children.remove(position);
-                return true;
-            }
-        }
-        false
     }
 
     /// Tidy a tree after a removal.

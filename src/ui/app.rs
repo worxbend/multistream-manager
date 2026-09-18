@@ -1418,6 +1418,9 @@ impl App {
                 if config.section == Section::Diagnostics {
                     config.refresh_diagnostics(&self.config);
                 }
+                if config.section == Section::Chat {
+                    config.refresh_chat_log_size(&self.config);
+                }
             }
             // Diagnostics has no cursor — its checks are read rather than
             // selected — so here the same keys scroll the list. On a short
