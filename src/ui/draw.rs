@@ -276,6 +276,19 @@ fn draw_setup(frame: &mut Frame, area: Rect, app: &App) {
         .horizontal_margin(2)
         .split(area);
 
+    // Preview the redirect URL from what is currently typed in the port
+    // field, not from the saved config — the whole point is to show the
+    // exact URL to register *before* it is saved. Empty, non-numeric or `0`
+    // text falls back to the saved value rather than showing something
+    // useless mid-edit.
+    let port_preview = app
+        .setup_inputs
+        .get(&SetupField::OauthPort)
+        .and_then(|input| input.value().trim().parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .map(crate::config::redirect_uri_for_port)
+        .unwrap_or_else(|| app.config.redirect_uri());
+
     let mut lines = vec![
         Line::from(Span::styled(
             "Set up API access",
@@ -297,7 +310,7 @@ fn draw_setup(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(""),
         Line::from(vec![
             Span::styled("Redirect URL to register: ", Style::new().fg(sk.muted)),
-            Span::styled(app.config.redirect_uri(), Style::new().fg(sk.foreground)),
+            Span::styled(port_preview, Style::new().fg(sk.foreground)),
         ]),
         Line::from(Span::styled(
             "Fill in one platform or both — an empty pair is simply skipped.",
@@ -327,15 +340,17 @@ fn draw_setup(frame: &mut Frame, area: Rect, app: &App) {
         // is frequently shared, and a client secret is a credential.
         //
         // A client id is not a secret, but it identifies your application to
-        // anybody watching, so streamer mode hides it too.
-        let shown = if field.is_secret() || app.streamer_mode() {
+        // anybody watching, so streamer mode hides it too — unlike the
+        // shared redirect port, which identifies nothing and stays visible
+        // even in streamer mode.
+        let shown = if field.is_secret() || (app.streamer_mode() && field.platform().is_some()) {
             "•".repeat(value.chars().count())
         } else {
             value
         };
 
         let border = if focused {
-            platform_color(field.platform())
+            field.platform().map(platform_color).unwrap_or(sk.accent)
         } else {
             sk.border
         };

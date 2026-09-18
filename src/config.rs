@@ -1518,8 +1518,36 @@ impl Config {
     /// `::1` depending on the machine, so the callback listener binds *both*
     /// loopback families — see `oauth::Loopback`.
     pub fn redirect_uri(&self) -> String {
-        format!("http://localhost:{}/callback", self.general.oauth_port)
+        redirect_uri_for_port(self.general.oauth_port)
     }
+}
+
+/// The redirect URI for an arbitrary port, independent of any saved config —
+/// used by the setup wizard to preview the URL from what is currently typed,
+/// before it is saved.
+pub fn redirect_uri_for_port(port: u16) -> String {
+    format!("http://localhost:{port}/callback")
+}
+
+/// Parses and validates a hand-typed OAuth redirect port.
+///
+/// `0` is rejected outright: nothing can meaningfully bind it for this
+/// purpose, and the registered redirect URI needs one fixed, known port.
+pub fn parse_oauth_port(raw: &str) -> Result<u16, String> {
+    let trimmed = raw.trim();
+    // Parsed as a wider integer first so a value that is merely too big for a
+    // `u16` — 70000, say — gets its own "out of range" message instead of
+    // being lumped in with text that is not a number at all.
+    let wide: u64 = trimmed
+        .parse()
+        .map_err(|_| format!("{trimmed:?} is not a port number — try something like 8017."))?;
+    let port: u16 = wide
+        .try_into()
+        .map_err(|_| format!("{trimmed} is too big for a port — the highest is 65535."))?;
+    if port == 0 {
+        return Err("Port 0 cannot be used — pick a port between 1 and 65535.".to_string());
+    }
+    Ok(port)
 }
 
 /// Explanatory comment block written at the top of every saved config file.
@@ -1658,6 +1686,32 @@ mod tests {
         let mut config = Config::default();
         config.general.oauth_port = 9999;
         assert_eq!(config.redirect_uri(), "http://localhost:9999/callback");
+    }
+
+    #[test]
+    fn parse_oauth_port_accepts_a_valid_port() {
+        assert_eq!(parse_oauth_port("9000"), Ok(9000));
+        assert_eq!(parse_oauth_port(" 8017 "), Ok(8017));
+    }
+
+    #[test]
+    fn parse_oauth_port_rejects_zero() {
+        assert!(parse_oauth_port("0").is_err());
+    }
+
+    #[test]
+    fn parse_oauth_port_rejects_non_numeric_text() {
+        assert!(parse_oauth_port("abc").is_err());
+    }
+
+    #[test]
+    fn parse_oauth_port_rejects_out_of_range_values() {
+        let error = parse_oauth_port("99999999").unwrap_err();
+        assert!(
+            error.contains("too big"),
+            "a number that is merely too large for a port should say so, not be reported as \
+             non-numeric text: {error:?}"
+        );
     }
 
     /// A config file from before the Chat tab existed has no [chat] table;

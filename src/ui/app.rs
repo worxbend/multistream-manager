@@ -144,14 +144,19 @@ pub enum SetupField {
     TwitchSecret,
     YouTubeId,
     YouTubeSecret,
+    /// The local OAuth redirect port. It has no `Platform` of its own — it is
+    /// shared by both providers' redirect URIs — so it sits outside the
+    /// per-platform completeness check in `setup_is_complete`.
+    OauthPort,
 }
 
 impl SetupField {
-    pub const ORDER: [SetupField; 4] = [
+    pub const ORDER: [SetupField; 5] = [
         SetupField::TwitchId,
         SetupField::TwitchSecret,
         SetupField::YouTubeId,
         SetupField::YouTubeSecret,
+        SetupField::OauthPort,
     ];
 
     pub fn label(self) -> &'static str {
@@ -160,6 +165,7 @@ impl SetupField {
             SetupField::TwitchSecret => "Twitch client secret",
             SetupField::YouTubeId => "YouTube client id",
             SetupField::YouTubeSecret => "YouTube client secret",
+            SetupField::OauthPort => "OAuth redirect port",
         }
     }
 
@@ -169,10 +175,13 @@ impl SetupField {
         matches!(self, SetupField::TwitchSecret | SetupField::YouTubeSecret)
     }
 
-    pub fn platform(self) -> Platform {
+    /// The platform this field belongs to, or `None` for a field — like the
+    /// shared redirect port — that both platforms use rather than own.
+    pub fn platform(self) -> Option<Platform> {
         match self {
-            SetupField::TwitchId | SetupField::TwitchSecret => Platform::Twitch,
-            SetupField::YouTubeId | SetupField::YouTubeSecret => Platform::YouTube,
+            SetupField::TwitchId | SetupField::TwitchSecret => Some(Platform::Twitch),
+            SetupField::YouTubeId | SetupField::YouTubeSecret => Some(Platform::YouTube),
+            SetupField::OauthPort => None,
         }
     }
 }
@@ -574,6 +583,7 @@ impl App {
                 SetupField::TwitchSecret => config.twitch.client_secret.clone(),
                 SetupField::YouTubeId => config.youtube.client_id.clone(),
                 SetupField::YouTubeSecret => config.youtube.client_secret.clone(),
+                SetupField::OauthPort => config.general.oauth_port.to_string(),
             };
             setup_inputs.insert(field, TextInput::new(existing));
         }
@@ -3660,7 +3670,7 @@ impl App {
         Platform::ALL.iter().any(|platform| {
             SetupField::ORDER
                 .iter()
-                .filter(|field| field.platform() == *platform)
+                .filter(|field| field.platform() == Some(*platform))
                 .all(|field| {
                     self.setup_inputs
                         .get(field)
@@ -3734,6 +3744,32 @@ impl App {
             return vec![];
         }
 
+        // Validated before anything is written to `self.config`, so a bad
+        // port never lets good credentials through half-saved. An empty
+        // field — the field starts prefilled, so this only happens if it was
+        // cleared — falls back to the previously configured port instead of
+        // blocking the save, matching the redirect-URL preview above, which
+        // treats the same empty text as "not typed yet" rather than an
+        // error. A non-empty but invalid port (not a number, `0`, or out of
+        // range) is a real typo worth stopping on, so that case still blocks
+        // the save with a warning.
+        let port_text = self
+            .setup_inputs
+            .get(&SetupField::OauthPort)
+            .map(|input| input.value().trim().to_string())
+            .unwrap_or_default();
+        let port = if port_text.is_empty() {
+            self.config.general.oauth_port
+        } else {
+            match crate::config::parse_oauth_port(&port_text) {
+                Ok(port) => port,
+                Err(message) => {
+                    self.notify(super::toast::Level::Warning, message);
+                    return vec![];
+                }
+            }
+        };
+
         for field in SetupField::ORDER {
             let value = self
                 .setup_inputs
@@ -3745,8 +3781,10 @@ impl App {
                 SetupField::TwitchSecret => self.config.twitch.client_secret = value,
                 SetupField::YouTubeId => self.config.youtube.client_id = value,
                 SetupField::YouTubeSecret => self.config.youtube.client_secret = value,
+                SetupField::OauthPort => {} // handled below, once validated
             }
         }
+        self.config.general.oauth_port = port;
 
         // The fields are already on `self.config`, so this commits what is
         // there. `persist` carries the `ReloadConfig` the worker needs: it
@@ -6078,6 +6116,128 @@ mod tests {
         );
         let saved = std::fs::read_to_string(scratch.path().join("config.toml")).unwrap();
         assert!(saved.contains("abc"), "the credentials reached the file");
+    }
+
+    /// The port field starts out showing the configured default, not blank —
+    /// a user who never touches it should still save a valid config.
+    #[test]
+    fn setup_prefills_the_oauth_port_field_with_the_configured_default() {
+        let app = App::new(Config::default());
+        assert_eq!(
+            app.setup_inputs
+                .get(&SetupField::OauthPort)
+                .unwrap()
+                .value(),
+            "8017"
+        );
+    }
+
+    /// The shared redirect port has no `Platform` of its own, so it must not
+    /// block the per-platform "id and secret both present" check — proved by
+    /// clearing it outright rather than leaving it at its already-valid
+    /// prefilled default, which would pass even if the port were still
+    /// (wrongly) part of the per-platform check.
+    #[test]
+    fn setup_is_complete_ignores_an_untouched_oauth_port() {
+        let mut app = App::new(Config::default());
+        app.setup_inputs
+            .get_mut(&SetupField::TwitchId)
+            .unwrap()
+            .set("id");
+        app.setup_inputs
+            .get_mut(&SetupField::TwitchSecret)
+            .unwrap()
+            .set("secret");
+        app.setup_inputs
+            .get_mut(&SetupField::OauthPort)
+            .unwrap()
+            .set("");
+        assert!(app.setup_is_complete());
+    }
+
+    /// A bad port must not let good credentials through half-saved: the form
+    /// stays put and nothing on `self.config` changes.
+    #[test]
+    fn save_credentials_rejects_an_invalid_oauth_port() {
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("app-setup-bad-port");
+        let mut app = App::new(Config::default());
+        app.splash_skipped = true;
+        app.setup_inputs
+            .get_mut(&SetupField::TwitchId)
+            .unwrap()
+            .set("id");
+        app.setup_inputs
+            .get_mut(&SetupField::TwitchSecret)
+            .unwrap()
+            .set("secret");
+        app.setup_inputs
+            .get_mut(&SetupField::OauthPort)
+            .unwrap()
+            .set("0");
+
+        let commands = app.save_credentials();
+
+        assert!(commands.is_empty());
+        assert_eq!(app.screen, Screen::Setup);
+        assert_eq!(app.config.general.oauth_port, 8017);
+    }
+
+    /// Clearing the prefilled port field — a plausible fresh-install slip —
+    /// must not lose otherwise-valid, already-typed credentials. It falls
+    /// back to the existing port instead, matching what the redirect-URL
+    /// preview already shows for the same empty input.
+    #[test]
+    fn save_credentials_falls_back_to_the_existing_port_when_the_field_is_cleared() {
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("app-setup-empty-port");
+        let mut app = App::new(Config::default());
+        app.splash_skipped = true;
+        app.setup_inputs
+            .get_mut(&SetupField::TwitchId)
+            .unwrap()
+            .set("id");
+        app.setup_inputs
+            .get_mut(&SetupField::TwitchSecret)
+            .unwrap()
+            .set("secret");
+        app.setup_inputs
+            .get_mut(&SetupField::OauthPort)
+            .unwrap()
+            .set("");
+
+        let commands = app.save_credentials();
+
+        assert_eq!(app.screen, Screen::Login);
+        assert_eq!(app.config.twitch.client_id, "id");
+        assert_eq!(app.config.twitch.client_secret, "secret");
+        assert_eq!(app.config.general.oauth_port, 8017);
+        assert!(matches!(commands.as_slice(), [Command::ReloadConfig(_)]));
+    }
+
+    /// A valid, custom port is committed to the config and carried through to
+    /// the reload the worker needs.
+    #[test]
+    fn save_credentials_saves_a_custom_oauth_port() {
+        let _scratch = crate::paths::test_support::ScratchConfigDir::new("app-setup-custom-port");
+        let mut app = App::new(Config::default());
+        app.splash_skipped = true;
+        app.setup_inputs
+            .get_mut(&SetupField::TwitchId)
+            .unwrap()
+            .set("id");
+        app.setup_inputs
+            .get_mut(&SetupField::TwitchSecret)
+            .unwrap()
+            .set("secret");
+        app.setup_inputs
+            .get_mut(&SetupField::OauthPort)
+            .unwrap()
+            .set("9500");
+
+        let commands = app.save_credentials();
+
+        assert_eq!(app.screen, Screen::Login);
+        assert_eq!(app.config.general.oauth_port, 9500);
+        assert!(matches!(commands.as_slice(), [Command::ReloadConfig(_)]));
     }
 
     /// The login screen only offers platforms whose credentials exist, and
