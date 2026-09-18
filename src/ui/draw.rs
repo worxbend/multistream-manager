@@ -6,9 +6,17 @@ use ratatui::widgets::{
 };
 
 use super::app::{App, Screen};
+use super::style_kit;
 use super::worker::LogLevel;
 use crate::lang;
 use crate::model::{Field, Platform, Privacy};
+
+// Small, focused ratatui-ecosystem widgets (see `Cargo.toml`'s own comment
+// for why these three and not the rest of the list): a checkbox marker glyph
+// for Login's platform ticks and the Form's three yes/no fields, and a
+// viewer-share piechart for the dashboard banner.
+use tui_checkbox::Checkbox;
+use tui_piechart::{PieChart, PieSlice};
 
 /// Brand colour for a platform, used on its panel border and heading.
 ///
@@ -349,16 +357,25 @@ fn draw_setup(frame: &mut Frame, area: Rect, app: &App) {
             value
         };
 
-        let border = if focused {
-            field.platform().map(platform_color).unwrap_or(sk.accent)
-        } else {
-            sk.border
-        };
+        // The shared focused/unfocused rule is the base; a platform-specific
+        // field (the Twitch or YouTube client id/secret) still borrows that
+        // platform's brand colour on top of it when focused, exactly as its
+        // panel does everywhere else — the field says whose credential this
+        // is, not just that it currently has the cursor.
+        let mut border_style = style_kit::panel_border_style(focused, &sk);
+        if focused {
+            if let Some(colour) = field.platform().map(platform_color) {
+                border_style = border_style.fg(colour);
+            }
+        }
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(border))
-            .title(format!(" {} ", field.label()))
+            .border_style(border_style)
+            .title(Line::styled(
+                format!(" {} ", field.label()),
+                style_kit::panel_title_style(focused, &sk),
+            ))
             .padding(ratatui::widgets::Padding::horizontal(1));
 
         frame.render_widget(
@@ -409,52 +426,58 @@ fn draw_login(frame: &mut Frame, area: Rect, app: &App) {
         areas[0],
     );
 
-    let items: Vec<ListItem> = Platform::ALL
-        .iter()
-        .enumerate()
-        .map(|(index, platform)| {
-            let ticked = app.login_selection.contains(platform);
-            let focused = index == app.login_cursor;
-            let configured = app.config.check_credentials(&[*platform]).is_ok();
-            let authorised = app.logged_in.get(platform).copied().unwrap_or(false);
+    // One row per platform, the tick box in its own narrow column so the
+    // marker is `tui_checkbox`'s own glyph rather than a hand-typed
+    // `[x]`/`[ ]` — the toggle itself (`app.login_selection`, `login_cursor`)
+    // is untouched, this only changes what the tick is drawn with.
+    let rows = Layout::vertical(
+        Platform::ALL
+            .iter()
+            .map(|_| Constraint::Length(1))
+            .collect::<Vec<_>>(),
+    )
+    .split(areas[1]);
 
-            let state = if !configured {
-                " — no credentials yet (press c)"
-            } else if app.busy && ticked && !authorised {
-                // While a login is running, say which platform is waiting on
-                // the browser rather than leaving the screen unchanged.
-                " — waiting for your browser…"
-            } else if authorised {
-                " — already authorised, logging in again replaces it"
-            } else {
-                ""
-            };
+    for (index, platform) in Platform::ALL.iter().enumerate() {
+        let ticked = app.login_selection.contains(platform);
+        let focused = index == app.login_cursor;
+        let configured = app.config.check_credentials(&[*platform]).is_ok();
+        let authorised = app.logged_in.get(platform).copied().unwrap_or(false);
 
-            let style = if focused {
-                Style::new()
-                    .fg(platform_color(*platform))
-                    .add_modifier(Modifier::BOLD)
-            } else if configured {
-                Style::new().fg(sk.foreground)
-            } else {
-                Style::new().fg(sk.muted)
-            };
+        let state = if !configured {
+            " — no credentials yet (press c)"
+        } else if app.busy && ticked && !authorised {
+            // While a login is running, say which platform is waiting on
+            // the browser rather than leaving the screen unchanged.
+            " — waiting for your browser…"
+        } else if authorised {
+            " — already authorised, logging in again replaces it"
+        } else {
+            ""
+        };
 
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!(
-                        "{} {} ",
-                        if ticked { "[x]" } else { "[ ]" },
-                        platform.label()
-                    ),
-                    style,
-                ),
+        let style = if focused {
+            Style::new()
+                .fg(platform_color(*platform))
+                .add_modifier(Modifier::BOLD)
+        } else if configured {
+            Style::new().fg(sk.foreground)
+        } else {
+            Style::new().fg(sk.muted)
+        };
+
+        let cols =
+            Layout::horizontal([Constraint::Length(4), Constraint::Min(0)]).split(rows[index]);
+        frame.render_widget(Checkbox::new("", ticked).checkbox_style(style), cols[0]);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(platform.label(), style),
                 Span::styled(state.to_string(), Style::new().fg(sk.muted)),
-            ]))
-        })
-        .collect();
+            ])),
+            cols[1],
+        );
+    }
 
-    frame.render_widget(List::new(items), areas[1]);
     draw_log(frame, areas[2], app);
 }
 
@@ -505,8 +528,11 @@ fn draw_combined(frame: &mut Frame, area: Rect, app: &App) {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(if focused { sk.accent } else { sk.border }))
-            .title(format!(" {} ", panel.title()))
+            .border_style(style_kit::panel_border_style(focused, &sk))
+            .title(Line::styled(
+                format!(" {} ", panel.title()),
+                style_kit::panel_title_style(focused, &sk),
+            ))
             .padding(ratatui::widgets::Padding::horizontal(1));
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
@@ -707,27 +733,26 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             crate::health::Health::Idle => sk.muted,
         };
         spans.push(Span::styled("  ·  ", Style::new().fg(sk.border)));
-        if !segment.label.is_empty() {
-            spans.push(Span::styled(
-                format!("{} ", segment.label),
-                Style::new().fg(sk.muted),
+        if segment.label.is_empty() {
+            // The trailing uptime segment has no label to badge — there is
+            // nothing here for a pill to distinguish from its surroundings —
+            // so it stays plain coloured text, same as before.
+            let mut style = Style::new().fg(colour);
+            if segment.health == crate::health::Health::Bad {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            spans.push(Span::styled(segment.detail.clone(), style));
+        } else {
+            // A compact pill reads as one state at a glance, where the old
+            // glyph-plus-text run made you read the colour of a tiny
+            // character to tell "live" from "offline" apart from the label
+            // beside it.
+            spans.extend(style_kit::badge(
+                &format!("{} {}", segment.label, segment.detail),
+                colour,
+                &sk,
             ));
-            // The glyph carries the colour, so the state survives being read
-            // on a monochrome terminal or by somebody who cannot separate
-            // red from green.
-            let glyph = match segment.health {
-                crate::health::Health::Good => "●",
-                crate::health::Health::Warn => "▲",
-                crate::health::Health::Bad => "■",
-                crate::health::Health::Idle => "○",
-            };
-            spans.push(Span::styled(format!("{glyph} "), Style::new().fg(colour)));
         }
-        let mut style = Style::new().fg(colour);
-        if segment.health == crate::health::Health::Bad {
-            style = style.add_modifier(Modifier::BOLD);
-        }
-        spans.push(Span::styled(segment.detail.clone(), style));
     }
 
     let block = Block::default()
@@ -738,6 +763,93 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
 }
 
+/// One `key description` pair in a footer hint line, styled the way the Form
+/// screen's own "go live" hint already was: the key bright enough to find at
+/// a glance, its description muted so the row reads as a list of "press
+/// this" rather than one flat run of grey text the eye skips over. This is
+/// that pattern generalised — every branch below builds its line out of
+/// these instead of one hand-typed muted string.
+fn hint_pair(key: &str, description: &str, sk: &crate::theme::Skin) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled(
+        key.to_string(),
+        Style::new().fg(sk.foreground),
+    )];
+    if !description.is_empty() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            description.to_string(),
+            Style::new().fg(sk.muted),
+        ));
+    }
+    spans
+}
+
+/// Join several [`hint_pair`]s with the footer's usual three-space gap and a
+/// leading space to match the padding every hint line already had.
+fn hint_line(pairs: &[(&str, &str)], sk: &crate::theme::Skin) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    for (index, (key, description)) in pairs.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("   "));
+        }
+        spans.extend(hint_pair(key, description, sk));
+    }
+    Line::from(spans)
+}
+
+/// Colour an already-formatted hint string, for the one footer whose text is
+/// not written in this file: `Config`'s comes from whichever section is
+/// open, in `config_tab.rs`. Every hint there follows the same convention as
+/// the literal strings below — a key, a single space, its description, then
+/// two or more spaces before the next pair — so this parses that convention
+/// once instead of duplicating it, and reproduces any wider-than-usual gap
+/// exactly rather than normalising it away.
+fn footer_hint_line(hints: &str, sk: &crate::theme::Skin) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let leading_len = hints.len() - hints.trim_start_matches(' ').len();
+    let (leading, rest) = hints.split_at(leading_len);
+    if !leading.is_empty() {
+        spans.push(Span::raw(leading.to_string()));
+    }
+
+    let push_group = |text: &str, spans: &mut Vec<Span<'static>>| {
+        if text.is_empty() {
+            return;
+        }
+        match text.split_once(' ') {
+            Some((key, description)) => spans.extend(hint_pair(key, description, sk)),
+            None => spans.push(Span::styled(
+                text.to_string(),
+                Style::new().fg(sk.foreground),
+            )),
+        }
+    };
+
+    let bytes = rest.as_bytes();
+    let mut group_start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b' ' {
+            let gap_start = i;
+            while i < bytes.len() && bytes[i] == b' ' {
+                i += 1;
+            }
+            // A single space stays inside its group (it is the key/description
+            // separator); only a run of two or more starts a new pair.
+            if i - gap_start >= 2 {
+                push_group(&rest[group_start..gap_start], &mut spans);
+                spans.push(Span::raw(rest[gap_start..i].to_string()));
+                group_start = i;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    push_group(&rest[group_start..], &mut spans);
+
+    Line::from(spans)
+}
+
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let sk = crate::theme::skin();
     // The hints follow the *tab*, not only the screen. The Stream Info screens
@@ -746,26 +858,70 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     // the Chat tab told you to press Enter to connect, which does nothing
     // there, and never mentioned a single chat binding.
     if app.tab == super::app::Tab::Combined {
-        let hints = if app.combined_focus == super::app::CombinedFocus::StreamInfo {
-            " alt+w chat   r refresh   y copy Twitch key   Y copy YouTube key   q quit"
+        let pairs: &[(&str, &str)] = if app.combined_focus == super::app::CombinedFocus::StreamInfo
+        {
+            &[
+                ("alt+w", "chat"),
+                ("r", "refresh"),
+                ("y", "copy Twitch key"),
+                ("Y", "copy YouTube key"),
+                ("q", "quit"),
+            ]
         } else {
-            " alt+w stream info   h/l pane   j/k scroll   i compose   / search   q quit"
+            &[
+                ("alt+w", "stream info"),
+                ("h/l", "pane"),
+                ("j/k", "scroll"),
+                ("i", "compose"),
+                ("/", "search"),
+                ("q", "quit"),
+            ]
         };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(hints, Style::new().fg(sk.muted)))),
-            area,
-        );
+        frame.render_widget(Paragraph::new(hint_line(pairs, &sk)), area);
         return;
     }
 
     if app.tab == super::app::Tab::Obs {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                " j/k move   tab pane   enter switch/mute   m mute   M mute all   +/- volume                    s stream   r record   p pause   P profile   C collection   R reconnect   q quit",
-                Style::new().fg(sk.muted),
-            ))),
-            area,
-        );
+        // The wide gap between "volume" and "stream" is original formatting,
+        // kept as-is rather than normalised to the usual three spaces —
+        // separating the pane-navigation keys on the left from the
+        // stream/record controls on the right.
+        let mut spans = vec![Span::raw(" ")];
+        for (index, (key, description)) in [
+            ("j/k", "move"),
+            ("tab", "pane"),
+            ("enter", "switch/mute"),
+            ("m", "mute"),
+            ("M", "mute all"),
+            ("+/-", "volume"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if index > 0 {
+                spans.push(Span::raw("   "));
+            }
+            spans.extend(hint_pair(key, description, &sk));
+        }
+        spans.push(Span::raw(" ".repeat(20)));
+        for (index, (key, description)) in [
+            ("s", "stream"),
+            ("r", "record"),
+            ("p", "pause"),
+            ("P", "profile"),
+            ("C", "collection"),
+            ("R", "reconnect"),
+            ("q", "quit"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if index > 0 {
+                spans.push(Span::raw("   "));
+            }
+            spans.extend(hint_pair(key, description, &sk));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
 
@@ -779,23 +935,25 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             .as_ref()
             .map(|config| config.section.footer_hints())
             .unwrap_or(" j/k move   tab pane   esc back   q quit");
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(hints, Style::new().fg(sk.muted)))),
-            area,
-        );
+        frame.render_widget(Paragraph::new(footer_hint_line(hints, &sk)), area);
         return;
     }
 
     if app.tab == super::app::Tab::Chat {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                " h/l pane   j/k scroll   [ ] chats   { } accounts   i compose   \
-                 / search   1-4 filter (0 clears)   K inspect   d/t/b moderate   \
-                 ctrl+r reconnect   q quit",
-                Style::new().fg(sk.muted),
-            ))),
-            area,
-        );
+        let pairs: &[(&str, &str)] = &[
+            ("h/l", "pane"),
+            ("j/k", "scroll"),
+            ("[ ]", "chats"),
+            ("{ }", "accounts"),
+            ("i", "compose"),
+            ("/", "search"),
+            ("1-4", "filter (0 clears)"),
+            ("K", "inspect"),
+            ("d/t/b", "moderate"),
+            ("ctrl+r", "reconnect"),
+            ("q", "quit"),
+        ];
+        frame.render_widget(Paragraph::new(hint_line(pairs, &sk)), area);
         return;
     }
 
@@ -812,43 +970,56 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             ("Ctrl+G go live (not ready)", Style::new().fg(sk.muted))
         };
 
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    " Tab/↑↓ field   Enter complete   ",
-                    Style::new().fg(sk.muted),
-                ),
-                Span::styled(go_hint, go_style),
-                Span::styled(
-                    "   Ctrl+S save defaults   Esc back",
-                    Style::new().fg(sk.muted),
-                ),
-            ])),
-            area,
-        );
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(hint_pair("Tab/↑↓", "field", &sk));
+        spans.push(Span::raw("   "));
+        spans.extend(hint_pair("Enter", "complete", &sk));
+        spans.push(Span::raw("   "));
+        spans.push(Span::styled(go_hint, go_style));
+        spans.push(Span::raw("   "));
+        spans.extend(hint_pair("Ctrl+S", "save defaults", &sk));
+        spans.push(Span::raw("   "));
+        spans.extend(hint_pair("Esc", "back", &sk));
+
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
 
-    let hints = match app.screen {
-        Screen::Setup => "Tab/↑↓ field   Enter save & continue   Esc back   Ctrl+C quit",
-        Screen::Login => {
-            "↑↓ move   Space tick   Enter log in   c edit credentials   s skip   q quit"
-        }
-        Screen::Platforms => "↑↓ move   Space toggle   a all   Enter connect   q quit",
-        Screen::Dashboard => {
-            "r refresh   o open watch page   y copy Twitch key   Y copy YouTube key   \
-             e edit   space,s,x finish   q quit"
-        }
+    let pairs: &[(&str, &str)] = match app.screen {
+        Screen::Setup => &[
+            ("Tab/↑↓", "field"),
+            ("Enter", "save & continue"),
+            ("Esc", "back"),
+            ("Ctrl+C", "quit"),
+        ],
+        Screen::Login => &[
+            ("↑↓", "move"),
+            ("Space", "tick"),
+            ("Enter", "log in"),
+            ("c", "edit credentials"),
+            ("s", "skip"),
+            ("q", "quit"),
+        ],
+        Screen::Platforms => &[
+            ("↑↓", "move"),
+            ("Space", "toggle"),
+            ("a", "all"),
+            ("Enter", "connect"),
+            ("q", "quit"),
+        ],
+        Screen::Dashboard => &[
+            ("r", "refresh"),
+            ("o", "open watch page"),
+            ("y", "copy Twitch key"),
+            ("Y", "copy YouTube key"),
+            ("e", "edit"),
+            ("space,s,x", "finish"),
+            ("q", "quit"),
+        ],
         Screen::Form => unreachable!("handled above"),
     };
 
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!(" {hints}"),
-            Style::new().fg(sk.muted),
-        ))),
-        area,
-    );
+    frame.render_widget(Paragraph::new(hint_line(pairs, &sk)), area);
 }
 
 // -- Screen 1 ---------------------------------------------------------------
@@ -946,6 +1117,13 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &App) {
     // Which drawn row the focused field ended up on. Fields are skipped when
     // they do not apply, so this is not the cursor index.
     let mut focused_row = 0usize;
+    // Which drawn row each yes/no field landed on, so a real
+    // `tui_checkbox::Checkbox` marker can be painted over just its `[x]`/`[ ]`
+    // glyph once the row's on-screen position is known below — `field_value`
+    // still returns the same `checkbox()` text it always has (asserted
+    // byte-for-byte by `checkboxes_read_as_words_not_just_symbols`), and this
+    // only redraws the three characters of the marker itself.
+    let mut checkbox_rows: Vec<(usize, Field)> = Vec::new();
 
     for (index, field) in Field::ORDER.iter().enumerate() {
         let focused = index == app.field_cursor;
@@ -1040,6 +1218,13 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::styled(note, Style::new().fg(colour)));
         }
 
+        if matches!(
+            field,
+            Field::MadeForKids | Field::AutoStart | Field::AutoStop
+        ) {
+            checkbox_rows.push((lines.len(), *field));
+        }
+
         lines.push(Line::from(spans));
     }
 
@@ -1079,6 +1264,40 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &App) {
             .scroll((offset as u16, 0)),
         areas[0],
     );
+
+    // Paint a real checkbox marker over the `[x]`/`[ ]` this Paragraph just
+    // drew for each yes/no field, but only for whichever of them the scroll
+    // window currently shows — the row's column is fixed (past the marker
+    // column and the 24-wide label column) and its row is the same maths the
+    // scroll offset above already did.
+    for (row, field) in &checkbox_rows {
+        if *row < offset || *row >= offset + inner_height {
+            continue;
+        }
+        let value = match field {
+            Field::MadeForKids => app.made_for_kids,
+            Field::AutoStart => app.auto_start,
+            Field::AutoStop => app.auto_stop,
+            _ => unreachable!("checkbox_rows only ever holds these three fields"),
+        };
+        let glyph_rect = Rect {
+            x: areas[0].x.saturating_add(1 + 3 + 24),
+            y: areas[0].y.saturating_add(1 + (*row - offset) as u16),
+            width: 3,
+            height: 1,
+        };
+        if glyph_rect.x + glyph_rect.width <= frame.area().width
+            && glyph_rect.y < frame.area().height
+        {
+            frame.render_widget(
+                Checkbox::new("", value)
+                    .checked_symbol(tui_checkbox::symbols::CHECKED_X)
+                    .unchecked_symbol(tui_checkbox::symbols::UNCHECKED_SPACE)
+                    .checkbox_style(Style::new().fg(sk.foreground)),
+                glyph_rect,
+            );
+        }
+    }
 
     // The help text for whichever field is focused.
     let help = Paragraph::new(vec![
@@ -1319,11 +1538,6 @@ fn draw_dashboard(frame: &mut Frame, area: Rect, app: &App) {
         ])
     };
 
-    // Split the upper region again: one line for the banner, the rest for the
-    // per-platform panels. Named distinctly so it cannot shadow `areas`, whose
-    // second slot is still the log strip at the bottom.
-    let upper = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(areas[0]);
-
     // The total across every platform. Both report a viewer count and the
     // dashboard made the reader add them up — while "how many people are
     // watching" is the single number a multistreamer wants, and the whole
@@ -1347,7 +1561,49 @@ fn draw_dashboard(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
+    // A slice per platform with a live viewer count, gated the same way the
+    // summed total just above already is: one platform's share of itself is
+    // not a chart, so this only ever appears alongside the total it is a
+    // picture of.
+    let slices: Vec<PieSlice> = if counted > 1 {
+        live.iter()
+            .filter_map(|platform| app.stats_for(*platform).map(|stats| (*platform, stats)))
+            .filter(|(_, stats)| stats.live && stats.error.is_none())
+            .filter_map(|(platform, stats)| stats.viewers.map(|viewers| (platform, viewers)))
+            .map(|(platform, viewers)| {
+                PieSlice::new(platform.label(), viewers as f64, platform_color(platform))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Split the upper region again: one line for the banner, an optional row
+    // for the viewer-share chart, and the rest for the per-platform panels.
+    // Named distinctly so it cannot shadow `areas`, whose second slot is
+    // still the log strip at the bottom.
+    let upper = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(if slices.is_empty() { 0 } else { 7 }),
+        Constraint::Min(0),
+    ])
+    .split(areas[0]);
+
     frame.render_widget(Paragraph::new(banner), upper[0]);
+
+    if !slices.is_empty() {
+        let chart = PieChart::new(slices)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(sk.border))
+                    .title(" Viewer share "),
+            )
+            .show_legend(true)
+            .show_percentages(true);
+        frame.render_widget(chart, upper[1]);
+    }
 
     // Give each platform an equal share of the width, side by side.
     let columns = Layout::horizontal(
@@ -1355,7 +1611,7 @@ fn draw_dashboard(frame: &mut Frame, area: Rect, app: &App) {
             .map(|_| Constraint::Ratio(1, live.len() as u32))
             .collect::<Vec<_>>(),
     )
-    .split(upper[1]);
+    .split(upper[2]);
 
     for (index, platform) in live.iter().enumerate() {
         draw_platform_panel(frame, columns[index], app, *platform);
@@ -1378,10 +1634,7 @@ fn draw_platform_panel(frame: &mut Frame, area: Rect, app: &App, platform: Platf
         }
         Some(result) => match &result.outcome {
             Err(err) => {
-                lines.push(Line::from(Span::styled(
-                    "FAILED",
-                    Style::new().fg(sk.error).add_modifier(Modifier::BOLD),
-                )));
+                lines.push(Line::from(style_kit::badge("FAILED", sk.error, &sk)));
                 lines.push(Line::from(""));
                 for chunk in err.lines() {
                     lines.push(Line::from(Span::styled(
@@ -1391,10 +1644,12 @@ fn draw_platform_panel(frame: &mut Frame, area: Rect, app: &App, platform: Platf
                 }
             }
             Ok(outcome) => {
-                lines.push(Line::from(Span::styled(
-                    "READY — you can start streaming in OBS",
+                let mut ready = style_kit::badge("READY", sk.success, &sk);
+                ready.push(Span::styled(
+                    " — you can start streaming in OBS",
                     Style::new().fg(sk.success).add_modifier(Modifier::BOLD),
-                )));
+                ));
+                lines.push(Line::from(ready));
                 lines.push(Line::from(""));
 
                 if let Some(url) = &outcome.watch_url {
@@ -1463,7 +1718,12 @@ fn draw_platform_panel(frame: &mut Frame, area: Rect, app: &App, platform: Platf
         } else {
             let status = if stats.live { "live" } else { "offline" };
             let status_colour = if stats.live { sk.success } else { sk.muted };
-            lines.push(field_line("Status", status, status_colour));
+            let mut status_line = vec![Span::styled(
+                format!("{:<9}", "Status"),
+                Style::new().fg(sk.muted),
+            )];
+            status_line.extend(style_kit::badge(status, status_colour, &sk));
+            lines.push(Line::from(status_line));
 
             if let Some(viewers) = stats.viewers {
                 lines.push(field_line("Viewers", &viewers.to_string(), sk.foreground));
@@ -1550,6 +1810,19 @@ fn draw_log(frame: &mut Frame, area: Rect, app: &App) {
             ])
         })
         .collect();
+
+    // An empty box says nothing about whether that is because nothing has
+    // happened yet or because something is broken. Mirrors `obs_tab.rs`'s
+    // `empty_note`: say what an empty panel means instead of leaving it
+    // looking like a fault.
+    let lines = if lines.is_empty() {
+        vec![Line::from(Span::styled(
+            "Nothing here yet — actions you take will show up in this log.",
+            Style::new().fg(sk.muted),
+        ))]
+    } else {
+        lines
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
